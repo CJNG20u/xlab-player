@@ -1,4 +1,5 @@
 # xlabplayer
+<img width="1675" height="1242" alt="image" src="https://github.com/user-attachments/assets/efa0b57e-3fb8-4ab4-bbf8-569100b399e4" />
 
 Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dlp search, inline audio preview, and automatic metadata tagging.
 
