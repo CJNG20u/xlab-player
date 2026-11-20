@@ -19,8 +19,8 @@ Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dl
 ### 1. Clone & Configure
 
 ```bash
-git clone https://github.com/CJNG20u/xlab-player.git
-cd xlab-player
+git clone https://github.com/CJNG20u/xlab-player.git /opt/xlab-playercd xlab-player
+cd /opt/xlab-player
 cp .env.example .env
 ```
 
@@ -32,9 +32,10 @@ openssl rand -hex 32
 
 Open `.env` and set `JWT_SECRET`, `COOKIE_SECURE` (`true` if behind an HTTPS reverse proxy, `false` for plain HTTP on a local LAN), and `PUID`/`PGID` to match your host/NAS user.
 
-### 2. Start the Container
+### 2.Point docker-compose.yml to /music & Build Fresh
 
 ```bash
+sed -i 's|- ./music_library:/PATH|- /music:/PATH|g' docker-compose.yml
 docker compose up -d --build
 ```
 
