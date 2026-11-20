@@ -12,6 +12,74 @@ import {libraryRouter} from './server/routes/libraryRoutes.ts';
 const PORT = Number(process.env.PORT) || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
 
+const PUBLIC_PWA_ASSETS: Record<
+  string,
+  {fileName: string; contentType: string; cacheControl: string}
+> = {
+  '/apple-touch-icon.png': {
+    fileName: 'apple-touch-icon.png',
+    contentType: 'image/png',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/apple-touch-icon-precomposed.png': {
+    fileName: 'apple-touch-icon.png',
+    contentType: 'image/png',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/icon-192.png': {
+    fileName: 'icon-192.png',
+    contentType: 'image/png',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/icon-512.png': {
+    fileName: 'icon-512.png',
+    contentType: 'image/png',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/icon-96.png': {
+    fileName: 'icon-96.png',
+    contentType: 'image/png',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/icon.svg': {
+    fileName: 'icon.svg',
+    contentType: 'image/svg+xml; charset=utf-8',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/manifest.webmanifest': {
+    fileName: 'manifest.webmanifest',
+    contentType: 'application/manifest+json; charset=utf-8',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/manifest.json': {
+    fileName: 'manifest.webmanifest',
+    contentType: 'application/manifest+json; charset=utf-8',
+    cacheControl: 'public, max-age=86400',
+  },
+  '/sw.js': {
+    fileName: 'sw.js',
+    contentType: 'application/javascript; charset=utf-8',
+    cacheControl: 'public, max-age=86400',
+  },
+};
+
+function resolvePublicPwaAssetPath(fileName: string): string | null {
+  const cwd = process.cwd();
+  const candidates = IS_PROD
+    ? [path.resolve(cwd, 'dist', fileName), path.resolve(cwd, 'public', fileName)]
+    : [
+        path.resolve(cwd, 'public', fileName),
+        path.resolve(cwd, 'dev-dist', fileName),
+        path.resolve(cwd, 'dist', fileName),
+      ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 async function startServer() {
   const app = express();
   const httpServer = http.createServer(app);
@@ -20,6 +88,23 @@ async function startServer() {
   app.use(cookieParser());
   app.use(express.json({limit: '10mb'}));
   app.use(express.urlencoded({extended: true}));
+
+  // Public unauthenticated PWA assets (served before any auth middleware or SPA fallback)
+  app.get(Object.keys(PUBLIC_PWA_ASSETS), (req, res, next) => {
+    const asset = PUBLIC_PWA_ASSETS[req.path];
+    if (!asset) {
+      next();
+      return;
+    }
+    const absPath = resolvePublicPwaAssetPath(asset.fileName);
+    if (!absPath) {
+      next();
+      return;
+    }
+    res.setHeader('Content-Type', asset.contentType);
+    res.setHeader('Cache-Control', asset.cacheControl);
+    res.sendFile(absPath);
+  });
 
   // API routes
   app.use('/api/auth', authRouter);
