@@ -39,9 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # Install latest official yt-dlp release (uses python3; works on amd64 and arm64)
+# and configure system-wide Node.js runtime for YouTube signature/n-challenge extraction
 RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp \
-  && chmod a+rx /usr/local/bin/yt-dlp
+  && chmod a+rx /usr/local/bin/yt-dlp \
+  && printf '%s\n' '--js-runtimes node' > /etc/yt-dlp.conf
 
 # Copy manifests, full node_modules (including tsx for `npm start`), server, and built frontend
 COPY --from=builder /app/package.json /app/package-lock.json* ./

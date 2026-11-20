@@ -140,7 +140,7 @@ function buildResilienceArgs(
   options: {includeSleep?: boolean} = {}
 ): string[] {
   const includeSleep = options.includeSleep ?? true;
-  const args: string[] = [];
+  const args: string[] = ['--js-runtimes', 'node'];
   if (tempCookiePath) {
     args.push('--cookies', tempCookiePath);
   }
