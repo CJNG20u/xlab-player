@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --bg-base: #121212;
+    --bg-elevated: #181818;
+    --bg-hover: #282828;
+    --text-primary: #ffffff;
+    --text-secondary: #b3b3b3;
+    --text-muted: #6a6a6a;
+    --accent: #1db954;
+    --accent-hover: #1ed760;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    background-color: #121212;
+    color: #ffffff;
+    font-family: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  .font-display {
+    font-family: "Plus Jakarta Sans", "DM Sans", sans-serif;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  }
+}
+
+/* Custom sleek dark scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Spotify-style scrubber & volume range inputs */
+input[type="range"].xlab-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].xlab-slider:focus {
+  outline: none;
+}
+
+input[type="range"].xlab-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+}
+
+input[type="range"].xlab-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  width: 12px;
+  border-radius: 9999px;
+  background: #ffffff;
+  margin-top: -4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.xlab-slider-group:hover input[type="range"].xlab-slider::-webkit-slider-thumb,
+input[type="range"].xlab-slider:focus-visible::-webkit-slider-thumb,
+input[type="range"].xlab-slider.always-thumb::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+input[type="range"].xlab-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 9999px;
+}
+
+input[type="range"].xlab-slider::-moz-range-thumb {
+  height: 12px;
+  width: 12px;
+  border: none;
+  border-radius: 9999px;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.bottom-above-nav {
+  bottom: calc(66px + env(safe-area-inset-bottom, 0px));
+}
+
+.pb-mobile-stage {
+  padding-bottom: calc(9rem + env(safe-area-inset-bottom, 0px));
+}
+

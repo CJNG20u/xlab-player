@@ -1,0 +1,564 @@
+import {
+  Check,
+  Clock,
+  Heart,
+  ListPlus,
+  MoreHorizontal,
+  Pause,
+  Play,
+  Plus,
+  Trash2,
+} from 'lucide-react';
+import React, {useEffect, useRef, useState} from 'react';
+import {useAuth} from '../context/AuthContext';
+import {usePlayer} from '../context/PlayerContext';
+import {apiFetch, formatDuration} from '../lib/api';
+import type {Playlist, Track} from '../types';
+import {AlbumArt} from './AlbumArt';
+import {ConfirmDeleteModal} from './ConfirmDeleteModal';
+
+interface TrackTableProps {
+  tracks: Track[];
+  playlists: Playlist[];
+  playlistId?: number;
+  selectionMode?: boolean;
+  selectedIds?: Set<number>;
+  onToggleSelect?: (trackId: number) => void;
+  onEnterSelectionMode?: (initialTrackId: number) => void;
+  onArtistClick?: (artist: string) => void;
+  onTrackDeleted?: (trackId: number) => void;
+  onRemovedFromPlaylist?: (trackId: number) => void;
+  onLikeToggled?: (trackId: number, liked: boolean) => void;
+}
+
+export const TrackTable: React.FC<TrackTableProps> = ({
+  tracks,
+  playlists,
+  playlistId,
+  selectionMode = false,
+  selectedIds,
+  onToggleSelect,
+  onEnterSelectionMode,
+  onArtistClick,
+  onTrackDeleted,
+  onRemovedFromPlaylist,
+  onLikeToggled,
+}) => {
+  const {user} = useAuth();
+  const {
+    currentTrack,
+    isPlaying,
+    playTrack,
+    togglePlay,
+    addToQueue,
+    playNextInQueue,
+    toggleLikeTrack,
+    handleDeletedTracks,
+  } = usePlayer();
+
+  const canDeleteTracks = user?.role === 'admin' || Boolean(user?.can_download);
+
+  const [menuTrackId, setMenuTrackId] = useState<number | null>(null);
+  const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [pendingDeleteTrack, setPendingDeleteTrack] = useState<Track | null>(null);
+  const [deletingTrack, setDeletingTrack] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const touchStartPosRef = useRef<{x: number; y: number} | null>(null);
+  const didLongPressRef = useRef(false);
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuTrackId(null);
+        setShowPlaylistSubmenu(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  useEffect(() => {
+    if (selectionMode) {
+      setMenuTrackId(null);
+      setShowPlaylistSubmenu(false);
+    }
+  }, [selectionMode]);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current !== null) {
+        window.clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
+
+  const flashToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2600);
+  };
+
+  const clearLongPress = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    touchStartPosRef.current = null;
+  };
+
+  const handleTouchStart = (e: React.TouchEvent, trackId: number) => {
+    if (selectionMode || !onEnterSelectionMode || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    touchStartPosRef.current = {x: touch.clientX, y: touch.clientY};
+    didLongPressRef.current = false;
+    clearLongPress();
+    touchStartPosRef.current = {x: touch.clientX, y: touch.clientY};
+    longPressTimerRef.current = window.setTimeout(() => {
+      didLongPressRef.current = true;
+      longPressTimerRef.current = null;
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        try {
+          navigator.vibrate(15);
+        } catch {
+          // ignore
+        }
+      }
+      onEnterSelectionMode(trackId);
+    }, 500);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartPosRef.current || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartPosRef.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPosRef.current.y);
+    if (dx > 10 || dy > 10) {
+      clearLongPress();
+    }
+  };
+
+  const handleAddToPlaylist = async (targetPlaylistId: number, trackId: number, pName: string) => {
+    try {
+      await apiFetch(`/api/playlists/${targetPlaylistId}/tracks`, {
+        method: 'POST',
+        body: JSON.stringify({trackId}),
+      });
+      flashToast(`Added to ${pName}`);
+    } catch (err) {
+      flashToast(err instanceof Error ? err.message : 'Failed to add to playlist');
+    } finally {
+      setMenuTrackId(null);
+      setShowPlaylistSubmenu(false);
+    }
+  };
+
+  const handleRemoveFromPlaylist = async (trackId: number) => {
+    if (!playlistId) return;
+    try {
+      await apiFetch(`/api/playlists/${playlistId}/tracks/${trackId}`, {method: 'DELETE'});
+      onRemovedFromPlaylist?.(trackId);
+      flashToast('Removed from playlist');
+    } catch (err) {
+      flashToast(err instanceof Error ? err.message : 'Failed to remove track');
+    } finally {
+      setMenuTrackId(null);
+    }
+  };
+
+  const handleConfirmPermanentDelete = async () => {
+    if (!pendingDeleteTrack) return;
+    setDeletingTrack(true);
+    setDeleteError(null);
+    try {
+      await apiFetch(`/api/tracks/${pendingDeleteTrack.id}`, {
+        method: 'DELETE',
+      });
+      const deletedId = pendingDeleteTrack.id;
+      const deletedTitle = pendingDeleteTrack.title;
+      handleDeletedTracks([deletedId]);
+      onTrackDeleted?.(deletedId);
+      setPendingDeleteTrack(null);
+      flashToast(`Deleted "${deletedTitle}" permanently`);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Could not delete track');
+    } finally {
+      setDeletingTrack(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      {toast && (
+        <div className="fixed bottom-28 md:bottom-24 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[#1DB954] px-4 py-2 text-sm font-semibold text-black shadow-xl">
+          {toast}
+        </div>
+      )}
+
+      {/* Desktop Column Header */}
+      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_88px_40px] items-center gap-4 px-4 py-2 border-b border-white/10 text-xs font-medium text-[#B3B3B3]">
+        <span className="text-center">{selectionMode ? '' : '#'}</span>
+        <span>Title</span>
+        <span>Album</span>
+        <span className="flex justify-end pr-2">
+          <Clock className="w-4 h-4" />
+        </span>
+        <span />
+      </div>
+
+      {/* Rows */}
+      <div className="divide-y divide-white/[0.03] md:divide-y-0 mt-1">
+        {tracks.map((track, idx) => {
+          const isActive = currentTrack?.id === track.id;
+          const isMenuOpen = menuTrackId === track.id;
+          const isSelected = Boolean(selectionMode && selectedIds?.has(track.id));
+
+          return (
+            <div
+              key={`${track.id}-${idx}`}
+              className={`group relative grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_88px_40px] items-center gap-3 md:gap-4 rounded-md px-3 md:px-4 py-2.5 transition-colors select-none ${
+                isSelected
+                  ? 'bg-[#1DB954]/12 ring-1 ring-[#1DB954]/30'
+                  : isActive
+                    ? 'bg-[#282828]/80'
+                    : 'hover:bg-[#282828]'
+              } ${selectionMode ? 'cursor-pointer' : ''}`}
+              onTouchStart={(e) => handleTouchStart(e, track.id)}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={clearLongPress}
+              onTouchCancel={clearLongPress}
+              onClick={() => {
+                if (didLongPressRef.current) {
+                  didLongPressRef.current = false;
+                  return;
+                }
+                if (selectionMode) {
+                  onToggleSelect?.(track.id);
+                }
+              }}
+              onDoubleClick={() => {
+                if (!selectionMode) playTrack(track, tracks);
+              }}
+            >
+              {/* Index / Play button OR Checkbox (Desktop) */}
+              <div className="hidden md:flex items-center justify-center">
+                {selectionMode ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleSelect?.(track.id);
+                    }}
+                    className={`flex h-5 w-5 items-center justify-center rounded border transition-colors ${
+                      isSelected
+                        ? 'bg-[#1DB954] border-[#1DB954] text-black'
+                        : 'border-white/35 bg-transparent hover:border-white'
+                    }`}
+                    aria-label={isSelected ? `Deselect ${track.title}` : `Select ${track.title}`}
+                    aria-pressed={isSelected}
+                  >
+                    {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isActive) togglePlay();
+                      else playTrack(track, tracks);
+                    }}
+                    className="flex h-8 w-8 items-center justify-center text-[#B3B3B3] hover:text-white"
+                    aria-label={isActive && isPlaying ? 'Pause' : `Play ${track.title}`}
+                  >
+                    <span
+                      className={`font-mono text-sm tabular-nums group-hover:hidden ${
+                        isActive ? 'text-[#1DB954] font-semibold' : ''
+                      }`}
+                    >
+                      {idx + 1}
+                    </span>
+                    <span className="hidden group-hover:flex items-center justify-center text-white">
+                      {isActive && isPlaying ? (
+                        <Pause className="w-4 h-4 fill-current" />
+                      ) : (
+                        <Play className="w-4 h-4 fill-current ml-0.5" />
+                      )}
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* Cover + Title + Artist (plus Mobile Checkbox in selection mode) */}
+              <div className="flex items-center gap-3 min-w-0">
+                {selectionMode && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleSelect?.(track.id);
+                    }}
+                    className={`md:hidden flex h-6 w-6 shrink-0 items-center justify-center rounded border transition-colors ${
+                      isSelected
+                        ? 'bg-[#1DB954] border-[#1DB954] text-black'
+                        : 'border-white/35 bg-transparent'
+                    }`}
+                    aria-label={isSelected ? `Deselect ${track.title}` : `Select ${track.title}`}
+                    aria-pressed={isSelected}
+                  >
+                    {isSelected && <Check className="w-4 h-4 stroke-[3]" />}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    if (didLongPressRef.current) {
+                      didLongPressRef.current = false;
+                      e.stopPropagation();
+                      return;
+                    }
+                    if (selectionMode) {
+                      e.stopPropagation();
+                      onToggleSelect?.(track.id);
+                      return;
+                    }
+                    if (isActive) togglePlay();
+                    else playTrack(track, tracks);
+                  }}
+                  className="relative shrink-0"
+                  aria-label={selectionMode ? `Select ${track.title}` : `Play ${track.title}`}
+                >
+                  <AlbumArt
+                    coverFile={track.cover_file}
+                    alt={track.title}
+                    color={track.dominant_color}
+                    className="w-11 h-11 md:w-10 md:h-10 rounded"
+                    iconSize={16}
+                  />
+                </button>
+                <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      if (didLongPressRef.current) {
+                        didLongPressRef.current = false;
+                        e.stopPropagation();
+                        return;
+                      }
+                      if (selectionMode) {
+                        e.stopPropagation();
+                        onToggleSelect?.(track.id);
+                        return;
+                      }
+                      playTrack(track, tracks);
+                    }}
+                    className={`block max-w-full truncate text-left text-sm font-medium ${
+                      isActive ? 'text-[#1DB954]' : 'text-white'
+                    }`}
+                  >
+                    {track.title}
+                  </button>
+                  <div className="flex items-center gap-1.5 text-xs text-[#B3B3B3] truncate">
+                    {onArtistClick && !selectionMode ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onArtistClick(track.artist);
+                        }}
+                        className="truncate hover:text-white hover:underline"
+                      >
+                        {track.artist}
+                      </button>
+                    ) : (
+                      <span className="truncate">{track.artist}</span>
+                    )}
+                    <span className="md:hidden text-[#6A6A6A]">·</span>
+                    <span className="md:hidden truncate text-[#6A6A6A]">{track.album}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Album (Desktop) */}
+              <div className="hidden md:block min-w-0">
+                <p className="truncate text-sm text-[#B3B3B3]">{track.album}</p>
+              </div>
+
+              {/* Like + Duration */}
+              <div className="flex items-center justify-end gap-2">
+                {!selectionMode && (
+                  <button
+                    type="button"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      const res = await toggleLikeTrack(track.id);
+                      if (res !== null) onLikeToggled?.(track.id, res);
+                    }}
+                    className={`flex h-9 w-9 md:h-8 md:w-8 items-center justify-center rounded-full transition-colors ${
+                      track.liked
+                        ? 'text-[#1DB954]'
+                        : 'text-[#6A6A6A] md:opacity-0 md:group-hover:opacity-100 hover:text-white'
+                    }`}
+                    aria-label={track.liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
+                  >
+                    <Heart className={`w-4 h-4 ${track.liked ? 'fill-current' : ''}`} />
+                  </button>
+                )}
+                <span className="hidden md:inline font-mono text-xs tabular-nums text-[#B3B3B3] w-11 text-right">
+                  {formatDuration(track.duration)}
+                </span>
+
+                {/* Context menu button on mobile */}
+                {!selectionMode && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowPlaylistSubmenu(false);
+                      setMenuTrackId(isMenuOpen ? null : track.id);
+                    }}
+                    className="md:hidden flex h-9 w-9 items-center justify-center rounded-full text-[#B3B3B3] hover:text-white"
+                    aria-label="Track options"
+                  >
+                    <MoreHorizontal className="w-5 h-5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Context menu trigger (Desktop) */}
+              <div className="hidden md:flex justify-end relative">
+                {!selectionMode && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowPlaylistSubmenu(false);
+                      setMenuTrackId(isMenuOpen ? null : track.id);
+                    }}
+                    className="flex h-8 w-8 items-center justify-center rounded-full text-[#B3B3B3] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-white transition-opacity"
+                    aria-label="Track options"
+                  >
+                    <MoreHorizontal className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Dropdown Menu */}
+              {isMenuOpen && !selectionMode && (
+                <div
+                  ref={menuRef}
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute right-4 top-12 z-40 w-56 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playNextInQueue(track);
+                      setMenuTrackId(null);
+                      flashToast('Playing next');
+                    }}
+                    className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                  >
+                    <Play className="w-4 h-4 text-[#B3B3B3]" />
+                    Play Next
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      addToQueue(track);
+                      setMenuTrackId(null);
+                      flashToast('Added to queue');
+                    }}
+                    className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                  >
+                    <ListPlus className="w-4 h-4 text-[#B3B3B3]" />
+                    Add to Queue
+                  </button>
+
+                  <div className="my-1 border-t border-white/10" />
+
+                  <button
+                    type="button"
+                    onClick={() => setShowPlaylistSubmenu((s) => !s)}
+                    className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <Plus className="w-4 h-4 text-[#B3B3B3]" />
+                      Add to Playlist
+                    </span>
+                    <span className="text-xs text-[#B3B3B3]">{showPlaylistSubmenu ? '▾' : '▸'}</span>
+                  </button>
+
+                  {showPlaylistSubmenu && (
+                    <div className="mt-1 max-h-40 overflow-y-auto rounded bg-[#181818] p-1 space-y-0.5">
+                      {playlists.length === 0 ? (
+                        <p className="px-2.5 py-1.5 text-xs text-[#6A6A6A]">No playlists yet</p>
+                      ) : (
+                        playlists.map((pl) => (
+                          <button
+                            key={pl.id}
+                            type="button"
+                            onClick={() => void handleAddToPlaylist(pl.id, track.id, pl.name)}
+                            className="block w-full truncate rounded px-2.5 py-1.5 text-left text-xs text-[#B3B3B3] hover:bg-[#282828] hover:text-white"
+                          >
+                            {pl.name}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+
+                  {playlistId && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRemoveFromPlaylist(track.id)}
+                      className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-amber-300 hover:bg-white/10"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Remove from Playlist
+                    </button>
+                  )}
+
+                  {canDeleteTracks && (
+                    <>
+                      <div className="my-1 border-t border-white/10" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMenuTrackId(null);
+                          setDeleteError(null);
+                          setPendingDeleteTrack(track);
+                        }}
+                        className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-red-400 hover:bg-white/10"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        Delete Permanently
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <ConfirmDeleteModal
+        open={Boolean(pendingDeleteTrack)}
+        count={pendingDeleteTrack ? 1 : 0}
+        singleTitle={pendingDeleteTrack ? `${pendingDeleteTrack.title} — ${pendingDeleteTrack.artist}` : undefined}
+        deleting={deletingTrack}
+        error={deleteError}
+        onCancel={() => {
+          if (!deletingTrack) {
+            setPendingDeleteTrack(null);
+            setDeleteError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmPermanentDelete()}
+      />
+    </div>
+  );
+};
+

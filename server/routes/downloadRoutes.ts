@@ -1,0 +1,174 @@
+import {Router} from 'express';
+import fs from 'fs';
+import multer from 'multer';
+import path from 'path';
+import {type AuthRequest, requireDownloadPermission} from '../auth.ts';
+import {db, getMusicDir} from '../db.ts';
+import {
+  downloadEvents,
+  enqueueDownloadJob,
+  fetchMetadataPreview,
+  getDownloadJobs,
+  sanitizeNasSegment,
+  spawnAudioPreviewStream,
+  type DownloadJobRow,
+} from '../downloader.ts';
+import {AUDIO_EXTENSIONS, indexSingleFile} from '../scanner.ts';
+
+export const downloadRouter = Router();
+
+const uploadStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    const uploadsDir = path.join(getMusicDir(), 'Uploads');
+    try {
+      fs.mkdirSync(uploadsDir, {recursive: true});
+      cb(null, uploadsDir);
+    } catch (err) {
+      cb(err as Error, uploadsDir);
+    }
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const base = sanitizeNasSegment(path.basename(file.originalname, ext), 'upload');
+    const uploadsDir = path.join(getMusicDir(), 'Uploads');
+    let candidate = `${base}${ext}`;
+    let counter = 1;
+    while (fs.existsSync(path.join(uploadsDir, candidate))) {
+      candidate = `${base} (${counter++})${ext}`;
+    }
+    cb(null, candidate);
+  },
+});
+
+const audioUpload = multer({
+  storage: uploadStorage,
+  limits: {fileSize: 250 * 1024 * 1024, files: 25},
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (AUDIO_EXTENSIONS.has(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Unsupported audio file format: ${ext}`));
+    }
+  },
+});
+
+
+
+
+downloadRouter.get("/preview-audio", requireDownloadPermission, (req, res) => { const videoUrl = String(req.query.url || "").trim(); console.log("[preview-audio] request:", videoUrl); if (!/^https?:\/\//i.test(videoUrl)) { res.status(400).json({error: "Invalid preview URL"}); return; } const {stream, cleanup} = spawnAudioPreviewStream(videoUrl); let sent = false; stream.on("data", (chunk) => { if (!sent) { sent = true; res.setHeader("Content-Type", "audio/mpeg"); res.setHeader("Cache-Control", "no-store"); } if (!res.writableEnded) res.write(chunk); }); stream.on("end", () => { cleanup(); if (!sent) { res.status(502).json({error: "Failed to stream audio preview"}); return; } if (!res.writableEnded) res.end(); }); stream.on("error", () => { cleanup(); if (!res.writableEnded) res.end(); }); req.on("close", () => cleanup()); });
+
+downloadRouter.post('/metadata', requireDownloadPermission, async (req, res) => {
+  try {
+    const query = String(req.body?.query || '');
+    const preview = await fetchMetadataPreview(query);
+    res.json({
+      ...preview,
+      musicDir: getMusicDir(),
+    });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Failed to fetch metadata',
+    });
+  }
+});
+
+downloadRouter.post('/start', requireDownloadPermission, (req: AuthRequest, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [req.body];
+  const created: DownloadJobRow[] = [];
+
+  for (const item of items) {
+    if (!item?.url) continue;
+    const job = enqueueDownloadJob({
+      userId: req.user!.id,
+      url: String(item.url),
+      title: String(item.title || 'Untitled').trim(),
+      artist: String(item.artist || 'Unknown Artist').trim(),
+      album: String(item.album || 'Singles').trim(),
+      format: item.format === 'opus' ? 'opus' : 'm4a',
+      thumbnailUrl: String(item.thumbnail_url || item.thumbnailUrl || ''),
+    });
+    created.push(job);
+  }
+
+  if (created.length === 0) {
+    res.status(400).json({error: 'No valid download items provided'});
+    return;
+  }
+
+  res.status(201).json({jobs: created});
+});
+
+downloadRouter.get('/jobs', requireDownloadPermission, (_req, res) => {
+  res.json({jobs: getDownloadJobs(), musicDir: getMusicDir()});
+});
+
+downloadRouter.delete('/jobs/:id', requireDownloadPermission, (req, res) => {
+  const id = Number(req.params.id);
+  db.prepare('DELETE FROM download_jobs WHERE id = ?').run(id);
+  downloadEvents.emit('deleted', {id});
+  res.json({ok: true});
+});
+
+downloadRouter.get('/events', requireDownloadPermission, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  send('init', {jobs: getDownloadJobs()});
+
+  const onJob = (job: DownloadJobRow) => send('job', job);
+  const onDeleted = (payload: {id: number}) => send('deleted', payload);
+
+  downloadEvents.on('job', onJob);
+  downloadEvents.on('deleted', onDeleted);
+
+  const keepAlive = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    downloadEvents.off('job', onJob);
+    downloadEvents.off('deleted', onDeleted);
+  });
+});
+
+downloadRouter.post('/upload', requireDownloadPermission, (req: AuthRequest, res) => {
+  audioUpload.array('files', 25)(req, res, async (err) => {
+    if (err) {
+      res.status(400).json({error: err instanceof Error ? err.message : 'Upload failed'});
+      return;
+    }
+
+    const files = (req.files as Express.Multer.File[]) || [];
+    if (files.length === 0) {
+      res.status(400).json({error: 'No audio files uploaded'});
+      return;
+    }
+
+    const musicDir = getMusicDir();
+    const indexedTracks = [];
+    for (const file of files) {
+      try {
+        const result = await indexSingleFile(file.path, musicDir);
+        const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(result.id);
+        if (track) indexedTracks.push(track);
+      } catch {
+        // Continue indexing remaining files
+      }
+    }
+
+    res.status(201).json({
+      uploadedCount: files.length,
+      tracks: indexedTracks,
+      destination: path.join(musicDir, 'Uploads'),
+    });
+  });
+});

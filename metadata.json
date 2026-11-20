@@ -1,0 +1,8 @@
+{
+  "name": "xlabplayer",
+  "description": "Self-hosted music streaming and downloading Progressive Web App for Proxmox LXC and NAS libraries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
