@@ -1,22 +1,27 @@
+import 'dotenv/config';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
 export const ROOT_DIR = process.cwd();
-export const DATA_DIR = path.resolve(ROOT_DIR, 'data');
+export const DATA_DIR = process.env.DATA_DIR?.trim()
+  ? path.resolve(process.env.DATA_DIR.trim())
+  : path.resolve(ROOT_DIR, 'data');
 export const COVERS_DIR = path.resolve(DATA_DIR, 'covers');
 export const SECRETS_DIR = path.resolve(DATA_DIR, 'secrets');
 export const COOKIES_FILE = path.resolve(SECRETS_DIR, 'cookies.txt');
-export const DEFAULT_MUSIC_DIR = process.env.MUSIC_DIR
-  ? path.resolve(process.env.MUSIC_DIR)
+export const DEFAULT_MUSIC_DIR = process.env.MUSIC_DIR?.trim()
+  ? path.resolve(process.env.MUSIC_DIR.trim())
   : path.resolve(ROOT_DIR, 'music_library');
+export const DEFAULT_YTDLP_PATH = process.env.YTDLP_PATH?.trim() || 'yt-dlp';
+export const DEFAULT_FFMPEG_PATH = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 
 // Ensure core runtime directories exist
 for (const dir of [DATA_DIR, COVERS_DIR, SECRETS_DIR]) {
   fs.mkdirSync(dir, {recursive: true});
 }
-if (!process.env.MUSIC_DIR) {
+if (!process.env.MUSIC_DIR?.trim()) {
   fs.mkdirSync(DEFAULT_MUSIC_DIR, {recursive: true});
 }
 
@@ -134,8 +139,8 @@ db.exec(
 // Seed default settings on first boot
 const defaultSettings: Record<string, string> = {
   music_dir: DEFAULT_MUSIC_DIR,
-  ytdlp_path: process.env.YTDLP_PATH || 'yt-dlp',
-  ffmpeg_path: process.env.FFMPEG_PATH || 'ffmpeg',
+  ytdlp_path: DEFAULT_YTDLP_PATH,
+  ffmpeg_path: DEFAULT_FFMPEG_PATH,
   ytdlp_remote_components: 'true',
   ytdlp_player_client: 'web,mweb,android_vr',
   ytdlp_sleep_interval: '2',
@@ -187,7 +192,15 @@ export function getAllSettings(): Record<string, string> {
 }
 
 export function getMusicDir(): string {
-  return getSetting('music_dir', DEFAULT_MUSIC_DIR);
+  return getSetting('music_dir', DEFAULT_MUSIC_DIR).trim() || DEFAULT_MUSIC_DIR;
+}
+
+export function getYtdlpPath(): string {
+  return getSetting('ytdlp_path', DEFAULT_YTDLP_PATH).trim() || DEFAULT_YTDLP_PATH;
+}
+
+export function getFfmpegPath(): string {
+  return getSetting('ffmpeg_path', DEFAULT_FFMPEG_PATH).trim() || DEFAULT_FFMPEG_PATH;
 }
 
 export function getJwtSecret(): string {

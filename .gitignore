@@ -1,10 +1,13 @@
 node_modules/
 build/
 dist/
+dev-dist/
 coverage/
-.DS_Store
-*.log
-.env*
-!.env.example
 data/
 music_library/
+.env
+.env.local
+.env.*
+!.env.example
+.DS_Store
+*.log

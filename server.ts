@@ -1,5 +1,5 @@
+import 'dotenv/config';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
 import http from 'http';
@@ -8,8 +8,6 @@ import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
 import {downloadRouter} from './server/routes/downloadRoutes.ts';
 import {libraryRouter} from './server/routes/libraryRoutes.ts';
-
-dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';

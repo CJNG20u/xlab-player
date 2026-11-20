@@ -1,0 +1,15 @@
+node_modules
+dist
+dev-dist
+data
+music_library
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+bun.lock
+deno.lock
+*.log
+.DS_Store
+coverage

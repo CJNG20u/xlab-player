@@ -1,0 +1,21 @@
+services:
+  xlabplayer:
+    build: .
+    # To pull a prebuilt image from GitHub Container Registry or Docker Hub instead of building locally,
+    # comment out `build: .` above and uncomment the line below:
+    # image: ghcr.io/youruser/xlabplayer:latest
+    container_name: xlabplayer
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env
+    volumes:
+      # Persistent SQLite database, extracted album covers, and cookies.txt
+      - ./data:/app/data
+      # Local music library directory
+      - ./music_library:/music
+      # To bind-mount an NFS/SMB NAS share already mounted on your Docker host,
+      # replace `./music_library:/music` above with your host mount point, e.g.:
+      # - /mnt/nas/music:/music
+      # Or mount read-only (streaming & scanning only; disables downloads/uploads/deletes):
+      # - /mnt/nas/music:/music:ro

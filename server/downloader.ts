@@ -5,7 +5,15 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {promisify} from 'util';
-import {COOKIES_FILE, db, getMusicDir, getSetting, setSetting} from './db.ts';
+import {
+  COOKIES_FILE,
+  db,
+  getFfmpegPath,
+  getMusicDir,
+  getSetting,
+  getYtdlpPath,
+  setSetting,
+} from './db.ts';
 import {indexSingleFile} from './scanner.ts';
 
 const execFileAsync = promisify(execFile);
@@ -59,8 +67,8 @@ export async function checkBinariesStatus(): Promise<{
   ffmpeg: {installed: boolean; version: string | null; path: string};
   cookies: {exists: boolean; status: string; testedAt: string; updatedAt: string | null};
 }> {
-  const ytdlpPath = getSetting('ytdlp_path', 'yt-dlp');
-  const ffmpegPath = getSetting('ffmpeg_path', 'ffmpeg');
+  const ytdlpPath = getYtdlpPath();
+  const ffmpegPath = getFfmpegPath();
 
   let ytdlpInstalled = false;
   let ytdlpVersion: string | null = null;
@@ -269,7 +277,7 @@ export async function fetchMetadataPreview(input: string): Promise<{
   playlistTitle: string | null;
   items: MetadataPreviewItem[];
 }> {
-  const ytdlpPath = getSetting('ytdlp_path', 'yt-dlp');
+  const ytdlpPath = getYtdlpPath();
   const trimmed = input.trim();
   if (!trimmed) {
     throw new Error('Please enter a YouTube URL or search query');
@@ -453,8 +461,8 @@ async function processDownloadQueue(): Promise<void> {
 }
 
 async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
-  const ytdlpPath = getSetting('ytdlp_path', 'yt-dlp');
-  const ffmpegPath = getSetting('ffmpeg_path', 'ffmpeg');
+  const ytdlpPath = getYtdlpPath();
+  const ffmpegPath = getFfmpegPath();
   const cropCover = getSetting('ytdlp_crop_cover', 'true') === 'true';
   const musicDir = getMusicDir();
 
@@ -644,7 +652,7 @@ export async function testCookiesFile(): Promise<{
     return {ok: false, status: 'missing', message: 'No cookies.txt file uploaded yet.'};
   }
 
-  const ytdlpPath = getSetting('ytdlp_path', 'yt-dlp');
+  const ytdlpPath = getYtdlpPath();
   const tempCookiePath = createTempCookiesCopy();
   try {
     const args = [
@@ -694,7 +702,7 @@ export async function updateYtdlpBinary(): Promise<{
   output: string;
   version: string | null;
 }> {
-  const ytdlpPath = getSetting('ytdlp_path', 'yt-dlp');
+  const ytdlpPath = getYtdlpPath();
   try {
     const {stdout, stderr} = await execFileAsync(ytdlpPath, ['-U'], {timeout: 60000});
     const status = await checkBinariesStatus();
@@ -716,4 +724,69 @@ export async function updateYtdlpBinary(): Promise<{
 }
 
 
-export function spawnAudioPreviewStream(videoUrl: string) { const ytdlpPath = getSetting("ytdlp_path", "/usr/local/bin/yt-dlp"); const ffmpegPath = getSetting("ffmpeg_path", "/usr/bin/ffmpeg"); const tempCookiePath = createTempCookiesCopy(); const ytArgs = ["-f", "bestaudio/best", "--no-playlist", "--no-warnings", "--quiet", ...buildResilienceArgs(tempCookiePath, {includeSleep: false}), "-o", "-", videoUrl]; const ytProc = spawn(ytdlpPath, ytArgs, {stdio: ["ignore", "pipe", "pipe"]}); const ffProc = spawn(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn", "-acodec", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1"], {stdio: ["pipe", "pipe", "pipe"]}); ytProc.stdout.pipe(ffProc.stdin); ytProc.stderr.on("data", d => console.error("[preview-ytdlp]", d.toString().trim())); ffProc.stderr.on("data", d => console.error("[preview-ffmpeg]", d.toString().trim())); ffProc.stdin.on("error", () => {}); let done = false; const cleanup = () => { if (done) return; done = true; try { if (!ytProc.killed) ytProc.kill("SIGTERM"); } catch {} try { if (!ffProc.killed) ffProc.kill("SIGTERM"); } catch {} if (tempCookiePath) { try { fs.unlinkSync(tempCookiePath); } catch {} } }; ytProc.on("error", cleanup); ffProc.on("exit", cleanup); ffProc.on("error", cleanup); return {stream: ffProc.stdout, cleanup}; }
+export function spawnAudioPreviewStream(videoUrl: string) {
+  const ytdlpPath = getYtdlpPath();
+  const ffmpegPath = getFfmpegPath();
+  const tempCookiePath = createTempCookiesCopy();
+  const ytArgs = [
+    '-f',
+    'bestaudio/best',
+    '--no-playlist',
+    '--no-warnings',
+    '--quiet',
+    ...buildResilienceArgs(tempCookiePath, {includeSleep: false}),
+    '-o',
+    '-',
+    videoUrl,
+  ];
+  const ytProc = spawn(ytdlpPath, ytArgs, {stdio: ['ignore', 'pipe', 'pipe']});
+  const ffProc = spawn(
+    ffmpegPath,
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      'pipe:0',
+      '-vn',
+      '-acodec',
+      'libmp3lame',
+      '-b:a',
+      '128k',
+      '-f',
+      'mp3',
+      'pipe:1',
+    ],
+    {stdio: ['pipe', 'pipe', 'pipe']}
+  );
+  ytProc.stdout.pipe(ffProc.stdin);
+  ytProc.stderr.on('data', (d) => console.error('[preview-ytdlp]', d.toString().trim()));
+  ffProc.stderr.on('data', (d) => console.error('[preview-ffmpeg]', d.toString().trim()));
+  ffProc.stdin.on('error', () => {});
+  let done = false;
+  const cleanup = () => {
+    if (done) return;
+    done = true;
+    try {
+      if (!ytProc.killed) ytProc.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+    try {
+      if (!ffProc.killed) ffProc.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+    if (tempCookiePath) {
+      try {
+        fs.unlinkSync(tempCookiePath);
+      } catch {
+        // ignore
+      }
+    }
+  };
+  ytProc.on('error', cleanup);
+  ffProc.on('exit', cleanup);
+  ffProc.on('error', cleanup);
+  return {stream: ffProc.stdout, cleanup};
+}
