@@ -19,8 +19,8 @@ Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dl
 ### 1. Clone & Configure
 
 ```bash
-git clone https://github.com/<your-username>/xlabplayer.git
-cd xlabplayer
+git clone https://github.com/CJNG20u/xlab-player.git
+cd xlab-player
 cp .env.example .env
 ```
 
@@ -82,7 +82,7 @@ id -g   # set as PGID in .env
 Automated multi-arch (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry on pushes to `main`. To pull a prebuilt image instead of building locally, comment out `build: .` in `docker-compose.yml` and uncomment:
 
 ```yaml
-image: ghcr.io/<your-username>/xlabplayer:latest
+image: ghcr.io/cjng20u/xlab-player:latest
 ```
 
 Then run:
@@ -116,10 +116,10 @@ sudo chmod a+rx /usr/local/bin/yt-dlp
 ### 2. Clone, Build & Configure
 
 ```bash
-sudo mkdir -p /opt/xlabplayer
-sudo chown "$USER:$USER" /opt/xlabplayer
-git clone https://github.com/<your-username>/xlabplayer.git /opt/xlabplayer
-cd /opt/xlabplayer
+sudo mkdir -p /opt/xlab-player
+sudo chown "$USER:$USER" /opt/xlab-player
+git clone https://github.com/CJNG20u/xlab-player.git /opt/xlab-player
+cd /opt/xlab-player
 
 # Install dependencies and build the production frontend
 # (Use `npm install` instead of `npm ci` if package-lock.json is not present)
@@ -135,7 +135,7 @@ Update `.env` for your bare-metal paths (for example):
 PORT=3000
 JWT_SECRET=<paste-output-of-openssl-rand-hex-32>
 COOKIE_SECURE=false
-DATA_DIR=/opt/xlabplayer/data
+DATA_DIR=/opt/xlab-player/data
 MUSIC_DIR=/mnt/nas/music
 YTDLP_PATH=/usr/local/bin/yt-dlp
 FFMPEG_PATH=/usr/bin/ffmpeg
@@ -149,7 +149,7 @@ npm start
 
 ### 3. Run as a `systemd` Service
 
-Create `/etc/systemd/system/xlabplayer.service` (replace `<your-user>` with the Linux user that owns `/opt/xlabplayer` and has access to your music directory):
+Create `/etc/systemd/system/xlabplayer.service` (replace `<your-user>` with the Linux user that owns `/opt/xlab-player` and has access to your music directory):
 
 ```ini
 [Unit]
@@ -161,9 +161,9 @@ Wants=network-online.target
 Type=simple
 User=<your-user>
 Group=<your-user>
-WorkingDirectory=/opt/xlabplayer
+WorkingDirectory=/opt/xlab-player
 Environment=NODE_ENV=production
-EnvironmentFile=/opt/xlabplayer/.env
+EnvironmentFile=/opt/xlab-player/.env
 ExecStart=/usr/bin/npm start
 Restart=on-failure
 RestartSec=5
@@ -222,7 +222,7 @@ docker compose up -d
 
 **Bare-Metal (`systemd`):**
 ```bash
-cd /opt/xlabplayer
+cd /opt/xlab-player
 git pull
 npm ci && npm run build
 sudo systemctl restart xlabplayer
