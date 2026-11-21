@@ -12,6 +12,9 @@ Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dl
 - **Playlists & `.m3u` / `.m3u8` Sync**: Create and manage playlists in-app, auto-import `.m3u`/`.m3u8` playlists from your music library, and export any playlist back to `<MUSIC_DIR>/Playlists/`.
 - **Installable PWA with MediaSession Controls**: Responsive desktop and mobile web app with offline shell caching and native lock-screen, Bluetooth, and CarPlay/Android Auto playback controls.
 - **Multi-User Roles & `cookies.txt` Support**: Separate `admin` and `listener` roles, per-user download permissions, direct local audio uploads, and Netscape-format `cookies.txt` management for resilient YouTube downloads.
+- **Offline PWA Caching (iOS & Android):** Save individual tracks or entire playlists locally using the browser Cache Storage API and IndexedDB for zero-network playback in Airplane Mode.
+- **Background & Lock-Screen Playback:** Persistent HTML5 audio engine integrated with the Media Session API (`navigator.mediaSession`) for uninterrupted lock-screen playback and hardware controls on iOS and Android.
+- **Zero-Cloud Architecture:** Runs completely locally with zero external AI or third-party cloud API dependencies.
 
 ---
 
