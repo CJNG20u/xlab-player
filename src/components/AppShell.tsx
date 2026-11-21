@@ -27,13 +27,14 @@ import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {apiFetch, formatDuration} from '../lib/api';
 import type {Playlist} from '../types';
+import {getOfflinePlaylists, subscribeOfflineStore} from '../utils/offlineStore';
 import {AlbumArt} from './AlbumArt';
 import {BrandLogo} from './BrandLogo';
 import {CreatePlaylistModal} from './CreatePlaylistModal';
 import {QueueDrawer} from './QueueDrawer';
 
 export const AppShell: React.FC = () => {
-  const {user, logout} = useAuth();
+  const {user, isOfflineMode, logout} = useAuth();
   const {
     currentTrack,
     isPlaying,
@@ -59,6 +60,7 @@ export const AppShell: React.FC = () => {
   } = usePlayer();
 
   const isOnline = useOnlineStatus();
+  const offline = !isOnline || isOfflineMode;
   const {isInstallable, isInstalled, install} = usePWAInstall();
   const navigate = useNavigate();
   const location = useLocation();
@@ -67,17 +69,30 @@ export const AppShell: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
 
   const loadPlaylists = useCallback(async () => {
+    if (offline) {
+      const cached = await getOfflinePlaylists();
+      setPlaylists(cached);
+      return;
+    }
     try {
       const res = await apiFetch<{playlists: Playlist[]}>('/api/playlists');
       setPlaylists(res.playlists || []);
     } catch {
-      // Ignore transient errors
+      const cached = await getOfflinePlaylists();
+      setPlaylists(cached);
     }
-  }, []);
+  }, [offline]);
 
   useEffect(() => {
     void loadPlaylists();
   }, [loadPlaylists, libraryRefreshVersion]);
+
+  useEffect(() => {
+    if (!offline) return;
+    return subscribeOfflineStore(() => {
+      void loadPlaylists();
+    });
+  }, [offline, loadPlaylists]);
 
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const volPct = (isMuted ? 0 : volume) * 100;
@@ -135,20 +150,26 @@ export const AppShell: React.FC = () => {
           {/* Quick Playlist List */}
           <div className="mt-6 flex flex-1 min-h-0 flex-col border-t border-white/[0.06] pt-4 px-3">
             <div className="flex items-center justify-between px-3 mb-2">
-              <span className="text-xs font-semibold text-[#B3B3B3]">Playlists</span>
-              <button
-                type="button"
-                onClick={() => setCreateOpen(true)}
-                className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white transition-colors"
-                title="Create playlist"
-                aria-label="Create playlist"
-              >
-                <Plus className="w-4 h-4" />
-              </button>
+              <span className="text-xs font-semibold text-[#B3B3B3]">
+                {offline ? 'Offline Playlists' : 'Playlists'}
+              </span>
+              {!offline && (
+                <button
+                  type="button"
+                  onClick={() => setCreateOpen(true)}
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white transition-colors"
+                  title="Create playlist"
+                  aria-label="Create playlist"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              )}
             </div>
             <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
               {playlists.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-[#6A6A6A]">No playlists yet</p>
+                <p className="px-3 py-2 text-xs text-[#6A6A6A]">
+                  {offline ? 'No offline playlists cached' : 'No playlists yet'}
+                </p>
               ) : (
                 playlists.map((pl) => (
                   <NavLink
@@ -556,12 +577,16 @@ export const AppShell: React.FC = () => {
         </nav>
       )}
 
-      {/* Offline Toast */}
-      {!isOnline && (
-        <div className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-md bg-amber-500 px-3.5 py-2 text-xs font-semibold text-black shadow-lg">
-          <WifiOff className="w-4 h-4" />
-          <span>Offline — Reconnect to stream from NAS</span>
-        </div>
+      {/* Offline Mode Indicator */}
+      {offline && (
+        <button
+          type="button"
+          onClick={() => navigate('/')}
+          className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-md bg-amber-500 px-3.5 py-2 text-xs font-semibold text-black shadow-lg hover:bg-amber-400 transition-colors"
+        >
+          <WifiOff className="w-4 h-4 shrink-0" />
+          <span>Offline Mode — Playing cached music</span>
+        </button>
       )}
 
       {/* Modals & Drawers */}

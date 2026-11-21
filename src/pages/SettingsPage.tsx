@@ -5,6 +5,7 @@ import {
   Download,
   FolderSearch,
   HardDrive,
+  HardDriveDownload,
   KeyRound,
   Loader2,
   RefreshCw,
@@ -16,6 +17,7 @@ import {
   Upload,
   UserPlus,
   Users,
+  WifiOff,
   X,
   XCircle,
 } from 'lucide-react';
@@ -23,15 +25,25 @@ import React, {useCallback, useEffect, useState} from 'react';
 import {DirectoryBrowserModal} from '../components/DirectoryBrowserModal';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {apiFetch, formatBytes, getSSEUrl} from '../lib/api';
 import type {AppSettings, MountHealth, ScanProgress, SystemStatus, User} from '../types';
+import {
+  clearAllOfflineMusic,
+  getOfflineStorageUsage,
+  isOfflineCachingSupported,
+  subscribeOfflineStore,
+  type OfflineStorageUsage,
+} from '../utils/offlineStore';
 
 export const SettingsPage: React.FC = () => {
-  const {user} = useAuth();
+  const {user, isOfflineMode} = useAuth();
+  const isOnline = useOnlineStatus();
+  const offline = !isOnline || isOfflineMode;
   const {bumpLibraryRefresh} = usePlayer();
   const {isInstallable, isInstalled, isIOS, install} = usePWAInstall();
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = user?.role === 'admin' && !offline;
 
   // Admin: Settings & System Status
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -69,6 +81,40 @@ export const SettingsPage: React.FC = () => {
   const [userFeedback, setUserFeedback] = useState<string | null>(null);
   const [resetUserId, setResetUserId] = useState<number | null>(null);
   const [resetPasswordVal, setResetPasswordVal] = useState('');
+
+  // Offline Storage (All Users)
+  const offlineSupported = isOfflineCachingSupported();
+  const [offlineUsage, setOfflineUsage] = useState<OfflineStorageUsage | null>(null);
+  const [clearingOffline, setClearingOffline] = useState(false);
+  const [confirmClearOffline, setConfirmClearOffline] = useState(false);
+  const [offlineFeedback, setOfflineFeedback] = useState<string | null>(null);
+
+  const loadOfflineUsage = useCallback(async () => {
+    const usage = await getOfflineStorageUsage();
+    setOfflineUsage(usage);
+  }, []);
+
+  useEffect(() => {
+    void loadOfflineUsage();
+    return subscribeOfflineStore(() => {
+      void loadOfflineUsage();
+    });
+  }, [loadOfflineUsage]);
+
+  const handleClearAllOffline = async () => {
+    setClearingOffline(true);
+    setOfflineFeedback(null);
+    try {
+      await clearAllOfflineMusic();
+      setConfirmClearOffline(false);
+      await loadOfflineUsage();
+      setOfflineFeedback('All offline music and cached covers have been cleared from this device.');
+    } catch (err) {
+      setOfflineFeedback(err instanceof Error ? err.message : 'Failed to clear offline storage.');
+    } finally {
+      setClearingOffline(false);
+    }
+  };
 
   // Admin: Cookies & yt-dlp Resilience
   const [cookiesText, setCookiesText] = useState('');
@@ -394,9 +440,18 @@ export const SettingsPage: React.FC = () => {
           Settings
         </h1>
         <p className="mt-1 text-sm text-[#B3B3B3]">
-          Configure your NAS music mount, library scanner, accounts, PWA installation, and yt-dlp engine.
+          Configure your NAS music mount, offline storage, library scanner, accounts, PWA installation, and yt-dlp engine.
         </p>
       </div>
+
+      {offline && (
+        <div className="flex items-center gap-3 rounded-xl bg-[#181818] border border-amber-500/30 px-4 py-3 text-xs text-[#B3B3B3]">
+          <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>
+            Offline Mode is active. Server settings require a NAS connection, while Offline Storage management below works anytime.
+          </span>
+        </div>
+      )}
 
       {/* 1. NAS MUSIC MOUNT & LIBRARY SCANNER (ADMIN ONLY — TOP PRIORITY CARD) */}
       {isAdmin && (
@@ -694,6 +749,145 @@ export const SettingsPage: React.FC = () => {
             </div>
           </div>
         </div>
+      </section>
+
+      {/* 2B. OFFLINE STORAGE (ALL USERS) */}
+      <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#1DB954]/15 text-[#1DB954]">
+              <HardDriveDownload className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="font-display text-lg font-bold text-white">Offline Storage</h2>
+              <p className="text-xs text-[#B3B3B3]">
+                Audio files and cover art cached locally on this device for Airplane Mode playback.
+              </p>
+            </div>
+          </div>
+
+          <div className="text-left sm:text-right">
+            <p className="font-mono text-2xl font-extrabold tabular-nums text-white">
+              {offlineUsage ? `${offlineUsage.totalMB.toFixed(1)} MB` : '0.0 MB'}
+            </p>
+            <p className="text-xs text-[#6A6A6A] font-mono tabular-nums">
+              {offlineUsage ? formatBytes(offlineUsage.totalBytes) : '0 B'} cached
+            </p>
+          </div>
+        </div>
+
+        {!offlineSupported ? (
+          <div className="rounded-lg bg-[#121212] border border-amber-500/30 p-4 text-xs text-amber-300">
+            Offline music caching requires a secure HTTPS context (or localhost) so the browser Cache Storage API and IndexedDB are available.
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
+                <p className="text-[11px] text-[#B3B3B3]">Cached Tracks</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+                  {offlineUsage?.trackCount ?? 0}
+                </p>
+              </div>
+              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
+                <p className="text-[11px] text-[#B3B3B3]">Cached Playlists</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+                  {offlineUsage?.playlistCount ?? 0}
+                </p>
+              </div>
+              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
+                <p className="text-[11px] text-[#B3B3B3]">Audio Cache</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+                  {offlineUsage ? formatBytes(offlineUsage.audioBytes) : '0 B'}
+                </p>
+              </div>
+              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
+                <p className="text-[11px] text-[#B3B3B3]">Artwork & Meta</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+                  {offlineUsage ? formatBytes(offlineUsage.coverBytes) : '0 B'}
+                </p>
+              </div>
+            </div>
+
+            {offlineUsage?.quotaBytes && offlineUsage.quotaBytes > 0 && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs font-mono tabular-nums">
+                  <span className="text-[#B3B3B3]">
+                    Offline audio uses{' '}
+                    <span className="text-white font-semibold">
+                      {offlineUsage.totalMB.toFixed(1)} MB
+                    </span>
+                  </span>
+                  <span className="text-[#6A6A6A]">
+                    Browser quota: {formatBytes(offlineUsage.quotaBytes)}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-[#282828] overflow-hidden">
+                  <div
+                    className="h-full bg-[#1DB954] transition-[width] duration-300"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        Math.max(
+                          offlineUsage.totalBytes > 0 ? 1 : 0,
+                          Math.round((offlineUsage.totalBytes / offlineUsage.quotaBytes) * 100)
+                        )
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/10">
+              <div className="text-xs text-[#B3B3B3]">
+                {offlineFeedback ? (
+                  <span className="text-[#1DB954] font-medium">{offlineFeedback}</span>
+                ) : (
+                  <span>
+                    Stored in Cache Storage (<code className="font-mono text-white/80">xlabplayer-audio-v1</code>) and IndexedDB.
+                  </span>
+                )}
+              </div>
+
+              {confirmClearOffline ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={clearingOffline}
+                    onClick={() => void handleClearAllOffline()}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-red-500 px-4 py-2 text-xs font-bold text-white hover:bg-red-400 disabled:opacity-50 transition-colors"
+                  >
+                    {clearingOffline ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                    Confirm Clear All
+                  </button>
+                  <button
+                    type="button"
+                    disabled={clearingOffline}
+                    onClick={() => setConfirmClearOffline(false)}
+                    className="rounded-full bg-[#282828] px-3.5 py-2 text-xs font-semibold text-[#B3B3B3] hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={clearingOffline || !offlineUsage || offlineUsage.trackCount === 0}
+                  onClick={() => setConfirmClearOffline(true)}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#282828] border border-red-500/30 px-4 py-2 text-xs font-semibold text-red-400 hover:bg-red-500/15 disabled:opacity-40 transition-colors whitespace-nowrap"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Clear All Offline Music
+                </button>
+              )}
+            </div>
+          </>
+        )}
       </section>
 
       {/* 3. USER MANAGEMENT (ADMIN ONLY) */}

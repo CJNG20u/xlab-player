@@ -1,6 +1,7 @@
 import {Disc3, Heart, Music2} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import {getCoverUrl} from '../lib/api';
+import {getOfflineCoverBlobUrl} from '../utils/offlineStore';
 
 interface AlbumArtProps {
   coverFile?: string | null;
@@ -20,11 +21,45 @@ export const AlbumArt: React.FC<AlbumArtProps> = ({
   iconSize = 20,
 }) => {
   const [errored, setErrored] = useState(false);
-  const src = coverFile ? getCoverUrl(coverFile) : externalUrl || null;
+  const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
+  const networkSrc = coverFile ? getCoverUrl(coverFile) : externalUrl || null;
 
   useEffect(() => {
     setErrored(false);
-  }, [src]);
+    setOfflineUrl(null);
+
+    if (!coverFile) return;
+
+    // When offline, immediately resolve cached cover art from IndexedDB
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      let cancelled = false;
+      void getOfflineCoverBlobUrl(coverFile).then((url) => {
+        if (!cancelled && url) {
+          setOfflineUrl(url);
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [coverFile, networkSrc]);
+
+  const handleImageError = () => {
+    if (coverFile && !offlineUrl) {
+      void getOfflineCoverBlobUrl(coverFile).then((url) => {
+        if (url) {
+          setOfflineUrl(url);
+          setErrored(false);
+        } else {
+          setErrored(true);
+        }
+      });
+    } else {
+      setErrored(true);
+    }
+  };
+
+  const src = offlineUrl || networkSrc;
 
   if (!src || errored) {
     return (
@@ -45,7 +80,7 @@ export const AlbumArt: React.FC<AlbumArtProps> = ({
       src={src}
       alt={alt}
       referrerPolicy="no-referrer"
-      onError={() => setErrored(true)}
+      onError={handleImageError}
       className={`${className} object-cover shrink-0 bg-[#282828]`}
       loading="lazy"
     />

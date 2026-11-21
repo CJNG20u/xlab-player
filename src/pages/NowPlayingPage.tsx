@@ -20,6 +20,7 @@ import {useNavigate} from 'react-router-dom';
 import {AlbumArt} from '../components/AlbumArt';
 import {usePlayer} from '../context/PlayerContext';
 import {apiFetch, formatDuration, getCoverUrl, parseLrc} from '../lib/api';
+import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineStore';
 
 export const NowPlayingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -48,8 +49,24 @@ export const NowPlayingPage: React.FC = () => {
 
   const [rawLyrics, setRawLyrics] = useState<string | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [offlineCoverBackdrop, setOfflineCoverBackdrop] = useState<string | null>(null);
 
   const trackId = currentTrack?.id ?? null;
+  const coverFile = currentTrack?.cover_file ?? null;
+
+  useEffect(() => {
+    setOfflineCoverBackdrop(null);
+    if (!coverFile) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      let cancelled = false;
+      void getOfflineCoverBlobUrl(coverFile).then((url) => {
+        if (!cancelled && url) setOfflineCoverBackdrop(url);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [coverFile]);
 
   useEffect(() => {
     if (!trackId) {
@@ -58,16 +75,23 @@ export const NowPlayingPage: React.FC = () => {
     }
     let cancelled = false;
     setLyricsLoading(true);
-    apiFetch<{lyrics: string | null}>(`/api/tracks/${trackId}/lyrics`)
-      .then((res) => {
+    const loadLyrics = async () => {
+      try {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          const cached = await getOfflineTrackLyrics(trackId);
+          if (!cancelled) setRawLyrics(cached);
+          return;
+        }
+        const res = await apiFetch<{lyrics: string | null}>(`/api/tracks/${trackId}/lyrics`);
         if (!cancelled) setRawLyrics(res.lyrics);
-      })
-      .catch(() => {
-        if (!cancelled) setRawLyrics(null);
-      })
-      .finally(() => {
+      } catch {
+        const cached = await getOfflineTrackLyrics(trackId);
+        if (!cancelled) setRawLyrics(cached);
+      } finally {
         if (!cancelled) setLyricsLoading(false);
-      });
+      }
+    };
+    void loadLyrics();
     return () => {
       cancelled = true;
     };
@@ -111,7 +135,7 @@ export const NowPlayingPage: React.FC = () => {
     );
   }
 
-  const coverUrl = getCoverUrl(currentTrack.cover_file);
+  const coverUrl = offlineCoverBackdrop || getCoverUrl(currentTrack.cover_file);
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const remaining = Math.max(0, (duration || 0) - currentTime);
   const volPct = (isMuted ? 0 : volume) * 100;

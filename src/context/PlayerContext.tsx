@@ -1,6 +1,13 @@
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
 import {apiFetch, getCoverUrl, getStreamUrl} from '../lib/api';
 import type {RepeatMode, Track} from '../types';
+import {
+  getCachedTrackIds,
+  getOfflineAudioBlob,
+  getOfflineTracks,
+  removeOfflineTrack,
+  subscribeOfflineStore,
+} from '../utils/offlineStore';
 
 interface PlayerContextValue {
   currentTrack: Track | null;
@@ -133,6 +140,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const [queueOpen, setQueueOpen] = useState(false);
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [libraryRefreshVersion, setLibraryRefreshVersion] = useState(0);
+  const [offlineStoreVersion, setOfflineStoreVersion] = useState(0);
 
   const currentTrack =
     currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
@@ -141,17 +149,95 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const stateRef = useRef({queue, currentIndex, shuffle, repeat, currentTrack, isPlaying, duration});
   stateRef.current = {queue, currentIndex, shuffle, repeat, currentTrack, isPlaying, duration};
 
-  // Playback intent & buffering recovery refs
+  // Playback intent, buffering recovery & offline ObjectURL pre-warming refs
   const wantPlayingRef = useRef(false);
   const transitioningTrackRef = useRef(false);
   const transitionTimerRef = useRef<number | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryAttemptsRef = useRef(0);
   const lastMetadataKeyRef = useRef<string | null>(null);
+  const cachedTrackIdsRef = useRef<Set<number>>(new Set());
+  const prewarmedObjectUrlsRef = useRef<Map<number, string>>(new Map());
+  const loadRequestIdRef = useRef(0);
 
   const bumpLibraryRefresh = useCallback(() => {
     setLibraryRefreshVersion((v) => v + 1);
   }, []);
+
+  // Keep cachedTrackIdsRef synchronized with offlineStore so playback can decide
+  // immediately whether to load from Cache Storage ('xlabplayer-audio-v1')
+  useEffect(() => {
+    let active = true;
+    const syncCachedIds = async () => {
+      const ids = await getCachedTrackIds();
+      if (!active) return;
+      cachedTrackIdsRef.current = ids;
+
+      // Revoke any prewarmed ObjectURL whose track was evicted from offline storage
+      const activeAudioSrc = audioRef.current?.getAttribute('src') || '';
+      for (const [trackId, blobUrl] of prewarmedObjectUrlsRef.current.entries()) {
+        if (!ids.has(trackId) && blobUrl !== activeAudioSrc) {
+          URL.revokeObjectURL(blobUrl);
+          prewarmedObjectUrlsRef.current.delete(trackId);
+        }
+      }
+      setOfflineStoreVersion((v) => v + 1);
+    };
+
+    void syncCachedIds();
+    const unsub = subscribeOfflineStore(() => {
+      void syncCachedIds();
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, []);
+
+  // Pre-warm ObjectURLs for current + adjacent cached tracks so lock-screen `ended` / `nexttrack`
+  // transitions assign `audio.src = blobUrl` and invoke `audio.play()` 100% synchronously on iOS/Android
+  useEffect(() => {
+    let cancelled = false;
+    const keepIds = new Set<number>();
+
+    if (currentIndex >= 0 && currentIndex < queue.length) {
+      keepIds.add(queue[currentIndex].id);
+      if (currentIndex + 1 < queue.length) {
+        keepIds.add(queue[currentIndex + 1].id);
+      } else if (repeat === 'all' && queue.length > 0) {
+        keepIds.add(queue[0].id);
+      }
+      if (currentIndex - 1 >= 0) {
+        keepIds.add(queue[currentIndex - 1].id);
+      }
+    }
+
+    const activeAudioSrc = audioRef.current?.getAttribute('src') || '';
+    for (const [trackId, blobUrl] of prewarmedObjectUrlsRef.current.entries()) {
+      if (!keepIds.has(trackId) && blobUrl !== activeAudioSrc) {
+        URL.revokeObjectURL(blobUrl);
+        prewarmedObjectUrlsRef.current.delete(trackId);
+      }
+    }
+
+    for (const trackId of keepIds) {
+      if (
+        cachedTrackIdsRef.current.has(trackId) &&
+        !prewarmedObjectUrlsRef.current.has(trackId)
+      ) {
+        void getOfflineAudioBlob(trackId).then((blob) => {
+          if (cancelled || !blob) return;
+          if (!prewarmedObjectUrlsRef.current.has(trackId)) {
+            prewarmedObjectUrlsRef.current.set(trackId, URL.createObjectURL(blob));
+          }
+        });
+      }
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [queue, currentIndex, repeat, offlineStoreVersion]);
 
   const clearRecoveryTimer = useCallback(() => {
     if (recoveryTimerRef.current !== null) {
@@ -251,13 +337,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
   // Synchronously assign audio.src and call audio.play() on the persistent HTMLAudioElement
   // without awaiting React state updates or network calls (critical for iOS/Android lock-screen continuity).
+  // If a track is cached in Cache Storage ('xlabplayer-audio-v1'), load from its ObjectURL so
+  // playback and scrubbing work instantly in Airplane Mode without hitting the network or mTLS proxy.
   const loadAndPlayTrackSync = useCallback(
     (track: Track, options: {resetIfSame?: boolean} = {}) => {
       const audio = audioRef.current ?? getPersistentAudioElement();
       if (!audio) return;
       audioRef.current = audio;
 
-      const nextStreamUrl = getStreamUrl(track.id);
+      const reqId = ++loadRequestIdRef.current;
       const isSameLoadedTrack =
         audio.dataset.trackId === String(track.id) && Boolean(audio.getAttribute('src'));
 
@@ -271,27 +359,73 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       syncMediaSessionMetadata(track, true);
       setMediaSessionPlaybackState('playing');
 
+      const invokePlay = () => {
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch((err: unknown) => {
+            // Ignore AbortError caused by rapid track switching
+            if (err instanceof DOMException && err.name === 'AbortError') return;
+            endTrackTransition();
+            wantPlayingRef.current = false;
+            stateRef.current.isPlaying = false;
+            setIsPlaying(false);
+            setIsBuffering(false);
+            setMediaSessionPlaybackState('paused');
+          });
+        }
+      };
+
       if (isSameLoadedTrack) {
         if (options.resetIfSame) {
           audio.currentTime = 0;
         }
+        invokePlay();
       } else {
+        const prewarmedBlobUrl = prewarmedObjectUrlsRef.current.get(track.id);
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        const shouldUseOfflineCache =
+          Boolean(prewarmedBlobUrl) || cachedTrackIdsRef.current.has(track.id) || isOffline;
+
         beginTrackTransition();
         audio.dataset.trackId = String(track.id);
-        audio.src = nextStreamUrl;
-      }
 
-      const playPromise = audio.play();
-      if (playPromise && typeof playPromise.catch === 'function') {
-        playPromise.catch((err: unknown) => {
-          // Ignore AbortError caused by rapid track switching
-          if (err instanceof DOMException && err.name === 'AbortError') return;
-          endTrackTransition();
-          wantPlayingRef.current = false;
-          stateRef.current.isPlaying = false;
-          setIsPlaying(false);
-          setMediaSessionPlaybackState('paused');
-        });
+        if (prewarmedBlobUrl) {
+          // Synchronous ObjectURL assignment from pre-warmed offline cache
+          audio.src = prewarmedBlobUrl;
+          invokePlay();
+        } else if (shouldUseOfflineCache) {
+          // Load blob directly from Cache Storage (`xlabplayer-audio-v1`) -> ObjectURL
+          setIsBuffering(true);
+          void getOfflineAudioBlob(track.id).then((blob) => {
+            if (loadRequestIdRef.current !== reqId) return;
+            if (blob) {
+              let blobUrl = prewarmedObjectUrlsRef.current.get(track.id);
+              if (!blobUrl) {
+                blobUrl = URL.createObjectURL(blob);
+                prewarmedObjectUrlsRef.current.set(track.id, blobUrl);
+              }
+              audio.src = blobUrl;
+              invokePlay();
+              return;
+            }
+
+            // Not present in Cache Storage: fall back to network only if online
+            if (typeof navigator === 'undefined' || navigator.onLine) {
+              audio.src = getStreamUrl(track.id);
+              invokePlay();
+            } else {
+              endTrackTransition();
+              wantPlayingRef.current = false;
+              stateRef.current.isPlaying = false;
+              setIsPlaying(false);
+              setIsBuffering(false);
+              setMediaSessionPlaybackState('paused');
+            }
+          });
+        } else {
+          audio.src = getStreamUrl(track.id);
+          invokePlay();
+        }
       }
 
       setIsPlaying(true);
@@ -337,7 +471,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         } else if (
           reason === 'stalled' &&
           attempt >= 2 &&
-          audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
+          audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA &&
+          !audio.src.startsWith('blob:')
         ) {
           const track = stateRef.current.currentTrack;
           if (!track) return;
@@ -626,9 +761,18 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
   const playTrackById = useCallback(
     async (trackId: number) => {
-      const data = await apiFetch<{track: Track}>(`/api/tracks/${trackId}`);
-      if (data.track) {
-        playTrack(data.track, [data.track]);
+      try {
+        const data = await apiFetch<{track: Track}>(`/api/tracks/${trackId}`);
+        if (data.track) {
+          playTrack(data.track, [data.track]);
+          return;
+        }
+      } catch {
+        const offlineTracks = await getOfflineTracks();
+        const cached = offlineTracks.find((t) => t.id === trackId);
+        if (cached) {
+          playTrack(cached, [cached]);
+        }
       }
     },
     [playTrack]
@@ -677,6 +821,16 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         setDuration(0);
         syncMediaSessionMetadata(null);
         setMediaSessionPlaybackState('none');
+      }
+
+      // Clean up any offline cached copies & ObjectURLs for permanently deleted tracks
+      for (const id of deletedIds) {
+        const blobUrl = prewarmedObjectUrlsRef.current.get(id);
+        if (blobUrl) {
+          URL.revokeObjectURL(blobUrl);
+          prewarmedObjectUrlsRef.current.delete(id);
+        }
+        void removeOfflineTrack(id);
       }
 
       const nextQueue = prevQueue.filter((t) => !deletedSet.has(t.id));
@@ -936,6 +1090,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       audio.pause();
       audio.removeAttribute('src');
       delete audio.dataset.trackId;
+      for (const blobUrl of prewarmedObjectUrlsRef.current.values()) {
+        try {
+          URL.revokeObjectURL(blobUrl);
+        } catch {
+          // ignore
+        }
+      }
+      prewarmedObjectUrlsRef.current.clear();
       syncMediaSessionMetadata(null);
       setMediaSessionPlaybackState('none');
     };

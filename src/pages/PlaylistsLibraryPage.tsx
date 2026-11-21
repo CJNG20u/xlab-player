@@ -1,10 +1,13 @@
 import {
+  ArrowDownCircle,
   ArrowLeft,
+  CheckCircle2,
   CheckSquare,
   Clock,
   Disc3,
   Download,
   FileDown,
+  HardDriveDownload,
   Heart,
   Library,
   ListPlus,
@@ -16,6 +19,7 @@ import {
   Settings,
   Square,
   Trash2,
+  WifiOff,
   X,
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
@@ -27,17 +31,34 @@ import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
+import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {apiFetch, formatDuration} from '../lib/api';
 import type {Playlist, Track} from '../types';
+import {
+  getOfflinePlaylists,
+  getOfflinePlaylistTracks,
+  getOfflineTracks,
+  saveOfflinePlaylistMetadata,
+  subscribeOfflineStore,
+} from '../utils/offlineStore';
 
-type LibraryTab = 'all' | 'liked' | 'recent' | 'playlists';
+type LibraryTab = 'all' | 'liked' | 'recent' | 'offline' | 'playlists';
 
 export const PlaylistsLibraryPage: React.FC = () => {
   const {id: playlistIdParam} = useParams<{id?: string}>();
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const {user} = useAuth();
+  const {user, isOfflineMode} = useAuth();
+  const isOnline = useOnlineStatus();
+  const offline = !isOnline || isOfflineMode;
+  const {
+    supported: offlineSupported,
+    cachedTrackIds,
+    downloadTrack,
+    removeTrack,
+  } = useOfflineLibrary();
   const {
     currentTrack,
     playTrack,
@@ -47,13 +68,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
     bumpLibraryRefresh,
   } = usePlayer();
 
-  const canDeleteTracks = user?.role === 'admin' || Boolean(user?.can_download);
+  const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
   const isPlaylistsRoot = location.pathname === '/playlists';
   const artistFilter = searchParams.get('artist') || '';
 
-  const [activeTab, setActiveTab] = useState<LibraryTab>(
-    isPlaylistsRoot ? 'playlists' : 'all'
-  );
+  const [activeTab, setActiveTab] = useState<LibraryTab>(() => {
+    if (isPlaylistsRoot) return 'playlists';
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return 'offline';
+    return 'all';
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [tracks, setTracks] = useState<Track[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -70,10 +93,16 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchDeleteError, setBatchDeleteError] = useState<string | null>(null);
 
-  // Playlist context menus & toast
+  // Playlist context menus, offline batch download & toast
   const [playlistMenuId, setPlaylistMenuId] = useState<number | null>(null);
   const [detailMenuOpen, setDetailMenuOpen] = useState(false);
   const [exportingPlaylistId, setExportingPlaylistId] = useState<number | null>(null);
+  const [playlistDownloadProgress, setPlaylistDownloadProgress] = useState<{
+    playlistId: number;
+    completed: number;
+    total: number;
+  } | null>(null);
+  const playlistDownloadAbortRef = useRef<AbortController | null>(null);
   const [pageToast, setPageToast] = useState<string | null>(null);
   const playlistMenuRef = useRef<HTMLDivElement | null>(null);
   const detailMenuRef = useRef<HTMLDivElement | null>(null);
@@ -100,9 +129,23 @@ export const PlaylistsLibraryPage: React.FC = () => {
     if (isPlaylistsRoot && !playlistIdParam) {
       setActiveTab('playlists');
     } else if (location.pathname === '/' && activeTab === 'playlists') {
-      setActiveTab('all');
+      setActiveTab(offline ? 'offline' : 'all');
     }
-  }, [isPlaylistsRoot, location.pathname, playlistIdParam]);
+  }, [isPlaylistsRoot, location.pathname, playlistIdParam, offline]);
+
+  // Automatically boot into Offline Library when disconnected
+  useEffect(() => {
+    if (offline && !playlistIdParam && activeTab !== 'playlists' && activeTab !== 'offline') {
+      setActiveTab('offline');
+    }
+  }, [offline, playlistIdParam, activeTab]);
+
+  // Abort any in-flight playlist download on unmount
+  useEffect(() => {
+    return () => {
+      playlistDownloadAbortRef.current?.abort();
+    };
+  }, []);
 
   // Reset multi-select when switching views or tabs
   useEffect(() => {
@@ -113,6 +156,19 @@ export const PlaylistsLibraryPage: React.FC = () => {
   }, [playlistIdParam, activeTab, artistFilter]);
 
   const loadPlaylists = useCallback(async () => {
+    if (offline) {
+      const [cachedPlaylists, cachedTracks] = await Promise.all([
+        getOfflinePlaylists(),
+        getOfflineTracks(),
+      ]);
+      setPlaylists(cachedPlaylists);
+      setStats({
+        totalTracks: cachedTracks.length,
+        likedTracks: cachedTracks.filter((t) => t.liked).length,
+      });
+      return;
+    }
+
     try {
       const res = await apiFetch<{
         playlists: Playlist[];
@@ -121,39 +177,82 @@ export const PlaylistsLibraryPage: React.FC = () => {
       setPlaylists(res.playlists || []);
       if (res.stats) setStats(res.stats);
     } catch {
-      // ignore
+      const [cachedPlaylists, cachedTracks] = await Promise.all([
+        getOfflinePlaylists(),
+        getOfflineTracks(),
+      ]);
+      setPlaylists(cachedPlaylists);
+      setStats({
+        totalTracks: cachedTracks.length,
+        likedTracks: cachedTracks.filter((t) => t.liked).length,
+      });
     }
-  }, []);
+  }, [offline]);
 
   const loadContent = useCallback(async () => {
     setLoading(true);
     try {
       await loadPlaylists();
       if (playlistIdParam) {
-        const res = await apiFetch<{playlist: Playlist; tracks: Track[]}>(
-          `/api/playlists/${playlistIdParam}`
-        );
-        setActivePlaylist(res.playlist);
-        setTracks(res.tracks || []);
+        const numericId = Number(playlistIdParam);
+        if (offline) {
+          const cached = await getOfflinePlaylistTracks(numericId);
+          setActivePlaylist(cached?.playlist ?? null);
+          setTracks(cached?.tracks ?? []);
+        } else {
+          try {
+            const res = await apiFetch<{playlist: Playlist; tracks: Track[]}>(
+              `/api/playlists/${playlistIdParam}`
+            );
+            setActivePlaylist(res.playlist);
+            setTracks(res.tracks || []);
+          } catch {
+            const cached = await getOfflinePlaylistTracks(numericId);
+            setActivePlaylist(cached?.playlist ?? null);
+            setTracks(cached?.tracks ?? []);
+          }
+        }
+      } else if (activeTab === 'offline' || offline) {
+        setActivePlaylist(null);
+        const cachedTracks = await getOfflineTracks();
+        const filteredByArtist = artistFilter
+          ? cachedTracks.filter(
+              (t) => t.artist.toLowerCase() === artistFilter.toLowerCase()
+            )
+          : cachedTracks;
+        setTracks(filteredByArtist);
       } else {
         setActivePlaylist(null);
         const filterParam =
           activeTab === 'liked' ? 'liked' : activeTab === 'recent' ? 'recent' : 'all';
         const qs = new URLSearchParams({filter: filterParam});
         if (artistFilter) qs.set('artist', artistFilter);
-        const res = await apiFetch<{tracks: Track[]}>(`/api/tracks?${qs.toString()}`);
-        setTracks(res.tracks || []);
+        try {
+          const res = await apiFetch<{tracks: Track[]}>(`/api/tracks?${qs.toString()}`);
+          setTracks(res.tracks || []);
+        } catch {
+          const cachedTracks = await getOfflineTracks();
+          setTracks(cachedTracks);
+        }
       }
     } catch {
       setTracks([]);
     } finally {
       setLoading(false);
     }
-  }, [playlistIdParam, activeTab, artistFilter, loadPlaylists]);
+  }, [playlistIdParam, activeTab, artistFilter, loadPlaylists, offline]);
 
   useEffect(() => {
     void loadContent();
   }, [loadContent, libraryRefreshVersion]);
+
+  // Keep Offline Library & Offline Mode views live when tracks/playlists are cached or removed
+  useEffect(() => {
+    if (activeTab !== 'offline' && !offline) return;
+    return subscribeOfflineStore(() => {
+      void loadContent();
+    });
+  }, [activeTab, offline, loadContent]);
 
   const filteredTracks = useMemo(() => {
     if (!searchQuery.trim()) return tracks;
@@ -219,6 +318,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
   const handleQuickPlayPlaylist = async (e: React.MouseEvent, plId: number) => {
     e.stopPropagation();
+    if (offline) {
+      const cached = await getOfflinePlaylistTracks(plId);
+      if (cached && cached.tracks.length > 0) {
+        playTrack(cached.tracks[0], cached.tracks);
+      } else {
+        navigate(`/playlists/${plId}`);
+      }
+      return;
+    }
     try {
       const res = await apiFetch<{tracks: Track[]}>(`/api/playlists/${plId}`);
       if (res.tracks && res.tracks.length > 0) {
@@ -227,7 +335,100 @@ export const PlaylistsLibraryPage: React.FC = () => {
         navigate(`/playlists/${plId}`);
       }
     } catch {
-      navigate(`/playlists/${plId}`);
+      const cached = await getOfflinePlaylistTracks(plId);
+      if (cached && cached.tracks.length > 0) {
+        playTrack(cached.tracks[0], cached.tracks);
+      } else {
+        navigate(`/playlists/${plId}`);
+      }
+    }
+  };
+
+  const playlistAllTracksCached = useMemo(() => {
+    if (!activePlaylist || tracks.length === 0) return false;
+    return tracks.every((t) => cachedTrackIds.has(t.id));
+  }, [activePlaylist, tracks, cachedTrackIds]);
+
+  const playlistCachedCount = useMemo(() => {
+    if (!activePlaylist || tracks.length === 0) return 0;
+    return tracks.filter((t) => cachedTrackIds.has(t.id)).length;
+  }, [activePlaylist, tracks, cachedTrackIds]);
+
+  const handleDownloadPlaylistOffline = async () => {
+    if (!activePlaylist || tracks.length === 0) return;
+
+    // Clicking while actively downloading cancels the batch cleanly
+    if (playlistDownloadProgress?.playlistId === activePlaylist.id) {
+      playlistDownloadAbortRef.current?.abort();
+      return;
+    }
+
+    // If every track in the playlist is already cached, remove offline copies for this playlist
+    if (playlistAllTracksCached) {
+      for (const t of tracks) {
+        await removeTrack(t.id);
+      }
+      flashToast(`Removed "${activePlaylist.name}" from offline storage`);
+      return;
+    }
+
+    if (offline) {
+      flashToast('Reconnect to download playlist for offline playback');
+      return;
+    }
+    if (!offlineSupported) {
+      flashToast('Offline caching requires HTTPS or localhost');
+      return;
+    }
+
+    const controller = new AbortController();
+    playlistDownloadAbortRef.current = controller;
+    const allTrackIds = tracks.map((t) => t.id);
+
+    await saveOfflinePlaylistMetadata(activePlaylist, allTrackIds);
+
+    let completed = tracks.filter((t) => cachedTrackIds.has(t.id)).length;
+    setPlaylistDownloadProgress({
+      playlistId: activePlaylist.id,
+      completed,
+      total: tracks.length,
+    });
+
+    let failed = 0;
+    try {
+      for (const track of tracks) {
+        if (controller.signal.aborted) break;
+        if (cachedTrackIds.has(track.id)) continue;
+        try {
+          await downloadTrack(track, {
+            playlist: activePlaylist,
+            playlistTrackIds: allTrackIds,
+            signal: controller.signal,
+          });
+          completed += 1;
+          setPlaylistDownloadProgress({
+            playlistId: activePlaylist.id,
+            completed,
+            total: tracks.length,
+          });
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            break;
+          }
+          failed += 1;
+        }
+      }
+
+      if (controller.signal.aborted) {
+        flashToast(`Download cancelled (${completed}/${tracks.length} saved offline)`);
+      } else if (failed > 0) {
+        flashToast(`Saved ${completed}/${tracks.length} tracks offline (${failed} failed)`);
+      } else {
+        flashToast(`Downloaded "${activePlaylist.name}" for offline playback`);
+      }
+    } finally {
+      playlistDownloadAbortRef.current = null;
+      setPlaylistDownloadProgress(null);
     }
   };
 
@@ -310,12 +511,18 @@ export const PlaylistsLibraryPage: React.FC = () => {
     }
   };
 
-  const tabs: Array<{id: LibraryTab; label: string; icon: React.FC<{className?: string}>}> = [
-    {id: 'all', label: 'All Tracks', icon: Library},
-    {id: 'liked', label: 'Liked Songs', icon: Heart},
-    {id: 'recent', label: 'Recently Downloaded', icon: Clock},
-    {id: 'playlists', label: 'User Playlists', icon: Disc3},
-  ];
+  const tabs: Array<{id: LibraryTab; label: string; icon: React.FC<{className?: string}>}> = offline
+    ? [
+        {id: 'offline', label: 'Offline Library', icon: HardDriveDownload},
+        {id: 'playlists', label: 'Offline Playlists', icon: Disc3},
+      ]
+    : [
+        {id: 'all', label: 'All Tracks', icon: Library},
+        {id: 'liked', label: 'Liked Songs', icon: Heart},
+        {id: 'recent', label: 'Recently Downloaded', icon: Clock},
+        {id: 'offline', label: 'Offline Library', icon: HardDriveDownload},
+        {id: 'playlists', label: 'User Playlists', icon: Disc3},
+      ];
 
   const showFloatingBatchBar = selectionMode && selectedIdArray.length > 0;
 
@@ -411,7 +618,53 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     <Play className="w-5 h-5 fill-current ml-0.5" />
                   </button>
 
-                  {filteredTracks.length > 0 && (
+                  {/* Download Playlist Offline Button with Progress State */}
+                  {tracks.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={!playlistAllTracksCached && offline && playlistDownloadProgress?.playlistId !== activePlaylist.id}
+                      onClick={() => void handleDownloadPlaylistOffline()}
+                      className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap ${
+                        playlistDownloadProgress?.playlistId === activePlaylist.id
+                          ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
+                          : playlistAllTracksCached
+                            ? 'border-[#1DB954]/50 bg-[#1DB954]/15 text-[#1DB954] hover:bg-[#1DB954]/20'
+                            : 'border-white/15 bg-[#181818] text-white hover:border-white/40 hover:bg-[#282828]'
+                      }`}
+                      title={
+                        playlistDownloadProgress?.playlistId === activePlaylist.id
+                          ? 'Click to cancel download'
+                          : playlistAllTracksCached
+                            ? 'All tracks saved offline (click to remove)'
+                            : 'Download all tracks in this playlist for offline playback'
+                      }
+                    >
+                      {playlistDownloadProgress?.playlistId === activePlaylist.id ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span className="font-mono tabular-nums">
+                            Downloading {playlistDownloadProgress.completed}/{playlistDownloadProgress.total}...
+                          </span>
+                        </>
+                      ) : playlistAllTracksCached ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Downloaded Offline</span>
+                        </>
+                      ) : (
+                        <>
+                          <ArrowDownCircle className="w-3.5 h-3.5 text-[#1DB954]" />
+                          <span>
+                            {playlistCachedCount > 0
+                              ? `Download Offline (${playlistCachedCount}/${tracks.length})`
+                              : 'Download Playlist Offline'}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {filteredTracks.length > 0 && !offline && (
                     <>
                       <button
                         type="button"
@@ -452,43 +705,45 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   )}
 
                   {/* Playlist ••• Options Menu */}
-                  <div className="relative" ref={detailMenuRef}>
-                    <button
-                      type="button"
-                      onClick={() => setDetailMenuOpen((o) => !o)}
-                      disabled={exportingPlaylistId === activePlaylist.id}
-                      className="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white transition-colors"
-                      aria-label="Playlist options"
-                    >
-                      {exportingPlaylistId === activePlaylist.id ? (
-                        <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
-                      ) : (
-                        <MoreHorizontal className="w-5 h-5" />
-                      )}
-                    </button>
+                  {!offline && (
+                    <div className="relative" ref={detailMenuRef}>
+                      <button
+                        type="button"
+                        onClick={() => setDetailMenuOpen((o) => !o)}
+                        disabled={exportingPlaylistId === activePlaylist.id}
+                        className="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white transition-colors"
+                        aria-label="Playlist options"
+                      >
+                        {exportingPlaylistId === activePlaylist.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
+                        ) : (
+                          <MoreHorizontal className="w-5 h-5" />
+                        )}
+                      </button>
 
-                    {detailMenuOpen && (
-                      <div className="absolute left-0 top-12 z-40 w-52 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl">
-                        <button
-                          type="button"
-                          onClick={() => void handleExportM3u(activePlaylist)}
-                          className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
-                        >
-                          <FileDown className="w-4 h-4 text-[#1DB954]" />
-                          Export as .m3u
-                        </button>
-                        <div className="my-1 border-t border-white/10" />
-                        <button
-                          type="button"
-                          onClick={() => void handleDeletePlaylist(activePlaylist.id)}
-                          className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-red-400 hover:bg-white/10"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Delete Playlist
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                      {detailMenuOpen && (
+                        <div className="absolute left-0 top-12 z-40 w-52 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl">
+                          <button
+                            type="button"
+                            onClick={() => void handleExportM3u(activePlaylist)}
+                            className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                          >
+                            <FileDown className="w-4 h-4 text-[#1DB954]" />
+                            Export as .m3u
+                          </button>
+                          <div className="my-1 border-t border-white/10" />
+                          <button
+                            type="button"
+                            onClick={() => void handleDeletePlaylist(activePlaylist.id)}
+                            className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-red-400 hover:bg-white/10"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                            Delete Playlist
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="relative w-full sm:w-72">
@@ -556,106 +811,183 @@ export const PlaylistsLibraryPage: React.FC = () => {
       ) : (
         // --- MAIN LIBRARY & PLAYLISTS VIEW ---
         <div className={`px-4 sm:px-6 lg:px-8 pt-6 max-w-7xl mx-auto space-y-6 ${showFloatingBatchBar ? 'pb-24' : ''}`}>
+          {/* Offline Mode Banner when Disconnected */}
+          {offline && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-[#181818] border border-amber-500/30 px-4 py-3.5">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400">
+                  <WifiOff className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-white">Offline Mode</p>
+                  <p className="text-xs text-[#B3B3B3]">
+                    Showing{' '}
+                    <span className="font-mono tabular-nums text-white">{cachedTrackIds.size}</span>{' '}
+                    cached {cachedTrackIds.size === 1 ? 'track' : 'tracks'} and{' '}
+                    <span className="font-mono tabular-nums text-white">{playlists.length}</span>{' '}
+                    offline {playlists.length === 1 ? 'playlist' : 'playlists'} stored on this device.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/settings')}
+                className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[#282828] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#333333] transition-colors whitespace-nowrap shrink-0"
+              >
+                <HardDriveDownload className="w-3.5 h-3.5 text-[#1DB954]" />
+                Manage Offline Storage
+              </button>
+            </div>
+          )}
+
           {/* Header Row */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
-                {activeTab === 'playlists'
-                  ? 'Your Playlists'
-                  : activeTab === 'liked'
-                    ? 'Liked Songs'
-                    : activeTab === 'recent'
-                      ? 'Recently Downloaded'
-                      : 'Music Library'}
+                {offline
+                  ? activeTab === 'playlists'
+                    ? 'Offline Playlists'
+                    : 'Offline Mode'
+                  : activeTab === 'playlists'
+                    ? 'Your Playlists'
+                    : activeTab === 'liked'
+                      ? 'Liked Songs'
+                      : activeTab === 'recent'
+                        ? 'Recently Downloaded'
+                        : activeTab === 'offline'
+                          ? 'Offline Library'
+                          : 'Music Library'}
               </h1>
               <p className="mt-1 text-sm text-[#B3B3B3]">
-                <span className="font-mono tabular-nums">{stats.totalTracks}</span> tracks indexed
-                <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
-                <span className="font-mono tabular-nums">{stats.likedTracks}</span> liked
-                <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
-                <span className="font-mono tabular-nums">{playlists.length}</span> playlists
+                {offline ? (
+                  <>
+                    <span className="font-mono tabular-nums">{cachedTrackIds.size}</span> cached
+                    tracks
+                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">{playlists.length}</span> cached
+                    playlists
+                  </>
+                ) : (
+                  <>
+                    <span className="font-mono tabular-nums">{stats.totalTracks}</span> tracks
+                    indexed
+                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">{stats.likedTracks}</span> liked
+                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">{cachedTrackIds.size}</span> offline
+                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">{playlists.length}</span> playlists
+                  </>
+                )}
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] transition-colors whitespace-nowrap shrink-0"
-            >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
-              Create Playlist
-            </button>
+            {!offline && (
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] transition-colors whitespace-nowrap shrink-0"
+              >
+                <Plus className="w-4 h-4 stroke-[2.5]" />
+                Create Playlist
+              </button>
+            )}
           </div>
 
           {/* Quick Collection Cards (Top Spotlight Row) */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setSearchParams({});
-                setActiveTab('all');
-              }}
-              className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                activeTab === 'all' && !artistFilter
-                  ? 'bg-[#282828] ring-1 ring-white/15'
-                  : 'bg-[#181818] hover:bg-[#282828]'
-              }`}
-            >
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#282828] to-[#121212]">
-                <Library className="w-6 h-6 text-[#1DB954]" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-bold text-white truncate">All Tracks</p>
-                <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
-                  {stats.totalTracks} songs
-                </p>
-              </div>
-            </button>
+          {!offline && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchParams({});
+                  setActiveTab('all');
+                }}
+                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
+                  activeTab === 'all' && !artistFilter
+                    ? 'bg-[#282828] ring-1 ring-white/15'
+                    : 'bg-[#181818] hover:bg-[#282828]'
+                }`}
+              >
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#282828] to-[#121212]">
+                  <Library className="w-6 h-6 text-[#1DB954]" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-white truncate">All Tracks</p>
+                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
+                    {stats.totalTracks} songs
+                  </p>
+                </div>
+              </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setSearchParams({});
-                setActiveTab('liked');
-              }}
-              className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                activeTab === 'liked'
-                  ? 'bg-[#282828] ring-1 ring-white/15'
-                  : 'bg-[#181818] hover:bg-[#282828]'
-              }`}
-            >
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#3b28cc] via-[#2b4d8f] to-[#1DB954]">
-                <Heart className="w-6 h-6 text-white fill-white" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-bold text-white truncate">Liked Songs</p>
-                <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
-                  {stats.likedTracks} saved
-                </p>
-              </div>
-            </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchParams({});
+                  setActiveTab('liked');
+                }}
+                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
+                  activeTab === 'liked'
+                    ? 'bg-[#282828] ring-1 ring-white/15'
+                    : 'bg-[#181818] hover:bg-[#282828]'
+                }`}
+              >
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#3b28cc] via-[#2b4d8f] to-[#1DB954]">
+                  <Heart className="w-6 h-6 text-white fill-white" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-white truncate">Liked Songs</p>
+                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
+                    {stats.likedTracks} saved
+                  </p>
+                </div>
+              </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setSearchParams({});
-                setActiveTab('recent');
-              }}
-              className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                activeTab === 'recent'
-                  ? 'bg-[#282828] ring-1 ring-white/15'
-                  : 'bg-[#181818] hover:bg-[#282828]'
-              }`}
-            >
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#1DB954] to-[#124e28]">
-                <Clock className="w-6 h-6 text-white" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-bold text-white truncate">Recently Downloaded</p>
-                <p className="text-xs text-[#B3B3B3]">Latest additions</p>
-              </div>
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchParams({});
+                  setActiveTab('recent');
+                }}
+                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
+                  activeTab === 'recent'
+                    ? 'bg-[#282828] ring-1 ring-white/15'
+                    : 'bg-[#181818] hover:bg-[#282828]'
+                }`}
+              >
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#1DB954] to-[#124e28]">
+                  <Clock className="w-6 h-6 text-white" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-white truncate">Recently Downloaded</p>
+                  <p className="text-xs text-[#B3B3B3]">Latest additions</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchParams({});
+                  setActiveTab('offline');
+                }}
+                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
+                  activeTab === 'offline'
+                    ? 'bg-[#282828] ring-1 ring-[#1DB954]/40'
+                    : 'bg-[#181818] hover:bg-[#282828]'
+                }`}
+              >
+                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-emerald-600 to-[#0e2d1d]">
+                  <HardDriveDownload className="w-6 h-6 text-white" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-white truncate">Offline Library</p>
+                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
+                    {cachedTrackIds.size} cached
+                  </p>
+                </div>
+              </button>
+            </div>
+          )}
 
           {/* Interactive Filter Tabs + Search Bar */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-1">
@@ -719,17 +1051,23 @@ export const PlaylistsLibraryPage: React.FC = () => {
             playlists.length === 0 ? (
               <div className="rounded-xl bg-[#181818] p-12 text-center">
                 <Disc3 className="w-10 h-10 text-[#6A6A6A] mx-auto mb-3" />
-                <h2 className="font-display text-lg font-bold text-white">No playlists created yet</h2>
+                <h2 className="font-display text-lg font-bold text-white">
+                  {offline ? 'No offline playlists cached' : 'No playlists created yet'}
+                </h2>
                 <p className="mt-1 text-sm text-[#B3B3B3] max-w-md mx-auto">
-                  Organize your NAS tracks into custom collections, or place .m3u / .m3u8 files inside your music folder and run a library scan.
+                  {offline
+                    ? 'When back online, open any playlist and tap Download Playlist Offline to listen in Airplane Mode.'
+                    : 'Organize your NAS tracks into custom collections, or place .m3u / .m3u8 files inside your music folder and run a library scan.'}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setCreateOpen(true)}
-                  className="mt-5 rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
-                >
-                  Create First Playlist
-                </button>
+                {!offline && (
+                  <button
+                    type="button"
+                    onClick={() => setCreateOpen(true)}
+                    className="mt-5 rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
+                  >
+                    Create First Playlist
+                  </button>
+                )}
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
@@ -777,52 +1115,54 @@ export const PlaylistsLibraryPage: React.FC = () => {
                           </p>
                         </div>
 
-                        <div
-                          className="relative shrink-0"
-                          ref={isPlMenuOpen ? playlistMenuRef : null}
-                        >
-                          <button
-                            type="button"
-                            disabled={exportingPlaylistId === pl.id}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setPlaylistMenuId(isPlMenuOpen ? null : pl.id);
-                            }}
-                            className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-white/10 hover:text-white transition-colors"
-                            aria-label={`Options for ${pl.name}`}
+                        {!offline && (
+                          <div
+                            className="relative shrink-0"
+                            ref={isPlMenuOpen ? playlistMenuRef : null}
                           >
-                            {exportingPlaylistId === pl.id ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1DB954]" />
-                            ) : (
-                              <MoreHorizontal className="w-4 h-4" />
-                            )}
-                          </button>
-
-                          {isPlMenuOpen && (
-                            <div
-                              onClick={(e) => e.stopPropagation()}
-                              className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
+                            <button
+                              type="button"
+                              disabled={exportingPlaylistId === pl.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPlaylistMenuId(isPlMenuOpen ? null : pl.id);
+                              }}
+                              className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-white/10 hover:text-white transition-colors"
+                              aria-label={`Options for ${pl.name}`}
                             >
-                              <button
-                                type="button"
-                                onClick={() => void handleExportM3u(pl)}
-                                className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-white hover:bg-white/10"
+                              {exportingPlaylistId === pl.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1DB954]" />
+                              ) : (
+                                <MoreHorizontal className="w-4 h-4" />
+                              )}
+                            </button>
+
+                            {isPlMenuOpen && (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
                               >
-                                <FileDown className="w-3.5 h-3.5 text-[#1DB954]" />
-                                Export as .m3u
-                              </button>
-                              <div className="my-1 border-t border-white/10" />
-                              <button
-                                type="button"
-                                onClick={() => void handleDeletePlaylist(pl.id)}
-                                className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-red-400 hover:bg-white/10"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                Delete Playlist
-                              </button>
-                            </div>
-                          )}
-                        </div>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleExportM3u(pl)}
+                                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-white hover:bg-white/10"
+                                >
+                                  <FileDown className="w-3.5 h-3.5 text-[#1DB954]" />
+                                  Export as .m3u
+                                </button>
+                                <div className="my-1 border-t border-white/10" />
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeletePlaylist(pl.id)}
+                                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-red-400 hover:bg-white/10"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  Delete Playlist
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
@@ -836,22 +1176,30 @@ export const PlaylistsLibraryPage: React.FC = () => {
             </div>
           ) : filteredTracks.length === 0 ? (
             <div className="rounded-xl bg-[#181818] p-12 text-center space-y-3">
-              <Library className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+              {activeTab === 'offline' || offline ? (
+                <HardDriveDownload className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+              ) : (
+                <Library className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+              )}
               <h2 className="font-display text-lg font-bold text-white">
                 {searchQuery || artistFilter
                   ? 'No matching tracks found'
-                  : activeTab === 'liked'
-                    ? 'No liked songs yet'
-                    : 'Your music library is empty'}
+                  : activeTab === 'offline' || offline
+                    ? 'No offline music downloaded yet'
+                    : activeTab === 'liked'
+                      ? 'No liked songs yet'
+                      : 'Your music library is empty'}
               </h2>
               <p className="text-sm text-[#B3B3B3] max-w-md mx-auto">
                 {searchQuery || artistFilter
                   ? 'Try adjusting your search or clearing the active filter.'
-                  : activeTab === 'liked'
-                    ? 'Tap the heart icon next to any track to save it to your Liked Songs.'
-                    : 'Upload audio files, download tracks with yt-dlp, or configure and scan your NAS mount path in Settings.'}
+                  : activeTab === 'offline' || offline
+                    ? 'Tap the download button next to any track, or open a playlist and tap Download Playlist Offline to listen without an internet connection.'
+                    : activeTab === 'liked'
+                      ? 'Tap the heart icon next to any track to save it to your Liked Songs.'
+                      : 'Upload audio files, download tracks with yt-dlp, or configure and scan your NAS mount path in Settings.'}
               </p>
-              {!searchQuery && !artistFilter && activeTab !== 'liked' && (
+              {!searchQuery && !artistFilter && activeTab !== 'liked' && activeTab !== 'offline' && !offline && (
                 <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
                   {(user?.can_download || user?.role === 'admin') && (
                     <button
@@ -889,23 +1237,25 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     Play All ({filteredTracks.length})
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectionMode) exitSelectionMode();
-                      else setSelectionMode(true);
-                    }}
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold transition-colors ${
-                      selectionMode
-                        ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
-                        : 'border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white'
-                    }`}
-                  >
-                    <CheckSquare className="w-3.5 h-3.5" />
-                    {selectionMode ? 'Done' : 'Select'}
-                  </button>
+                  {!offline && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectionMode) exitSelectionMode();
+                        else setSelectionMode(true);
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold transition-colors ${
+                        selectionMode
+                          ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
+                          : 'border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white'
+                      }`}
+                    >
+                      <CheckSquare className="w-3.5 h-3.5" />
+                      {selectionMode ? 'Done' : 'Select'}
+                    </button>
+                  )}
 
-                  {selectionMode && (
+                  {selectionMode && !offline && (
                     <button
                       type="button"
                       onClick={toggleSelectAll}

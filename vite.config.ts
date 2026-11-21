@@ -72,8 +72,41 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\//],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           runtimeCaching: [
+            {
+              urlPattern: /^\/api\/(auth\/(me|status)|playlists|tracks)(\?.*)?$/i,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'xlabplayer-api-v1',
+                networkTimeoutSeconds: 4,
+                expiration: {
+                  maxEntries: 50,
+                  maxAgeSeconds: 60 * 60 * 24 * 7,
+                },
+                cacheableResponse: {
+                  statuses: [200],
+                },
+              },
+            },
+            {
+              urlPattern: /^\/api\/covers\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'xlabplayer-covers-v1',
+                expiration: {
+                  maxEntries: 500,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

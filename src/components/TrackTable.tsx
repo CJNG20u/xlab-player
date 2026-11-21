@@ -1,8 +1,11 @@
 import {
+  ArrowDownCircle,
   Check,
+  CheckCircle2,
   Clock,
   Heart,
   ListPlus,
+  Loader2,
   MoreHorizontal,
   Pause,
   Play,
@@ -12,6 +15,8 @@ import {
 import React, {useEffect, useRef, useState} from 'react';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
+import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {apiFetch, formatDuration} from '../lib/api';
 import type {Playlist, Track} from '../types';
 import {AlbumArt} from './AlbumArt';
@@ -44,7 +49,16 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   onRemovedFromPlaylist,
   onLikeToggled,
 }) => {
-  const {user} = useAuth();
+  const {user, isOfflineMode} = useAuth();
+  const isOnline = useOnlineStatus();
+  const offline = !isOnline || isOfflineMode;
+  const {
+    supported: offlineSupported,
+    cachedTrackIds,
+    downloadingTrackIds,
+    downloadTrack,
+    removeTrack,
+  } = useOfflineLibrary();
   const {
     currentTrack,
     isPlaying,
@@ -56,7 +70,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     handleDeletedTracks,
   } = usePlayer();
 
-  const canDeleteTracks = user?.role === 'admin' || Boolean(user?.can_download);
+  const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
 
   const [menuTrackId, setMenuTrackId] = useState<number | null>(null);
   const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false);
@@ -168,6 +182,33 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     }
   };
 
+  const handleToggleOfflineTrack = async (track: Track) => {
+    if (downloadingTrackIds.has(track.id)) return;
+    if (cachedTrackIds.has(track.id)) {
+      try {
+        await removeTrack(track.id);
+        flashToast('Removed from offline storage');
+      } catch (err) {
+        flashToast(err instanceof Error ? err.message : 'Could not remove offline copy');
+      }
+      return;
+    }
+    if (offline) {
+      flashToast('Reconnect to download tracks for offline playback');
+      return;
+    }
+    if (!offlineSupported) {
+      flashToast('Offline caching requires HTTPS or localhost');
+      return;
+    }
+    try {
+      await downloadTrack(track);
+      flashToast(`Saved "${track.title}" for offline playback`);
+    } catch (err) {
+      flashToast(err instanceof Error ? err.message : 'Offline download failed');
+    }
+  };
+
   const handleConfirmPermanentDelete = async () => {
     if (!pendingDeleteTrack) return;
     setDeletingTrack(true);
@@ -198,7 +239,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
       )}
 
       {/* Desktop Column Header */}
-      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_88px_40px] items-center gap-4 px-4 py-2 border-b border-white/10 text-xs font-medium text-[#B3B3B3]">
+      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-4 px-4 py-2 border-b border-white/10 text-xs font-medium text-[#B3B3B3]">
         <span className="text-center">{selectionMode ? '' : '#'}</span>
         <span>Title</span>
         <span>Album</span>
@@ -214,11 +255,13 @@ export const TrackTable: React.FC<TrackTableProps> = ({
           const isActive = currentTrack?.id === track.id;
           const isMenuOpen = menuTrackId === track.id;
           const isSelected = Boolean(selectionMode && selectedIds?.has(track.id));
+          const isCached = cachedTrackIds.has(track.id);
+          const isDownloadingOffline = downloadingTrackIds.has(track.id);
 
           return (
             <div
               key={`${track.id}-${idx}`}
-              className={`group relative grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_88px_40px] items-center gap-3 md:gap-4 rounded-md px-3 md:px-4 py-2.5 transition-colors select-none ${
+              className={`group relative grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-3 md:gap-4 rounded-md px-3 md:px-4 py-2.5 transition-colors select-none ${
                 isSelected
                   ? 'bg-[#1DB954]/12 ring-1 ring-[#1DB954]/30'
                   : isActive
@@ -385,9 +428,49 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                 <p className="truncate text-sm text-[#B3B3B3]">{track.album}</p>
               </div>
 
-              {/* Like + Duration */}
-              <div className="flex items-center justify-end gap-2">
+              {/* Offline Cache + Like + Duration */}
+              <div className="flex items-center justify-end gap-1.5 md:gap-2">
                 {!selectionMode && (
+                  <button
+                    type="button"
+                    disabled={isDownloadingOffline || (!isCached && offline)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleToggleOfflineTrack(track);
+                    }}
+                    className={`flex h-9 w-9 md:h-8 md:w-8 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
+                      isDownloadingOffline
+                        ? 'text-[#1DB954]'
+                        : isCached
+                          ? 'text-[#1DB954] hover:text-[#1ED760]'
+                          : 'text-[#6A6A6A] md:opacity-0 md:group-hover:opacity-100 hover:text-white'
+                    }`}
+                    title={
+                      isDownloadingOffline
+                        ? 'Downloading for offline playback...'
+                        : isCached
+                          ? 'Available offline (click to remove)'
+                          : 'Download for offline playback'
+                    }
+                    aria-label={
+                      isDownloadingOffline
+                        ? `Downloading ${track.title} for offline playback`
+                        : isCached
+                          ? `Remove ${track.title} from offline storage`
+                          : `Download ${track.title} for offline playback`
+                    }
+                  >
+                    {isDownloadingOffline ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : isCached ? (
+                      <CheckCircle2 className="w-4 h-4" />
+                    ) : (
+                      <ArrowDownCircle className="w-4 h-4" />
+                    )}
+                  </button>
+                )}
+
+                {!selectionMode && !offline && (
                   <button
                     type="button"
                     onClick={async (e) => {
@@ -476,48 +559,77 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     Add to Queue
                   </button>
 
-                  <div className="my-1 border-t border-white/10" />
-
                   <button
                     type="button"
-                    onClick={() => setShowPlaylistSubmenu((s) => !s)}
-                    className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                    disabled={isDownloadingOffline || (!isCached && offline)}
+                    onClick={() => {
+                      setMenuTrackId(null);
+                      void handleToggleOfflineTrack(track);
+                    }}
+                    className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10 disabled:opacity-40"
                   >
-                    <span className="flex items-center gap-2.5">
-                      <Plus className="w-4 h-4 text-[#B3B3B3]" />
-                      Add to Playlist
-                    </span>
-                    <span className="text-xs text-[#B3B3B3]">{showPlaylistSubmenu ? '▾' : '▸'}</span>
+                    {isDownloadingOffline ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
+                    ) : isCached ? (
+                      <CheckCircle2 className="w-4 h-4 text-[#1DB954]" />
+                    ) : (
+                      <ArrowDownCircle className="w-4 h-4 text-[#B3B3B3]" />
+                    )}
+                    {isDownloadingOffline
+                      ? 'Downloading Offline...'
+                      : isCached
+                        ? 'Remove Offline Download'
+                        : 'Download for Offline'}
                   </button>
 
-                  {showPlaylistSubmenu && (
-                    <div className="mt-1 max-h-40 overflow-y-auto rounded bg-[#181818] p-1 space-y-0.5">
-                      {playlists.length === 0 ? (
-                        <p className="px-2.5 py-1.5 text-xs text-[#6A6A6A]">No playlists yet</p>
-                      ) : (
-                        playlists.map((pl) => (
-                          <button
-                            key={pl.id}
-                            type="button"
-                            onClick={() => void handleAddToPlaylist(pl.id, track.id, pl.name)}
-                            className="block w-full truncate rounded px-2.5 py-1.5 text-left text-xs text-[#B3B3B3] hover:bg-[#282828] hover:text-white"
-                          >
-                            {pl.name}
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  )}
+                  {!offline && (
+                    <>
+                      <div className="my-1 border-t border-white/10" />
 
-                  {playlistId && (
-                    <button
-                      type="button"
-                      onClick={() => void handleRemoveFromPlaylist(track.id)}
-                      className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-amber-300 hover:bg-white/10"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      Remove from Playlist
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowPlaylistSubmenu((s) => !s)}
+                        className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <Plus className="w-4 h-4 text-[#B3B3B3]" />
+                          Add to Playlist
+                        </span>
+                        <span className="text-xs text-[#B3B3B3]">
+                          {showPlaylistSubmenu ? '▾' : '▸'}
+                        </span>
+                      </button>
+
+                      {showPlaylistSubmenu && (
+                        <div className="mt-1 max-h-40 overflow-y-auto rounded bg-[#181818] p-1 space-y-0.5">
+                          {playlists.length === 0 ? (
+                            <p className="px-2.5 py-1.5 text-xs text-[#6A6A6A]">No playlists yet</p>
+                          ) : (
+                            playlists.map((pl) => (
+                              <button
+                                key={pl.id}
+                                type="button"
+                                onClick={() => void handleAddToPlaylist(pl.id, track.id, pl.name)}
+                                className="block w-full truncate rounded px-2.5 py-1.5 text-left text-xs text-[#B3B3B3] hover:bg-[#282828] hover:text-white"
+                              >
+                                {pl.name}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+
+                      {playlistId && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveFromPlaylist(track.id)}
+                          className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-amber-300 hover:bg-white/10"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          Remove from Playlist
+                        </button>
+                      )}
+                    </>
                   )}
 
                   {canDeleteTracks && (
