@@ -53,6 +53,12 @@ const PlayerContext = createContext<PlayerContextValue | null>(null);
 // Module-level singleton HTMLAudioElement: never recreated or unmounted between songs or routes,
 // preserving iOS Safari & Android Chrome background/lock-screen audio session permission.
 let persistentAudioElement: HTMLAudioElement | null = null;
+let persistentAudioUnlocked = false;
+
+// Minimal valid 44-byte silent PCM WAV used to unlock the persistent <audio> element synchronously
+// during the user's very first play gesture whenever the first track requires async resolution.
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
 function getPersistentAudioElement(): HTMLAudioElement | null {
   if (typeof document === 'undefined') return null;
@@ -60,6 +66,7 @@ function getPersistentAudioElement(): HTMLAudioElement | null {
     const audio = document.createElement('audio');
     audio.setAttribute('playsinline', '');
     audio.setAttribute('webkit-playsinline', '');
+    audio.setAttribute('x-webkit-airplay', 'allow');
     audio.preload = 'auto';
     audio.style.display = 'none';
     if (document.body) {
@@ -70,6 +77,28 @@ function getPersistentAudioElement(): HTMLAudioElement | null {
     document.body.appendChild(persistentAudioElement);
   }
   return persistentAudioElement;
+}
+
+function unlockPersistentAudioElement(
+  audio: HTMLAudioElement | null,
+  primeWithSilentAudio = false
+): void {
+  if (!audio || persistentAudioUnlocked) return;
+  persistentAudioUnlocked = true;
+
+  if (primeWithSilentAudio && !audio.getAttribute('src')) {
+    try {
+      audio.src = SILENT_WAV_DATA_URI;
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          // Ignore AbortError when real track src immediately replaces the silent primer
+        });
+      }
+    } catch {
+      // Ignore unlock priming errors
+    }
+  }
 }
 
 function buildTrackArtwork(track: Track): MediaImage[] {
@@ -149,8 +178,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const stateRef = useRef({queue, currentIndex, shuffle, repeat, currentTrack, isPlaying, duration});
   stateRef.current = {queue, currentIndex, shuffle, repeat, currentTrack, isPlaying, duration};
 
-  // Playback intent, buffering recovery & offline ObjectURL pre-warming refs
+  // Playback intent, user-pause tracking, lock-screen recovery & offline ObjectURL pre-warming refs
   const wantPlayingRef = useRef(false);
+  const userPausedRef = useRef(false);
+  const lastUnexpectedPauseAtRef = useRef(0);
+  const lockAutoResumeAttemptsRef = useRef(0);
+  const visibilityResumeTimersRef = useRef<number[]>([]);
   const transitioningTrackRef = useRef(false);
   const transitionTimerRef = useRef<number | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
@@ -159,6 +192,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const cachedTrackIdsRef = useRef<Set<number>>(new Set());
   const prewarmedObjectUrlsRef = useRef<Map<number, string>>(new Map());
   const loadRequestIdRef = useRef(0);
+
+  const clearVisibilityResumeTimers = useCallback(() => {
+    if (visibilityResumeTimersRef.current.length > 0) {
+      for (const timerId of visibilityResumeTimersRef.current) {
+        window.clearTimeout(timerId);
+      }
+      visibilityResumeTimersRef.current = [];
+    }
+  }, []);
 
   const bumpLibraryRefresh = useCallback(() => {
     setLibraryRefreshVersion((v) => v + 1);
@@ -335,6 +377,73 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     }
   }, []);
 
+  // Forward-declared ref for stable MediaSession action handlers so they can be registered
+  // synchronously on playback start AND kept stable across renders without tearing down listeners.
+  const mediaActionsRef = useRef<{
+    play: () => void;
+    pause: () => void;
+    prevTrack: () => void;
+    nextTrack: () => void;
+    seek: (time: number, fastSeek?: boolean) => void;
+  }>({
+    play: () => {},
+    pause: () => {},
+    prevTrack: () => {},
+    nextTrack: () => {},
+    seek: () => {},
+  });
+
+  const registerMediaSessionHandlers = useCallback(() => {
+    if (!('mediaSession' in navigator)) return;
+
+    const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
+      ['play', () => mediaActionsRef.current.play()],
+      ['pause', () => mediaActionsRef.current.pause()],
+      ['previoustrack', () => mediaActionsRef.current.prevTrack()],
+      ['nexttrack', () => mediaActionsRef.current.nextTrack()],
+      [
+        'seekto',
+        (details) => {
+          if (typeof details.seekTime === 'number') {
+            mediaActionsRef.current.seek(details.seekTime, Boolean(details.fastSeek));
+          }
+        },
+      ],
+      [
+        'seekbackward',
+        (details) => {
+          const offset = details.seekOffset || 10;
+          mediaActionsRef.current.seek((audioRef.current?.currentTime || 0) - offset);
+        },
+      ],
+      [
+        'seekforward',
+        (details) => {
+          const offset = details.seekOffset || 10;
+          mediaActionsRef.current.seek((audioRef.current?.currentTime || 0) + offset);
+        },
+      ],
+    ];
+
+    for (const [action, handler] of handlers) {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {
+        // Ignore unsupported MediaSession action handlers on older browsers
+      }
+    }
+  }, []);
+
+  // Immediately activate MediaSession metadata, action handlers, and 'playing' state
+  const activateMediaSessionForPlayback = useCallback(
+    (track: Track | null, forceMetadata = false) => {
+      registerMediaSessionHandlers();
+      syncMediaSessionMetadata(track, forceMetadata);
+      setMediaSessionPlaybackState('playing');
+    },
+    [registerMediaSessionHandlers, setMediaSessionPlaybackState, syncMediaSessionMetadata]
+  );
+
   // Synchronously assign audio.src and call audio.play() on the persistent HTMLAudioElement
   // without awaiting React state updates or network calls (critical for iOS/Android lock-screen continuity).
   // If a track is cached in Cache Storage ('xlabplayer-audio-v1'), load from its ObjectURL so
@@ -347,19 +456,24 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       const reqId = ++loadRequestIdRef.current;
       const isSameLoadedTrack =
-        audio.dataset.trackId === String(track.id) && Boolean(audio.getAttribute('src'));
+        audio.dataset.trackId === String(track.id) &&
+        Boolean(audio.getAttribute('src')) &&
+        audio.getAttribute('src') !== SILENT_WAV_DATA_URI;
 
+      userPausedRef.current = false;
       wantPlayingRef.current = true;
+      lockAutoResumeAttemptsRef.current = 0;
       stateRef.current.isPlaying = true;
       stateRef.current.currentTrack = track;
       clearRecoveryTimer();
+      clearVisibilityResumeTimers();
       recoveryAttemptsRef.current = 0;
 
-      // Update lock-screen metadata & playing state synchronously
-      syncMediaSessionMetadata(track, true);
-      setMediaSessionPlaybackState('playing');
+      // Immediately register MediaSession handlers, metadata & playbackState = 'playing'
+      activateMediaSessionForPlayback(track, true);
 
       const invokePlay = () => {
+        unlockPersistentAudioElement(audio, false);
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
           playPromise.catch((err: unknown) => {
@@ -394,6 +508,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           audio.src = prewarmedBlobUrl;
           invokePlay();
         } else if (shouldUseOfflineCache) {
+          // Synchronously unlock persistent <audio> inside the user's very first play click gesture
+          // before awaiting Cache Storage so iOS Safari retains background audio permission.
+          unlockPersistentAudioElement(audio, true);
+
           // Load blob directly from Cache Storage (`xlabplayer-audio-v1`) -> ObjectURL
           setIsBuffering(true);
           void getOfflineAudioBlob(track.id).then((blob) => {
@@ -404,6 +522,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
                 blobUrl = URL.createObjectURL(blob);
                 prewarmedObjectUrlsRef.current.set(track.id, blobUrl);
               }
+              beginTrackTransition();
               audio.src = blobUrl;
               invokePlay();
               return;
@@ -411,6 +530,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
             // Not present in Cache Storage: fall back to network only if online
             if (typeof navigator === 'undefined' || navigator.onLine) {
+              beginTrackTransition();
               audio.src = getStreamUrl(track.id);
               invokePlay();
             } else {
@@ -433,11 +553,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setDuration(track.duration || 0);
     },
     [
+      activateMediaSessionForPlayback,
       beginTrackTransition,
       clearRecoveryTimer,
+      clearVisibilityResumeTimers,
       endTrackTransition,
       setMediaSessionPlaybackState,
-      syncMediaSessionMetadata,
     ]
   );
 
@@ -504,6 +625,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     if (currentTrackId === null) {
       endTrackTransition();
       clearRecoveryTimer();
+      clearVisibilityResumeTimers();
+      userPausedRef.current = true;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
       audio.pause();
@@ -524,6 +647,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     }
   }, [
     clearRecoveryTimer,
+    clearVisibilityResumeTimers,
     currentTrackId,
     endTrackTransition,
     loadAndPlayTrackSync,
@@ -574,15 +698,19 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   );
 
   const togglePlay = useCallback(() => {
-    const audio = audioRef.current;
+    const audio = audioRef.current ?? getPersistentAudioElement();
     const activeTrack = stateRef.current.currentTrack;
     if (!audio || !activeTrack) return;
+    audioRef.current = audio;
 
     if (audio.paused) {
+      userPausedRef.current = false;
       wantPlayingRef.current = true;
+      lockAutoResumeAttemptsRef.current = 0;
       stateRef.current.isPlaying = true;
-      syncMediaSessionMetadata(activeTrack, false);
-      setMediaSessionPlaybackState('playing');
+      clearVisibilityResumeTimers();
+      unlockPersistentAudioElement(audio, false);
+      activateMediaSessionForPlayback(activeTrack, false);
       audio
         .play()
         .then(() => {
@@ -598,6 +726,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     } else {
       endTrackTransition();
       clearRecoveryTimer();
+      clearVisibilityResumeTimers();
+      userPausedRef.current = true;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
       audio.pause();
@@ -606,10 +736,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       syncMediaSessionPositionState(audio);
     }
   }, [
+    activateMediaSessionForPlayback,
     clearRecoveryTimer,
+    clearVisibilityResumeTimers,
     endTrackTransition,
     setMediaSessionPlaybackState,
-    syncMediaSessionMetadata,
     syncMediaSessionPositionState,
   ]);
 
@@ -622,13 +753,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       if (rep === 'one') {
         const activeTrack = q[idx] ?? stateRef.current.currentTrack;
+        userPausedRef.current = false;
         wantPlayingRef.current = true;
+        lockAutoResumeAttemptsRef.current = 0;
         stateRef.current.isPlaying = true;
         audio.currentTime = 0;
-        if (activeTrack) {
-          syncMediaSessionMetadata(activeTrack, false);
-        }
-        setMediaSessionPlaybackState('playing');
+        activateMediaSessionForPlayback(activeTrack, false);
         audio.play().catch((err: unknown) => {
           if (err instanceof DOMException && err.name === 'AbortError') return;
           wantPlayingRef.current = false;
@@ -657,6 +787,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       if (nextIdx < 0 || !q[nextIdx]) {
         endTrackTransition();
         clearRecoveryTimer();
+        clearVisibilityResumeTimers();
+        userPausedRef.current = true;
         wantPlayingRef.current = false;
         stateRef.current.isPlaying = false;
         setIsPlaying(false);
@@ -676,11 +808,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setCurrentIndex(nextIdx);
     },
     [
+      activateMediaSessionForPlayback,
       clearRecoveryTimer,
+      clearVisibilityResumeTimers,
       endTrackTransition,
       loadAndPlayTrackSync,
       setMediaSessionPlaybackState,
-      syncMediaSessionMetadata,
       syncMediaSessionPositionState,
     ]
   );
@@ -761,6 +894,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
   const playTrackById = useCallback(
     async (trackId: number) => {
+      // Unlock persistent <audio> synchronously inside user gesture before awaiting track metadata
+      unlockPersistentAudioElement(audioRef.current ?? getPersistentAudioElement(), true);
       try {
         const data = await apiFetch<{track: Track}>(`/api/tracks/${trackId}`);
         if (data.track) {
@@ -809,6 +944,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       if (activeWasDeleted && audioRef.current) {
         endTrackTransition();
         clearRecoveryTimer();
+        clearVisibilityResumeTimers();
+        userPausedRef.current = true;
         wantPlayingRef.current = false;
         stateRef.current.isPlaying = false;
         audioRef.current.pause();
@@ -935,122 +1072,307 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     setRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'));
   }, []);
 
-  // Attach native DOM audio event listeners directly to the single persistent HTMLAudioElement
-  // so `ended`, `stalled`, `waiting`, and MediaSession sync run immediately even while locked/backgrounded.
+  // Keep MediaSession action handlers pointed at the latest callbacks without tearing down listeners
+  mediaActionsRef.current = {
+    play: () => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      userPausedRef.current = false;
+      wantPlayingRef.current = true;
+      lockAutoResumeAttemptsRef.current = 0;
+      stateRef.current.isPlaying = true;
+      clearVisibilityResumeTimers();
+      activateMediaSessionForPlayback(stateRef.current.currentTrack, false);
+      audio
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+          syncMediaSessionPositionState(audio);
+        })
+        .catch(() => {
+          wantPlayingRef.current = false;
+          stateRef.current.isPlaying = false;
+          setIsPlaying(false);
+          setMediaSessionPlaybackState('paused');
+        });
+    },
+    pause: () => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      endTrackTransition();
+      clearRecoveryTimer();
+      clearVisibilityResumeTimers();
+      userPausedRef.current = true;
+      wantPlayingRef.current = false;
+      stateRef.current.isPlaying = false;
+      audio.pause();
+      setIsPlaying(false);
+      setMediaSessionPlaybackState('paused');
+      syncMediaSessionPositionState(audio);
+    },
+    prevTrack,
+    nextTrack,
+    seek,
+  };
+
+  // Stable ref for internal lifecycle callbacks so native DOM & visibilitychange listeners
+  // attach ONCE on mount and never pause/reset the persistent HTMLAudioElement on re-render.
+  const lifecycleRef = useRef({
+    advanceToNextTrack,
+    clearRecoveryTimer,
+    clearVisibilityResumeTimers,
+    endTrackTransition,
+    scheduleBufferRecovery,
+    activateMediaSessionForPlayback,
+    registerMediaSessionHandlers,
+    setMediaSessionPlaybackState,
+    syncMediaSessionMetadata,
+    syncMediaSessionPositionState,
+  });
+  lifecycleRef.current = {
+    advanceToNextTrack,
+    clearRecoveryTimer,
+    clearVisibilityResumeTimers,
+    endTrackTransition,
+    scheduleBufferRecovery,
+    activateMediaSessionForPlayback,
+    registerMediaSessionHandlers,
+    setMediaSessionPlaybackState,
+    syncMediaSessionMetadata,
+    syncMediaSessionPositionState,
+  };
+
+  // Attach native DOM audio event listeners & lock-screen visibilitychange recovery ONCE
+  // directly to the single persistent HTMLAudioElement so `ended`, `stalled`, `waiting`,
+  // screen-lock auto-resume, and MediaSession sync run immediately even while locked/backgrounded.
   useEffect(() => {
     const audio = audioRef.current ?? getPersistentAudioElement();
     if (!audio) return;
     audioRef.current = audio;
 
+    // Register MediaSession handlers initially as well
+    lifecycleRef.current.registerMediaSessionHandlers();
+
     const handlePlay = () => {
-      endTrackTransition();
+      lifecycleRef.current.endTrackTransition();
+      userPausedRef.current = false;
       wantPlayingRef.current = true;
       stateRef.current.isPlaying = true;
       setIsPlaying(true);
-      syncMediaSessionMetadata(stateRef.current.currentTrack, false);
-      setMediaSessionPlaybackState('playing');
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.activateMediaSessionForPlayback(stateRef.current.currentTrack, false);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handlePlaying = () => {
-      endTrackTransition();
-      clearRecoveryTimer();
+      lifecycleRef.current.endTrackTransition();
+      lifecycleRef.current.clearRecoveryTimer();
+      lifecycleRef.current.clearVisibilityResumeTimers();
       recoveryAttemptsRef.current = 0;
+      lockAutoResumeAttemptsRef.current = 0;
       setIsBuffering(false);
+      userPausedRef.current = false;
       wantPlayingRef.current = true;
       stateRef.current.isPlaying = true;
       setIsPlaying(true);
-      syncMediaSessionMetadata(stateRef.current.currentTrack, false);
-      setMediaSessionPlaybackState('playing');
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.activateMediaSessionForPlayback(stateRef.current.currentTrack, false);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handlePause = () => {
       // Ignore synthetic pause events fired mid-transition when swapping audio.src or reaching ended
       if (transitioningTrackRef.current || audio.ended) return;
-      clearRecoveryTimer();
+
+      // Ignore silent primer pause if real track hasn't started yet
+      if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
+
+      // If the browser paused audio without an explicit user pause action (e.g. phone screen lock),
+      // immediately resume while locked and keep MediaSession playbackState = 'playing'.
+      if (!userPausedRef.current && wantPlayingRef.current && stateRef.current.currentTrack) {
+        lastUnexpectedPauseAtRef.current = Date.now();
+        if (document.visibilityState === 'hidden' && lockAutoResumeAttemptsRef.current < 3) {
+          lockAutoResumeAttemptsRef.current += 1;
+          lifecycleRef.current.activateMediaSessionForPlayback(
+            stateRef.current.currentTrack,
+            false
+          );
+          const resumePromise = audio.play();
+          if (resumePromise && typeof resumePromise.catch === 'function') {
+            resumePromise.catch((err: unknown) => {
+              if (err instanceof DOMException && err.name === 'AbortError') return;
+              wantPlayingRef.current = false;
+              stateRef.current.isPlaying = false;
+              setIsPlaying(false);
+              lifecycleRef.current.setMediaSessionPlaybackState('paused');
+            });
+          }
+          return;
+        }
+      }
+
+      lifecycleRef.current.clearRecoveryTimer();
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
       setIsPlaying(false);
-      syncMediaSessionMetadata(stateRef.current.currentTrack, false);
-      setMediaSessionPlaybackState('paused');
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
+      lifecycleRef.current.setMediaSessionPlaybackState('paused');
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handleWaiting = () => {
       setIsBuffering(true);
       if (wantPlayingRef.current && !audio.ended) {
-        setMediaSessionPlaybackState('playing');
-        scheduleBufferRecovery('waiting');
+        lifecycleRef.current.setMediaSessionPlaybackState('playing');
+        lifecycleRef.current.scheduleBufferRecovery('waiting');
       }
     };
 
     const handleStalled = () => {
       setIsBuffering(true);
       if (wantPlayingRef.current && !audio.ended) {
-        setMediaSessionPlaybackState('playing');
-        scheduleBufferRecovery('stalled');
+        lifecycleRef.current.setMediaSessionPlaybackState('playing');
+        lifecycleRef.current.scheduleBufferRecovery('stalled');
       }
     };
 
     const handleCanPlay = () => {
-      clearRecoveryTimer();
+      lifecycleRef.current.clearRecoveryTimer();
       recoveryAttemptsRef.current = 0;
       setIsBuffering(false);
-      if (wantPlayingRef.current && audio.paused && !audio.ended) {
+      if (wantPlayingRef.current && !userPausedRef.current && audio.paused && !audio.ended) {
         audio.play().catch(() => {});
       }
     };
 
     const handleLoadedMetadata = () => {
+      if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
       const d = audio.duration;
       if (Number.isFinite(d) && d > 0) {
         stateRef.current.duration = d;
         setDuration(d);
       }
-      syncMediaSessionMetadata(stateRef.current.currentTrack, true);
-      setMediaSessionPlaybackState(
+      lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, true);
+      lifecycleRef.current.setMediaSessionPlaybackState(
         wantPlayingRef.current || !audio.paused ? 'playing' : 'paused'
       );
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handleDurationChange = () => {
+      if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
       const d = audio.duration;
       if (Number.isFinite(d) && d > 0) {
         stateRef.current.duration = d;
         setDuration(d);
       }
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handleTimeUpdate = () => {
+      if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
       setCurrentTime(audio.currentTime);
-      syncMediaSessionMetadata(stateRef.current.currentTrack, false);
+      lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
       if (!transitioningTrackRef.current) {
-        setMediaSessionPlaybackState(audio.paused ? 'paused' : 'playing');
+        lifecycleRef.current.setMediaSessionPlaybackState(audio.paused ? 'paused' : 'playing');
       }
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handleSeeked = () => {
       setCurrentTime(audio.currentTime);
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handleRateChange = () => {
-      syncMediaSessionPositionState(audio);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
     const handleEnded = () => {
-      advanceToNextTrack(true);
+      if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
+      lifecycleRef.current.advanceToNextTrack(true);
     };
 
     const handleError = () => {
-      endTrackTransition();
+      lifecycleRef.current.endTrackTransition();
       setIsBuffering(false);
-      if (wantPlayingRef.current && stateRef.current.currentTrack && recoveryAttemptsRef.current < 2) {
-        scheduleBufferRecovery('stalled');
+      if (
+        wantPlayingRef.current &&
+        !userPausedRef.current &&
+        stateRef.current.currentTrack &&
+        recoveryAttemptsRef.current < 2
+      ) {
+        lifecycleRef.current.scheduleBufferRecovery('stalled');
+      }
+    };
+
+    // Recover immediately if mobile browser/OS pauses audio when locking the screen (first lock or later)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        const hadRecentBrowserPause =
+          !userPausedRef.current && Date.now() - lastUnexpectedPauseAtRef.current < 600;
+        const shouldKeepPlaying =
+          (wantPlayingRef.current || stateRef.current.isPlaying || hadRecentBrowserPause) &&
+          !userPausedRef.current &&
+          !audio.ended &&
+          Boolean(stateRef.current.currentTrack);
+
+        if (!shouldKeepPlaying) return;
+
+        // Restore playing intent in case the browser fired `pause` milliseconds before `visibilitychange`
+        wantPlayingRef.current = true;
+        stateRef.current.isPlaying = true;
+        setIsPlaying(true);
+
+        const enforceBackgroundPlayback = () => {
+          if (
+            !wantPlayingRef.current ||
+            userPausedRef.current ||
+            audio.ended ||
+            !stateRef.current.currentTrack
+          ) {
+            return;
+          }
+          lifecycleRef.current.activateMediaSessionForPlayback(
+            stateRef.current.currentTrack,
+            false
+          );
+          lifecycleRef.current.syncMediaSessionPositionState(audio);
+          if (audio.paused && lockAutoResumeAttemptsRef.current < 3) {
+            lockAutoResumeAttemptsRef.current += 1;
+            const p = audio.play();
+            if (p && typeof p.catch === 'function') {
+              p.catch((err: unknown) => {
+                if (err instanceof DOMException && err.name === 'AbortError') return;
+                wantPlayingRef.current = false;
+                stateRef.current.isPlaying = false;
+                setIsPlaying(false);
+                lifecycleRef.current.setMediaSessionPlaybackState('paused');
+              });
+            }
+          }
+        };
+
+        // Run synchronously on lock + short follow-ups in case iOS/Android pauses slightly after hidden
+        enforceBackgroundPlayback();
+        lifecycleRef.current.clearVisibilityResumeTimers();
+        visibilityResumeTimersRef.current = [
+          window.setTimeout(enforceBackgroundPlayback, 50),
+          window.setTimeout(enforceBackgroundPlayback, 250),
+        ];
+      } else if (document.visibilityState === 'visible') {
+        lifecycleRef.current.clearVisibilityResumeTimers();
+        lockAutoResumeAttemptsRef.current = 0;
+
+        // Reconcile React & MediaSession state when returning from lock screen
+        const actuallyPlaying = !audio.paused && !audio.ended;
+        setIsPlaying(actuallyPlaying);
+        stateRef.current.isPlaying = actuallyPlaying;
+        if (stateRef.current.currentTrack) {
+          lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
+          lifecycleRef.current.setMediaSessionPlaybackState(
+            actuallyPlaying ? 'playing' : 'paused'
+          );
+          lifecycleRef.current.syncMediaSessionPositionState(audio);
+        }
       }
     };
 
@@ -1067,6 +1389,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     audio.addEventListener('ratechange', handleRateChange);
     audio.addEventListener('ended', handleEnded);
     audio.addEventListener('error', handleError);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       audio.removeEventListener('play', handlePlay);
@@ -1082,10 +1405,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       audio.removeEventListener('ratechange', handleRateChange);
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('error', handleError);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
 
       // Pause cleanly if PlayerProvider unmounts (e.g. user logs out), while keeping singleton element intact
-      endTrackTransition();
-      clearRecoveryTimer();
+      lifecycleRef.current.endTrackTransition();
+      lifecycleRef.current.clearRecoveryTimer();
+      lifecycleRef.current.clearVisibilityResumeTimers();
+      userPausedRef.current = true;
       wantPlayingRef.current = false;
       audio.pause();
       audio.removeAttribute('src');
@@ -1098,115 +1424,29 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         }
       }
       prewarmedObjectUrlsRef.current.clear();
-      syncMediaSessionMetadata(null);
-      setMediaSessionPlaybackState('none');
-    };
-  }, [
-    advanceToNextTrack,
-    clearRecoveryTimer,
-    endTrackTransition,
-    scheduleBufferRecovery,
-    setMediaSessionPlaybackState,
-    syncMediaSessionMetadata,
-    syncMediaSessionPositionState,
-  ]);
+      lifecycleRef.current.syncMediaSessionMetadata(null);
+      lifecycleRef.current.setMediaSessionPlaybackState('none');
 
-  // Register MediaSession action handlers once persistently for iOS/Android lock screens, Bluetooth & CarPlay
-  useEffect(() => {
-    if (!('mediaSession' in navigator)) return;
-
-    const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
-      [
-        'play',
-        () => {
-          const audio = audioRef.current;
-          if (!audio) return;
-          wantPlayingRef.current = true;
-          stateRef.current.isPlaying = true;
-          syncMediaSessionMetadata(stateRef.current.currentTrack, false);
-          setMediaSessionPlaybackState('playing');
-          audio
-            .play()
-            .then(() => {
-              setIsPlaying(true);
-              syncMediaSessionPositionState(audio);
-            })
-            .catch(() => {
-              wantPlayingRef.current = false;
-              stateRef.current.isPlaying = false;
-              setIsPlaying(false);
-              setMediaSessionPlaybackState('paused');
-            });
-        },
-      ],
-      [
-        'pause',
-        () => {
-          const audio = audioRef.current;
-          if (!audio) return;
-          endTrackTransition();
-          clearRecoveryTimer();
-          wantPlayingRef.current = false;
-          stateRef.current.isPlaying = false;
-          audio.pause();
-          setIsPlaying(false);
-          setMediaSessionPlaybackState('paused');
-          syncMediaSessionPositionState(audio);
-        },
-      ],
-      ['previoustrack', () => prevTrack()],
-      ['nexttrack', () => nextTrack()],
-      [
-        'seekto',
-        (details) => {
-          if (typeof details.seekTime === 'number') {
-            seek(details.seekTime, Boolean(details.fastSeek));
+      if ('mediaSession' in navigator) {
+        const actions: MediaSessionAction[] = [
+          'play',
+          'pause',
+          'previoustrack',
+          'nexttrack',
+          'seekto',
+          'seekbackward',
+          'seekforward',
+        ];
+        for (const action of actions) {
+          try {
+            navigator.mediaSession.setActionHandler(action, null);
+          } catch {
+            // ignore
           }
-        },
-      ],
-      [
-        'seekbackward',
-        (details) => {
-          const offset = details.seekOffset || 10;
-          seek((audioRef.current?.currentTime || 0) - offset);
-        },
-      ],
-      [
-        'seekforward',
-        (details) => {
-          const offset = details.seekOffset || 10;
-          seek((audioRef.current?.currentTime || 0) + offset);
-        },
-      ],
-    ];
-
-    for (const [action, handler] of handlers) {
-      try {
-        navigator.mediaSession.setActionHandler(action, handler);
-      } catch {
-        // Ignore unsupported MediaSession action handlers on older browsers
-      }
-    }
-
-    return () => {
-      for (const [action] of handlers) {
-        try {
-          navigator.mediaSession.setActionHandler(action, null);
-        } catch {
-          // ignore
         }
       }
     };
-  }, [
-    clearRecoveryTimer,
-    endTrackTransition,
-    nextTrack,
-    prevTrack,
-    seek,
-    setMediaSessionPlaybackState,
-    syncMediaSessionMetadata,
-    syncMediaSessionPositionState,
-  ]);
+  }, []);
 
   // Keep MediaSession metadata synced whenever track info changes
   useEffect(() => {
