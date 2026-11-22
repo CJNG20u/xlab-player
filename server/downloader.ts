@@ -137,9 +137,11 @@ function createTempCookiesCopy(): string | null {
 
 function buildResilienceArgs(
   tempCookiePath: string | null,
-  options: {includeSleep?: boolean} = {}
+  options: {includeSleep?: boolean; includePlayerClient?: boolean; forceIpv4?: boolean} = {}
 ): string[] {
   const includeSleep = options.includeSleep ?? true;
+  const includePlayerClient = options.includePlayerClient ?? true;
+  const forceIpv4 = options.forceIpv4 ?? false;
   const args: string[] = ['--js-runtimes', 'node'];
   if (tempCookiePath) {
     args.push('--cookies', tempCookiePath);
@@ -147,9 +149,11 @@ function buildResilienceArgs(
   if (getSetting('ytdlp_remote_components', 'true') === 'true') {
     args.push('--remote-components', 'ejs:github');
   }
-  const playerClient = getSetting('ytdlp_player_client', 'web,mweb,android_vr').trim();
-  if (playerClient) {
-    args.push('--extractor-args', `youtube:player_client=${playerClient}`);
+  if (includePlayerClient) {
+    const playerClient = getSetting('ytdlp_player_client', 'web,mweb,android_vr').trim();
+    if (playerClient) {
+      args.push('--extractor-args', `youtube:player_client=${playerClient}`);
+    }
   }
   if (includeSleep) {
     const sleepMin = Number(getSetting('ytdlp_sleep_interval', '2'));
@@ -161,7 +165,7 @@ function buildResilienceArgs(
       args.push('--max-sleep-interval', String(sleepMax));
     }
   }
-  if (getSetting('ytdlp_force_ipv4', 'true') === 'true') {
+  if (forceIpv4 || getSetting('ytdlp_force_ipv4', 'true') === 'true') {
     args.push('--force-ipv4');
   }
   const extra = getSetting('ytdlp_extra_flags', '').trim();
@@ -801,8 +805,49 @@ const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googleusercontent.com',
 ];
 
-const ytStreamUrlCache = new Map<string, {url: string; expiresAt: number}>();
-const ytStreamInFlight = new Map<string, Promise<string>>();
+export interface ResolvedYouTubeAudioStream {
+  url: string;
+  headers: Record<string, string>;
+}
+
+const HOP_BY_HOP_AND_EXCLUDED_HEADERS = new Set([
+  'host',
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailers',
+  'transfer-encoding',
+  'upgrade',
+  'content-length',
+  'range',
+  'accept-encoding',
+]);
+
+function sanitizeStreamHeaders(raw: unknown): Record<string, string> {
+  const cleaned: Record<string, string> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return cleaned;
+  }
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== 'string' || typeof value !== 'string') continue;
+    const trimmedKey = key.trim();
+    const trimmedValue = value.trim();
+    if (!trimmedKey || !trimmedValue) continue;
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(trimmedKey)) continue;
+    if (/[\r\n]/.test(trimmedValue)) continue;
+    if (HOP_BY_HOP_AND_EXCLUDED_HEADERS.has(trimmedKey.toLowerCase())) continue;
+    cleaned[trimmedKey] = trimmedValue;
+  }
+  return cleaned;
+}
+
+const ytStreamUrlCache = new Map<
+  string,
+  {url: string; headers: Record<string, string>; expiresAt: number}
+>();
+const ytStreamInFlight = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
 
 export function isValidYouTubeVideoId(videoId: string): boolean {
   return YOUTUBE_VIDEO_ID_RE.test(videoId);
@@ -855,7 +900,7 @@ export function invalidateYouTubeAudioStreamCache(videoId: string): void {
 export async function resolveYouTubeAudioStreamUrl(
   videoId: string,
   options: {forceRefresh?: boolean} = {}
-): Promise<{url: string; fromCache: boolean}> {
+): Promise<{url: string; headers: Record<string, string>; fromCache: boolean}> {
   if (!isValidYouTubeVideoId(videoId)) {
     throw new Error('Invalid YouTube video ID');
   }
@@ -864,7 +909,7 @@ export async function resolveYouTubeAudioStreamUrl(
   if (!options.forceRefresh) {
     const cached = ytStreamUrlCache.get(videoId);
     if (cached && cached.expiresAt > now) {
-      return {url: cached.url, fromCache: true};
+      return {url: cached.url, headers: {...cached.headers}, fromCache: true};
     }
     if (cached) {
       ytStreamUrlCache.delete(videoId);
@@ -872,20 +917,24 @@ export async function resolveYouTubeAudioStreamUrl(
 
     const existingPromise = ytStreamInFlight.get(videoId);
     if (existingPromise) {
-      const url = await existingPromise;
-      return {url, fromCache: false};
+      const resolved = await existingPromise;
+      return {url: resolved.url, headers: {...resolved.headers}, fromCache: false};
     }
   }
 
-  const resolvePromise = (async (): Promise<string> => {
+  const resolvePromise = (async (): Promise<ResolvedYouTubeAudioStream> => {
     const ytdlpPath = getYtdlpPath();
     const tempCookiePath = createTempCookiesCopy();
     try {
       const args = [
-        ...buildResilienceArgs(tempCookiePath, {includeSleep: false}),
+        ...buildResilienceArgs(tempCookiePath, {
+          includeSleep: false,
+          includePlayerClient: false,
+          forceIpv4: true,
+        }),
         '-f',
         'bestaudio[ext=m4a]/bestaudio',
-        '-g',
+        '--dump-single-json',
         '--no-playlist',
         '--no-warnings',
         '--',
@@ -894,25 +943,44 @@ export async function resolveYouTubeAudioStreamUrl(
 
       const {stdout} = await execFileAsync(ytdlpPath, args, {
         timeout: 30000,
-        maxBuffer: 2 * 1024 * 1024,
+        maxBuffer: 10 * 1024 * 1024,
       });
 
-      const directUrl = stdout
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .find((line) => /^https:\/\//i.test(line));
+      const trimmed = stdout.trim();
+      const jsonStart = trimmed.indexOf('{');
+      if (jsonStart === -1) {
+        throw new Error('Could not parse YouTube stream metadata JSON');
+      }
+      const data = JSON.parse(trimmed.slice(jsonStart)) as {
+        url?: unknown;
+        http_headers?: unknown;
+        requested_formats?: Array<{url?: unknown; http_headers?: unknown}>;
+      };
+
+      const primaryFormat =
+        typeof data.url === 'string' && data.url.trim()
+          ? data
+          : Array.isArray(data.requested_formats) && data.requested_formats.length > 0
+            ? data.requested_formats[0]
+            : null;
+
+      const directUrl =
+        primaryFormat && typeof primaryFormat.url === 'string' ? primaryFormat.url.trim() : '';
 
       if (!directUrl || !isAllowedYouTubeMediaUrl(directUrl)) {
         throw new Error('Could not resolve a valid YouTube audio stream URL');
       }
 
+      const headers = sanitizeStreamHeaders(primaryFormat?.http_headers ?? data.http_headers);
+
       const resolvedAt = Date.now();
       pruneExpiredYtStreamCache(resolvedAt);
       ytStreamUrlCache.set(videoId, {
         url: directUrl,
+        headers,
         expiresAt: resolvedAt + YT_STREAM_CACHE_TTL_MS,
       });
-      return directUrl;
+      return {url: directUrl, headers};
     } finally {
       if (tempCookiePath && fs.existsSync(tempCookiePath)) {
         try {
@@ -929,8 +997,8 @@ export async function resolveYouTubeAudioStreamUrl(
   }
 
   try {
-    const url = await resolvePromise;
-    return {url, fromCache: false};
+    const resolved = await resolvePromise;
+    return {url: resolved.url, headers: {...resolved.headers}, fromCache: false};
   } finally {
     if (ytStreamInFlight.get(videoId) === resolvePromise) {
       ytStreamInFlight.delete(videoId);

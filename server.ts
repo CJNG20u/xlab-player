@@ -144,12 +144,15 @@ async function startServer() {
     const rawRange = typeof req.headers.range === 'string' ? req.headers.range.trim() : '';
     const safeRange = /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rawRange) ? rawRange : '';
 
-    const fetchUpstream = async (streamUrl: string): Promise<globalThis.Response> => {
-      const headers: Record<string, string> = {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        Accept: '*/*',
-      };
+    const fetchUpstream = async (
+      streamUrl: string,
+      streamHeaders: Record<string, string>
+    ): Promise<globalThis.Response> => {
+      const headers: Record<string, string> = {...streamHeaders};
+      const hasAccept = Object.keys(headers).some((k) => k.toLowerCase() === 'accept');
+      if (!hasAccept) {
+        headers.Accept = '*/*';
+      }
       if (safeRange) {
         headers.Range = safeRange;
       }
@@ -163,7 +166,7 @@ async function startServer() {
 
     try {
       let resolved = await resolveYouTubeAudioStreamUrl(videoId);
-      let upstream = await fetchUpstream(resolved.url);
+      let upstream = await fetchUpstream(resolved.url, resolved.headers);
 
       // If a cached signed YouTube URL expired early, refresh once transparently
       if (resolved.fromCache && (upstream.status === 403 || upstream.status === 410)) {
@@ -174,7 +177,7 @@ async function startServer() {
         }
         invalidateYouTubeAudioStreamCache(videoId);
         resolved = await resolveYouTubeAudioStreamUrl(videoId, {forceRefresh: true});
-        upstream = await fetchUpstream(resolved.url);
+        upstream = await fetchUpstream(resolved.url, resolved.headers);
       }
 
       // Re-verify final upstream host after any redirects
@@ -184,6 +187,7 @@ async function startServer() {
         } catch {
           // ignore
         }
+        console.error('[yt-stream]', videoId, 'unexpected-upstream-host');
         res.status(502).json({error: 'Unexpected upstream media host'});
         return;
       }
@@ -194,6 +198,7 @@ async function startServer() {
         } catch {
           // ignore
         }
+        console.error('[yt-stream]', videoId, upstream.status);
         res.status(upstream.status === 404 ? 404 : 502).json({
           error: `Upstream YouTube stream returned HTTP ${upstream.status}`,
         });
@@ -242,6 +247,7 @@ async function startServer() {
         return;
       }
       const msg = err instanceof Error ? err.message : 'Failed to stream YouTube audio';
+      console.error('[yt-stream]', videoId, msg);
       if (!res.headersSent) {
         res.status(502).json({error: msg});
       } else if (!res.writableEnded) {
