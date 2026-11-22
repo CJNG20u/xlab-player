@@ -1,5 +1,5 @@
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
-import {apiFetch, getCoverUrl, getStreamUrl} from '../lib/api';
+import {apiFetch, getCoverUrl, getStoredToken, getStreamUrl} from '../lib/api';
 import type {RepeatMode, Track} from '../types';
 import {
   getCachedTrackIds,
@@ -59,6 +59,12 @@ let persistentAudioUnlocked = false;
 // during the user's very first play gesture whenever the first track requires async resolution.
 const SILENT_WAV_DATA_URI =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+
+// Next-track preload thresholds & memory caps for mobile devices
+const PREFETCH_PROGRESS_THRESHOLD = 0.5;
+const PREFETCH_REMAINING_SECONDS = 15;
+const MAX_FULL_PREFETCH_BYTES = 25 * 1024 * 1024; // 25 MB full blob prefetch cap
+const PARTIAL_PREFETCH_BYTES = 2 * 1024 * 1024; // 2 MB Range warm-up for large FLAC files
 
 function getPersistentAudioElement(): HTMLAudioElement | null {
   if (typeof document === 'undefined') return null;
@@ -191,6 +197,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const lastMetadataKeyRef = useRef<string | null>(null);
   const cachedTrackIdsRef = useRef<Set<number>>(new Set());
   const prewarmedObjectUrlsRef = useRef<Map<number, string>>(new Map());
+  const prefetchedObjectUrlsRef = useRef<Map<number, string>>(new Map());
+  const prefetchedTrackIdsRef = useRef<Set<number>>(new Set());
+  const prefetchAbortRef = useRef<AbortController | null>(null);
+  const prefetchInFlightIdRef = useRef<number | null>(null);
   const loadRequestIdRef = useRef(0);
 
   const clearVisibilityResumeTimers = useCallback(() => {
@@ -262,6 +272,27 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
     }
 
+    // Also evict stale next-track prefetched ObjectURLs outside the active/adjacent window
+    for (const [trackId, blobUrl] of prefetchedObjectUrlsRef.current.entries()) {
+      if (!keepIds.has(trackId) && blobUrl !== activeAudioSrc) {
+        URL.revokeObjectURL(blobUrl);
+        prefetchedObjectUrlsRef.current.delete(trackId);
+      }
+    }
+    for (const trackId of Array.from(prefetchedTrackIdsRef.current)) {
+      if (!keepIds.has(trackId)) {
+        prefetchedTrackIdsRef.current.delete(trackId);
+      }
+    }
+    if (
+      prefetchInFlightIdRef.current !== null &&
+      !keepIds.has(prefetchInFlightIdRef.current)
+    ) {
+      prefetchAbortRef.current?.abort();
+      prefetchAbortRef.current = null;
+      prefetchInFlightIdRef.current = null;
+    }
+
     for (const trackId of keepIds) {
       if (
         cachedTrackIdsRef.current.has(trackId) &&
@@ -280,6 +311,121 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       cancelled = true;
     };
   }, [queue, currentIndex, repeat, offlineStoreVersion]);
+
+  // Silently prefetch the next track in the queue once the current track reaches 50% playback
+  // or <= 15 seconds remaining so auto-advance and album-cover swipes start without buffering.
+  const prefetchNextTrackIfReady = useCallback((pos: number, dur: number) => {
+    if (!Number.isFinite(dur) || dur <= 0 || !Number.isFinite(pos) || pos < 0) return;
+
+    const reachedHalfway = pos / dur >= PREFETCH_PROGRESS_THRESHOLD;
+    const withinRemainingWindow = dur - pos <= PREFETCH_REMAINING_SECONDS;
+    if (!reachedHalfway && !withinRemainingWindow) return;
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    const {queue: q, currentIndex: idx, repeat: rep, shuffle: isShuf} = stateRef.current;
+    if (rep === 'one' || isShuf || q.length === 0 || idx < 0) return;
+
+    let nextItem: Track | null = null;
+    if (idx + 1 < q.length) {
+      nextItem = q[idx + 1];
+    } else if (rep === 'all' && q.length > 1) {
+      nextItem = q[0];
+    }
+
+    if (!nextItem) return;
+
+    const nextId = nextItem.id;
+    if (
+      cachedTrackIdsRef.current.has(nextId) ||
+      prewarmedObjectUrlsRef.current.has(nextId) ||
+      prefetchedObjectUrlsRef.current.has(nextId) ||
+      prefetchedTrackIdsRef.current.has(nextId) ||
+      prefetchInFlightIdRef.current === nextId
+    ) {
+      return;
+    }
+
+    // Warm the next track's cover image in the browser HTTP cache for instant swipe visuals
+    const nextCoverUrl = getCoverUrl(nextItem.cover_file);
+    if (nextCoverUrl && typeof Image !== 'undefined') {
+      const preloadImg = new Image();
+      preloadImg.decoding = 'async';
+      preloadImg.src = nextCoverUrl;
+    }
+
+    // Abort any obsolete prefetch targeting a different track
+    if (prefetchAbortRef.current) {
+      prefetchAbortRef.current.abort();
+      prefetchAbortRef.current = null;
+    }
+
+    const controller = new AbortController();
+    prefetchAbortRef.current = controller;
+    prefetchInFlightIdRef.current = nextId;
+
+    const streamUrl = getStreamUrl(nextId);
+    const token = getStoredToken();
+    const headers = new Headers();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+
+    const canPrefetchFullBlob =
+      typeof nextItem.size_bytes === 'number' &&
+      nextItem.size_bytes > 0 &&
+      nextItem.size_bytes <= MAX_FULL_PREFETCH_BYTES;
+
+    if (!canPrefetchFullBlob) {
+      // For large lossless FLACs (>25 MB), warm the opening 2 MB chunk via Range request
+      // to keep mobile RAM low while priming HTTP cache & NAS read-ahead.
+      headers.set('Range', `bytes=0-${PARTIAL_PREFETCH_BYTES - 1}`);
+    }
+
+    const fetchInit = {
+      method: 'GET',
+      headers,
+      credentials: 'include',
+      signal: controller.signal,
+      priority: 'low',
+    } as RequestInit;
+
+    void fetch(streamUrl, fetchInit)
+      .then(async (res) => {
+        if (!res.ok || controller.signal.aborted) return;
+
+        if (canPrefetchFullBlob) {
+          const contentLenHeader = res.headers.get('content-length');
+          const contentLen = contentLenHeader ? parseInt(contentLenHeader, 10) : 0;
+          if (contentLen > MAX_FULL_PREFETCH_BYTES) return;
+
+          const blob = await res.blob();
+          if (controller.signal.aborted || blob.size === 0) return;
+
+          if (!prefetchedObjectUrlsRef.current.has(nextId)) {
+            prefetchedObjectUrlsRef.current.set(nextId, URL.createObjectURL(blob));
+          }
+          prefetchedTrackIdsRef.current.add(nextId);
+        } else {
+          // Consume the opening 2 MB Range chunk so the browser/proxy caches it cleanly
+          await res.arrayBuffer();
+          if (!controller.signal.aborted) {
+            prefetchedTrackIdsRef.current.add(nextId);
+          }
+        }
+      })
+      .catch(() => {
+        // Ignore AbortError or transient mobile background fetch errors
+      })
+      .finally(() => {
+        if (prefetchInFlightIdRef.current === nextId) {
+          prefetchInFlightIdRef.current = null;
+        }
+        if (prefetchAbortRef.current === controller) {
+          prefetchAbortRef.current = null;
+        }
+      });
+  }, []);
 
   const clearRecoveryTimer = useCallback(() => {
     if (recoveryTimerRef.current !== null) {
@@ -495,7 +641,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         }
         invokePlay();
       } else {
-        const prewarmedBlobUrl = prewarmedObjectUrlsRef.current.get(track.id);
+        const prewarmedBlobUrl =
+          prewarmedObjectUrlsRef.current.get(track.id) ??
+          prefetchedObjectUrlsRef.current.get(track.id);
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         const shouldUseOfflineCache =
           Boolean(prewarmedBlobUrl) || cachedTrackIdsRef.current.has(track.id) || isOffline;
@@ -504,7 +652,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         audio.dataset.trackId = String(track.id);
 
         if (prewarmedBlobUrl) {
-          // Synchronous ObjectURL assignment from pre-warmed offline cache
+          // Synchronous ObjectURL assignment from pre-warmed offline cache or next-track prefetch
           audio.src = prewarmedBlobUrl;
           invokePlay();
         } else if (shouldUseOfflineCache) {
@@ -967,6 +1115,17 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           URL.revokeObjectURL(blobUrl);
           prewarmedObjectUrlsRef.current.delete(id);
         }
+        const prefetchedUrl = prefetchedObjectUrlsRef.current.get(id);
+        if (prefetchedUrl) {
+          URL.revokeObjectURL(prefetchedUrl);
+          prefetchedObjectUrlsRef.current.delete(id);
+        }
+        prefetchedTrackIdsRef.current.delete(id);
+        if (prefetchInFlightIdRef.current === id) {
+          prefetchAbortRef.current?.abort();
+          prefetchAbortRef.current = null;
+          prefetchInFlightIdRef.current = null;
+        }
         void removeOfflineTrack(id);
       }
 
@@ -1122,6 +1281,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     clearRecoveryTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
+    prefetchNextTrackIfReady,
     scheduleBufferRecovery,
     activateMediaSessionForPlayback,
     registerMediaSessionHandlers,
@@ -1134,6 +1294,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     clearRecoveryTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
+    prefetchNextTrackIfReady,
     scheduleBufferRecovery,
     activateMediaSessionForPlayback,
     registerMediaSessionHandlers,
@@ -1269,7 +1430,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     const handleTimeUpdate = () => {
       if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
-      setCurrentTime(audio.currentTime);
+      const pos = audio.currentTime;
+      const dur =
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : stateRef.current.duration;
+      setCurrentTime(pos);
+      lifecycleRef.current.prefetchNextTrackIfReady(pos, dur);
       lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
       if (!transitioningTrackRef.current) {
         lifecycleRef.current.setMediaSessionPlaybackState(audio.paused ? 'paused' : 'playing');
@@ -1278,7 +1445,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     };
 
     const handleSeeked = () => {
-      setCurrentTime(audio.currentTime);
+      const pos = audio.currentTime;
+      const dur =
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : stateRef.current.duration;
+      setCurrentTime(pos);
+      lifecycleRef.current.prefetchNextTrackIfReady(pos, dur);
       lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
@@ -1424,6 +1597,18 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         }
       }
       prewarmedObjectUrlsRef.current.clear();
+      prefetchAbortRef.current?.abort();
+      prefetchAbortRef.current = null;
+      prefetchInFlightIdRef.current = null;
+      for (const blobUrl of prefetchedObjectUrlsRef.current.values()) {
+        try {
+          URL.revokeObjectURL(blobUrl);
+        } catch {
+          // ignore
+        }
+      }
+      prefetchedObjectUrlsRef.current.clear();
+      prefetchedTrackIdsRef.current.clear();
       lifecycleRef.current.syncMediaSessionMetadata(null);
       lifecycleRef.current.setMediaSessionPlaybackState('none');
 

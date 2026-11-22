@@ -24,6 +24,9 @@ import {apiFetch, formatDuration, getCoverUrl, parseLrc} from '../lib/api';
 import {
   computeNowPlayingTopHex,
   DEFAULT_APP_THEME_COLOR,
+  extractDominantColorFromImage,
+  getAlbumColorCacheKey,
+  getCachedDominantColor,
   setDocumentThemeColor,
 } from '../lib/themeColor';
 import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineStore';
@@ -56,6 +59,7 @@ export const NowPlayingPage: React.FC = () => {
   const [rawLyrics, setRawLyrics] = useState<string | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [offlineCoverBackdrop, setOfflineCoverBackdrop] = useState<string | null>(null);
+  const [sampledDominantColor, setSampledDominantColor] = useState<string | null>(null);
 
   const artworkSwipe = useSwipeTrackGesture({
     onSwipeNext: nextTrack,
@@ -69,12 +73,58 @@ export const NowPlayingPage: React.FC = () => {
 
   const trackId = currentTrack?.id ?? null;
   const coverFile = currentTrack?.cover_file ?? null;
+  const albumColorKey = useMemo(
+    () => (currentTrack ? getAlbumColorCacheKey(currentTrack) : null),
+    [currentTrack]
+  );
+  const resolvedCoverUrl = offlineCoverBackdrop || getCoverUrl(coverFile);
+
+  // Sample dominant artwork color on a 32x32 offscreen canvas once per album/track and memoize in memory
+  useEffect(() => {
+    if (!currentTrack || !albumColorKey) {
+      setSampledDominantColor(null);
+      return;
+    }
+
+    const cached = getCachedDominantColor(albumColorKey, currentTrack.id);
+    if (cached) {
+      setSampledDominantColor(cached);
+      return;
+    }
+
+    // Show track metadata color immediately while the 32x32 offscreen sample resolves
+    setSampledDominantColor(currentTrack.dominant_color || null);
+
+    if (!resolvedCoverUrl) return;
+    let cancelled = false;
+    void extractDominantColorFromImage(
+      resolvedCoverUrl,
+      albumColorKey,
+      currentTrack.id,
+      currentTrack.dominant_color
+    ).then((hex) => {
+      if (!cancelled) {
+        setSampledDominantColor(hex);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [albumColorKey, currentTrack, resolvedCoverUrl]);
+
+  const effectiveDominantColor = useMemo(() => {
+    if (!currentTrack) return null;
+    const cached = getCachedDominantColor(albumColorKey, currentTrack.id);
+    return cached || sampledDominantColor || currentTrack.dominant_color;
+  }, [albumColorKey, currentTrack, sampledDominantColor]);
+
   const dominantTopHexColor = useMemo(
     () =>
       currentTrack
-        ? computeNowPlayingTopHex(currentTrack.dominant_color)
+        ? computeNowPlayingTopHex(effectiveDominantColor)
         : DEFAULT_APP_THEME_COLOR,
-    [currentTrack]
+    [currentTrack, effectiveDominantColor]
   );
 
   // Dynamically sync mobile status bar (`meta[name="theme-color"]`) with the Now Playing top gradient color,

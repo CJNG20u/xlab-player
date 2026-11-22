@@ -1,10 +1,58 @@
 export const DEFAULT_APP_THEME_COLOR = '#121212';
+const DEFAULT_NOW_PLAYING_ACCENT = '#1f3a2e';
+const COLOR_SAMPLE_SIZE = 32;
+
+// In-memory memoization cache keyed by albumId / cover key and trackId
+// so repeated plays never re-run offscreen canvas pixel loops.
+const dominantColorCache = new Map<string, string>();
+const inFlightColorExtractions = new Map<string, Promise<string>>();
+
+let sharedOffscreenCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+let sharedOffscreenCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
+
+function getOffscreenSampleContext():
+  | OffscreenCanvasRenderingContext2D
+  | CanvasRenderingContext2D
+  | null {
+  if (sharedOffscreenCtx) return sharedOffscreenCtx;
+
+  if (typeof OffscreenCanvas !== 'undefined') {
+    try {
+      const canvas = new OffscreenCanvas(COLOR_SAMPLE_SIZE, COLOR_SAMPLE_SIZE);
+      const ctx = canvas.getContext('2d', {willReadFrequently: true});
+      if (ctx) {
+        sharedOffscreenCanvas = canvas;
+        sharedOffscreenCtx = ctx;
+        return ctx;
+      }
+    } catch {
+      // Fall through to HTMLCanvasElement
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    canvas.width = COLOR_SAMPLE_SIZE;
+    canvas.height = COLOR_SAMPLE_SIZE;
+    const ctx = canvas.getContext('2d', {willReadFrequently: true});
+    if (ctx) {
+      sharedOffscreenCanvas = canvas;
+      sharedOffscreenCtx = ctx;
+      return ctx;
+    }
+  }
+
+  return null;
+}
 
 /**
- * Normalizes a 3- or 6-digit hex color string into uppercase `#RRGGBB`.
+ * Normalizes a 3- or 6-digit hex color string into lowercase `#rrggbb`.
  * Returns the fallback if the input is invalid.
  */
-export function normalizeHexColor(input: string | null | undefined, fallback = DEFAULT_APP_THEME_COLOR): string {
+export function normalizeHexColor(
+  input: string | null | undefined,
+  fallback = DEFAULT_APP_THEME_COLOR
+): string {
   if (!input) return fallback;
   const trimmed = input.trim();
   const shortMatch = /^#([0-9a-fA-F]{3})$/.exec(trimmed);
@@ -19,25 +67,217 @@ export function normalizeHexColor(input: string | null | undefined, fallback = D
   return fallback;
 }
 
+function rgbToHex(r: number, g: number, b: number): string {
+  const clamp = (n: number) =>
+    Math.max(0, Math.min(255, Math.round(n)))
+      .toString(16)
+      .padStart(2, '0');
+  return `#${clamp(r)}${clamp(g)}${clamp(b)}`;
+}
+
+/**
+ * Computes a stable album-level cache key for memoizing extracted artwork colors.
+ */
+export function getAlbumColorCacheKey(track: {
+  id: number;
+  album?: string | null;
+  artist?: string | null;
+  cover_file?: string | null;
+}): string {
+  if (track.cover_file) {
+    return `cover:${track.cover_file}`;
+  }
+  const album = (track.album || '').trim().toLowerCase();
+  const artist = (track.artist || '').trim().toLowerCase();
+  if (album) {
+    return `album:${artist}::${album}`;
+  }
+  return `track:${track.id}`;
+}
+
+/**
+ * Synchronously looks up a previously sampled dominant hex color from memory.
+ */
+export function getCachedDominantColor(
+  albumKey: string | null | undefined,
+  trackId?: number | null
+): string | null {
+  if (albumKey) {
+    const byAlbum = dominantColorCache.get(albumKey);
+    if (byAlbum) return byAlbum;
+  }
+  if (trackId !== null && trackId !== undefined) {
+    const byTrack = dominantColorCache.get(`track:${trackId}`);
+    if (byTrack) return byTrack;
+  }
+  return null;
+}
+
+function storeCachedDominantColor(
+  hexColor: string,
+  albumKey: string | null | undefined,
+  trackId?: number | null
+): void {
+  if (albumKey) {
+    dominantColorCache.set(albumKey, hexColor);
+  }
+  if (trackId !== null && trackId !== undefined) {
+    dominantColorCache.set(`track:${trackId}`, hexColor);
+  }
+}
+
+function sampleDominantHexFromImageElement(
+  img: HTMLImageElement,
+  fallbackHex: string
+): string {
+  const ctx = getOffscreenSampleContext();
+  if (!ctx || !sharedOffscreenCanvas) return fallbackHex;
+
+  try {
+    ctx.clearRect(0, 0, COLOR_SAMPLE_SIZE, COLOR_SAMPLE_SIZE);
+    ctx.drawImage(img, 0, 0, COLOR_SAMPLE_SIZE, COLOR_SAMPLE_SIZE);
+    const {data} = ctx.getImageData(0, 0, COLOR_SAMPLE_SIZE, COLOR_SAMPLE_SIZE);
+
+    let weightedR = 0;
+    let weightedG = 0;
+    let weightedB = 0;
+    let totalWeight = 0;
+
+    let fallbackR = 0;
+    let fallbackG = 0;
+    let fallbackB = 0;
+    let opaqueCount = 0;
+
+    // 32x32 = 1,024 pixels total — single-pass weighted vibrant average
+    for (let i = 0; i < data.length; i += 4) {
+      const a = data[i + 3];
+      if (a < 128) continue;
+
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      fallbackR += r;
+      fallbackG += g;
+      fallbackB += b;
+      opaqueCount++;
+
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const lum = (max + min) / 510; // 0..1
+      if (lum < 0.07 || lum > 0.92) continue;
+
+      const sat = max === 0 ? 0 : (max - min) / max;
+      const midToneBoost = 1 - Math.abs(lum - 0.45);
+      const weight = (0.2 + sat * 2.4) * Math.max(0.25, midToneBoost);
+
+      weightedR += r * weight;
+      weightedG += g * weight;
+      weightedB += b * weight;
+      totalWeight += weight;
+    }
+
+    let finalR: number;
+    let finalG: number;
+    let finalB: number;
+
+    if (totalWeight > 0) {
+      finalR = weightedR / totalWeight;
+      finalG = weightedG / totalWeight;
+      finalB = weightedB / totalWeight;
+    } else if (opaqueCount > 0) {
+      finalR = fallbackR / opaqueCount;
+      finalG = fallbackG / opaqueCount;
+      finalB = fallbackB / opaqueCount;
+    } else {
+      return fallbackHex;
+    }
+
+    // Cap excessive luminance so white status bar icons & typography stay legible
+    const luminance = (0.299 * finalR + 0.587 * finalG + 0.114 * finalB) / 255;
+    if (luminance > 0.62) {
+      const scale = 0.62 / luminance;
+      finalR *= scale;
+      finalG *= scale;
+      finalB *= scale;
+    }
+
+    return rgbToHex(finalR, finalG, finalB);
+  } catch {
+    return fallbackHex;
+  }
+}
+
+/**
+ * Extracts the dominant color from album artwork using a reusable 32x32 offscreen canvas
+ * and memoizes the resulting hex color in memory by albumId/cover key and trackId.
+ */
+export function extractDominantColorFromImage(
+  imageUrl: string | null | undefined,
+  albumKey: string,
+  trackId?: number | null,
+  fallbackColor?: string | null
+): Promise<string> {
+  const fallbackHex = normalizeHexColor(fallbackColor, DEFAULT_NOW_PLAYING_ACCENT);
+
+  const cached = getCachedDominantColor(albumKey, trackId);
+  if (cached) {
+    storeCachedDominantColor(cached, albumKey, trackId);
+    return Promise.resolve(cached);
+  }
+
+  if (!imageUrl || typeof Image === 'undefined') {
+    storeCachedDominantColor(fallbackHex, albumKey, trackId);
+    return Promise.resolve(fallbackHex);
+  }
+
+  const existingPromise = inFlightColorExtractions.get(albumKey);
+  if (existingPromise) {
+    return existingPromise.then((hex) => {
+      storeCachedDominantColor(hex, albumKey, trackId);
+      return hex;
+    });
+  }
+
+  const extraction = new Promise<string>((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.decoding = 'async';
+
+    img.onload = () => {
+      const hex = sampleDominantHexFromImageElement(img, fallbackHex);
+      storeCachedDominantColor(hex, albumKey, trackId);
+      resolve(hex);
+    };
+
+    img.onerror = () => {
+      storeCachedDominantColor(fallbackHex, albumKey, trackId);
+      resolve(fallbackHex);
+    };
+
+    img.src = imageUrl;
+  }).finally(() => {
+    inFlightColorExtractions.delete(albumKey);
+  });
+
+  inFlightColorExtractions.set(albumKey, extraction);
+  return extraction;
+}
+
 /**
  * Computes the exact darkened top gradient hex color used at the top edge of
  * the full-screen Now Playing view so the mobile status bar blends seamlessly
  * while keeping white status bar clock/battery icons legible.
  */
 export function computeNowPlayingTopHex(dominantColor: string | null | undefined): string {
-  const hex = normalizeHexColor(dominantColor, '#1f3a2e');
+  const hex = normalizeHexColor(dominantColor, DEFAULT_NOW_PLAYING_ACCENT);
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
 
   // Apply the same subtle 18% darkening tint to match the top of the Now Playing gradient
   const factor = 0.82;
-  const toHex = (n: number) =>
-    Math.max(0, Math.min(255, Math.round(n * factor)))
-      .toString(16)
-      .padStart(2, '0');
-
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  return rgbToHex(r * factor, g * factor, b * factor);
 }
 
 /**

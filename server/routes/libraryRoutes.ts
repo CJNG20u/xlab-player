@@ -1,4 +1,4 @@
-import {Router} from 'express';
+import {type Response, Router} from 'express';
 import fs from 'fs';
 import path from 'path';
 import {type AuthRequest, requireAuth} from '../auth.ts';
@@ -17,6 +17,12 @@ const MIME_MAP: Record<string, string> = {
   '.wav': 'audio/wav',
 };
 
+// 2 MB default window for open-ended Range requests (`bytes=start-`) so mobile
+// players can seek instantaneously across large FLAC/M4A/OPUS files.
+const DEFAULT_OPEN_RANGE_CHUNK_BYTES = 2 * 1024 * 1024;
+const STREAM_HIGH_WATER_MARK = 64 * 1024;
+const COVER_MAX_AGE_SECONDS = 31536000;
+
 function resolveSafeTrackPath(relPath: string): string | null {
   const musicDir = path.resolve(getMusicDir());
   const absPath = path.resolve(musicDir, relPath);
@@ -26,20 +32,69 @@ function resolveSafeTrackPath(relPath: string): string | null {
   return absPath;
 }
 
-// Serve extracted cover images (no auth strictly needed or cached cleanly)
-libraryRouter.get('/covers/:filename', (req, res) => {
-  const safeName = path.basename(req.params.filename);
-  const abs = path.join(COVERS_DIR, safeName);
-  if (!fs.existsSync(abs)) {
+function buildFileEtag(stat: fs.Stats): string {
+  return `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+}
+
+// Serve extracted cover images with aggressive immutable caching for instant local reuse
+async function handleCoverRequest(req: AuthRequest, res: Response, isHead: boolean): Promise<void> {
+  const safeName = path.basename(String(req.params.filename || ''));
+  if (!safeName) {
     res.status(404).end();
     return;
   }
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-  res.sendFile(abs);
+
+  const abs = path.join(COVERS_DIR, safeName);
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.stat(abs);
+    if (!stat.isFile()) {
+      res.status(404).end();
+      return;
+    }
+  } catch {
+    res.status(404).end();
+    return;
+  }
+
+  const etag = buildFileEtag(stat);
+  res.setHeader('Cache-Control', `public, max-age=${COVER_MAX_AGE_SECONDS}, immutable`);
+  res.setHeader('ETag', etag);
+  res.setHeader('Last-Modified', stat.mtime.toUTCString());
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+
+  if (req.headers['if-none-match'] === etag) {
+    res.status(304).end();
+    return;
+  }
+
+  if (isHead) {
+    res.setHeader('Content-Length', stat.size);
+    res.status(200).end();
+    return;
+  }
+
+  res.sendFile(abs, {
+    etag: false,
+    lastModified: false,
+    cacheControl: false,
+  });
+}
+
+libraryRouter.get('/covers/:filename', (req, res) => {
+  void handleCoverRequest(req, res, false);
+});
+
+libraryRouter.head('/covers/:filename', (req, res) => {
+  void handleCoverRequest(req, res, true);
 });
 
 // HTTP 206 Partial Content byte-range streaming resolved dynamically against active music_dir
-libraryRouter.get('/stream/:trackId', requireAuth, (req: AuthRequest, res) => {
+async function handleStreamRequest(
+  req: AuthRequest,
+  res: Response,
+  isHead: boolean
+): Promise<void> {
   const trackId = Number(req.params.trackId);
   if (!Number.isFinite(trackId)) {
     res.status(400).json({error: 'Invalid track ID'});
@@ -56,38 +111,78 @@ libraryRouter.get('/stream/:trackId', requireAuth, (req: AuthRequest, res) => {
   }
 
   const absPath = resolveSafeTrackPath(track.rel_path);
-  if (!absPath || !fs.existsSync(absPath)) {
+  if (!absPath) {
     res.status(404).json({error: 'Audio file not found on active music mount'});
     return;
   }
 
-  const stat = fs.statSync(absPath);
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.stat(absPath);
+    if (!stat.isFile()) {
+      res.status(404).json({error: 'Audio file not found on active music mount'});
+      return;
+    }
+  } catch {
+    res.status(404).json({error: 'Audio file not found on active music mount'});
+    return;
+  }
+
   const fileSize = stat.size;
   const ext = path.extname(absPath).toLowerCase();
   const contentType = MIME_MAP[ext] || 'application/octet-stream';
+  const etag = buildFileEtag(stat);
   const range = req.headers.range;
 
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', contentType);
+  res.setHeader('ETag', etag);
+  res.setHeader('Last-Modified', stat.mtime.toUTCString());
+  res.setHeader('Vary', 'Range');
   res.setHeader('Cache-Control', 'private, max-age=3600');
 
   if (range) {
-    const match = range.match(/bytes=(\d*)-(\d*)/);
-    if (!match) {
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(range.trim());
+    if (!match || fileSize <= 0) {
       res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
       return;
     }
 
-    let start = match[1] ? parseInt(match[1], 10) : 0;
-    let end = match[2] ? parseInt(match[2], 10) : Math.min(start + 1024 * 1024 - 1, fileSize - 1);
+    const startStr = match[1];
+    const endStr = match[2];
+    let start: number;
+    let end: number;
 
-    if (match[1] === '' && match[2] !== '') {
-      const suffixLen = parseInt(match[2], 10);
+    if (startStr === '' && endStr !== '') {
+      // Suffix byte-range (`bytes=-500`)
+      const suffixLen = parseInt(endStr, 10);
+      if (!Number.isFinite(suffixLen) || suffixLen <= 0) {
+        res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
+        return;
+      }
       start = Math.max(0, fileSize - suffixLen);
       end = fileSize - 1;
+    } else if (startStr !== '') {
+      start = parseInt(startStr, 10);
+      if (endStr !== '') {
+        // Explicit end byte — clamp to fileSize - 1 per RFC 7233 §2.1
+        end = Math.min(parseInt(endStr, 10), fileSize - 1);
+      } else {
+        // Open-ended range (`bytes=start-`) — stream a responsive 2 MB chunk for instant seeking
+        end = Math.min(start + DEFAULT_OPEN_RANGE_CHUNK_BYTES - 1, fileSize - 1);
+      }
+    } else {
+      res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
+      return;
     }
 
-    if (start >= fileSize || end >= fileSize || start > end || Number.isNaN(start) || Number.isNaN(end)) {
+    if (
+      Number.isNaN(start) ||
+      Number.isNaN(end) ||
+      start < 0 ||
+      start >= fileSize ||
+      start > end
+    ) {
       res.status(416).setHeader('Content-Range', `bytes */${fileSize}`).end();
       return;
     }
@@ -97,20 +192,56 @@ libraryRouter.get('/stream/:trackId', requireAuth, (req: AuthRequest, res) => {
     res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
     res.setHeader('Content-Length', chunkSize);
 
-    const stream = fs.createReadStream(absPath, {start, end});
+    if (isHead) {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(absPath, {
+      start,
+      end,
+      highWaterMark: STREAM_HIGH_WATER_MARK,
+    });
+    res.on('close', () => {
+      if (!stream.destroyed) stream.destroy();
+    });
     stream.on('error', () => {
       if (!res.headersSent) res.status(500).end();
+      else res.destroy();
     });
     stream.pipe(res);
   } else {
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
     res.status(200);
     res.setHeader('Content-Length', fileSize);
-    const stream = fs.createReadStream(absPath);
+
+    if (isHead) {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(absPath, {highWaterMark: STREAM_HIGH_WATER_MARK});
+    res.on('close', () => {
+      if (!stream.destroyed) stream.destroy();
+    });
     stream.on('error', () => {
       if (!res.headersSent) res.status(500).end();
+      else res.destroy();
     });
     stream.pipe(res);
   }
+}
+
+libraryRouter.get('/stream/:trackId', requireAuth, (req: AuthRequest, res) => {
+  void handleStreamRequest(req, res, false);
+});
+
+libraryRouter.head('/stream/:trackId', requireAuth, (req: AuthRequest, res) => {
+  void handleStreamRequest(req, res, true);
 });
 
 // List tracks with filtering & search
