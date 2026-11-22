@@ -17,6 +17,7 @@ import {
   Plus,
   Search,
   Settings,
+  Shuffle,
   Square,
   Trash2,
   WifiOff,
@@ -25,7 +26,7 @@ import {
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useLocation, useNavigate, useParams, useSearchParams} from 'react-router-dom';
 import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
-import {PlaylistMosaic} from '../components/AlbumArt';
+import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
 import {ConfirmDeleteModal} from '../components/ConfirmDeleteModal';
 import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
@@ -33,9 +34,18 @@ import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
-import {apiFetch, formatDuration} from '../lib/api';
+import {apiFetch, formatDuration, getCoverUrl} from '../lib/api';
+import {
+  computeNowPlayingTopHex,
+  DEFAULT_APP_THEME_COLOR,
+  extractDominantColorFromImage,
+  getAlbumColorCacheKey,
+  getCachedDominantColor,
+  setDocumentThemeColor,
+} from '../lib/themeColor';
 import type {Playlist, Track} from '../types';
 import {
+  getOfflineCoverBlobUrl,
   getOfflinePlaylists,
   getOfflinePlaylistTracks,
   getOfflineTracks,
@@ -44,6 +54,51 @@ import {
 } from '../utils/offlineStore';
 
 type LibraryTab = 'all' | 'liked' | 'recent' | 'offline' | 'playlists';
+type HomeViewTab = Exclude<LibraryTab, 'playlists'>;
+
+const HOME_VIEW_META: Record<
+  HomeViewTab,
+  {title: string; fallbackColor: string; gradient: string}
+> = {
+  all: {
+    title: 'All Tracks',
+    fallbackColor: '#1f4a34',
+    gradient: 'from-[#1DB954]/80 via-[#1b4a33] to-[#121212]',
+  },
+  liked: {
+    title: 'Liked Songs',
+    fallbackColor: '#4030b8',
+    gradient: 'from-[#4f39f6] via-[#32468a] to-[#1DB954]/80',
+  },
+  recent: {
+    title: 'Recently Downloaded',
+    fallbackColor: '#185e38',
+    gradient: 'from-[#1DB954] via-[#135c32] to-[#0d2819]',
+  },
+  offline: {
+    title: 'Offline',
+    fallbackColor: '#135244',
+    gradient: 'from-emerald-500 via-teal-800 to-[#0e241d]',
+  },
+};
+
+function getTimeOfDayGreeting(now = new Date()): string {
+  const hour = now.getHours();
+  if (hour >= 5 && hour < 12) return 'Good morning';
+  if (hour >= 12 && hour < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+function formatHumanDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0m';
+  const totalMins = Math.floor(seconds / 60);
+  const hrs = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  const secs = Math.floor(seconds % 60);
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (mins > 0) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  return `${secs}s`;
+}
 
 export const PlaylistsLibraryPage: React.FC = () => {
   const {id: playlistIdParam} = useParams<{id?: string}>();
@@ -61,6 +116,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
   } = useOfflineLibrary();
   const {
     currentTrack,
+    shuffle,
+    toggleShuffle,
     playTrack,
     addManyToQueue,
     handleDeletedTracks,
@@ -84,6 +141,25 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [activePlaylist, setActivePlaylist] = useState<Playlist | null>(null);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [greeting, setGreeting] = useState<string>(() => getTimeOfDayGreeting());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [heroSampledColor, setHeroSampledColor] = useState<string | null>(null);
+  const [heroOfflineCoverUrl, setHeroOfflineCoverUrl] = useState<string | null>(null);
+  const heroSwipeStartXRef = useRef<number | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const syncGreeting = () => setGreeting(getTimeOfDayGreeting());
+    const intervalId = window.setInterval(syncGreeting, 60_000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') syncGreeting();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   // Multi-select & batch action state
   const [selectionMode, setSelectionMode] = useState(false);
@@ -511,19 +587,159 @@ export const PlaylistsLibraryPage: React.FC = () => {
     }
   };
 
-  const tabs: Array<{id: LibraryTab; label: string; icon: React.FC<{className?: string}>}> = offline
-    ? [
-        {id: 'offline', label: 'Offline Library', icon: HardDriveDownload},
-        {id: 'playlists', label: 'Offline Playlists', icon: Disc3},
-      ]
-    : [
-        {id: 'all', label: 'All Tracks', icon: Library},
-        {id: 'liked', label: 'Liked Songs', icon: Heart},
-        {id: 'recent', label: 'Recently Downloaded', icon: Clock},
-        {id: 'offline', label: 'Offline Library', icon: HardDriveDownload},
-        {id: 'playlists', label: 'User Playlists', icon: Disc3},
-      ];
+  const homeFilterPills: Array<{id: HomeViewTab; label: string}> = useMemo(
+    () =>
+      offline
+        ? [{id: 'offline', label: 'Offline'}]
+        : [
+            {id: 'all', label: 'All Tracks'},
+            {id: 'liked', label: 'Liked Songs'},
+            {id: 'recent', label: 'Recently Downloaded'},
+            {id: 'offline', label: 'Offline'},
+          ],
+    [offline]
+  );
 
+  const isHomeView = !playlistIdParam && activeTab !== 'playlists';
+  const activeHomeTab: HomeViewTab = activeTab === 'playlists' ? 'all' : activeTab;
+
+  // Determine active hero track (prefer active/playing track if part of current view, else first covered track)
+  const heroTrack = useMemo(() => {
+    if (!isHomeView) return null;
+    if (
+      currentTrack?.cover_file &&
+      (!artistFilter && !searchQuery
+        ? activeHomeTab === 'all' || filteredTracks.some((t) => t.id === currentTrack.id)
+        : filteredTracks.some((t) => t.id === currentTrack.id))
+    ) {
+      return currentTrack;
+    }
+    return (
+      filteredTracks.find((t) => Boolean(t.cover_file)) ??
+      tracks.find((t) => Boolean(t.cover_file)) ??
+      null
+    );
+  }, [activeHomeTab, artistFilter, currentTrack, filteredTracks, isHomeView, searchQuery, tracks]);
+
+  // Next view for the right-edge peek card & horizontal swipe cycling
+  const activePillIndex = homeFilterPills.findIndex((p) => p.id === activeHomeTab);
+  const nextHomeView =
+    homeFilterPills.length > 1
+      ? homeFilterPills[(activePillIndex + 1) % homeFilterPills.length]
+      : null;
+
+  const peekCoverFile = useMemo(() => {
+    if (!nextHomeView) return null;
+    const distinctTrack = tracks.find(
+      (t) => Boolean(t.cover_file) && t.cover_file !== heroTrack?.cover_file
+    );
+    if (distinctTrack?.cover_file) return distinctTrack.cover_file;
+    const playlistCover = playlists
+      .flatMap((p) => p.covers || [])
+      .find((c) => c && c !== heroTrack?.cover_file);
+    return playlistCover || null;
+  }, [heroTrack?.cover_file, nextHomeView, playlists, tracks]);
+
+  const cycleHomeView = useCallback(
+    (direction: 1 | -1) => {
+      if (homeFilterPills.length <= 1) return;
+      const idx = homeFilterPills.findIndex((p) => p.id === activeHomeTab);
+      const nextIdx = (idx + direction + homeFilterPills.length) % homeFilterPills.length;
+      setSearchParams({});
+      setActiveTab(homeFilterPills[nextIdx].id);
+    },
+    [activeHomeTab, homeFilterPills, setSearchParams]
+  );
+
+  // Resolve offline cover blob URL when disconnected so offscreen color sampling still works offline
+  const heroCoverFile = heroTrack?.cover_file ?? null;
+  useEffect(() => {
+    setHeroOfflineCoverUrl(null);
+    if (!heroCoverFile || !offline) return;
+    let cancelled = false;
+    void getOfflineCoverBlobUrl(heroCoverFile).then((url) => {
+      if (!cancelled && url) setHeroOfflineCoverUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [heroCoverFile, offline]);
+
+  const heroAlbumColorKey = useMemo(
+    () => (heroTrack ? getAlbumColorCacheKey(heroTrack) : null),
+    [heroTrack]
+  );
+  const heroCoverUrl = heroOfflineCoverUrl || getCoverUrl(heroCoverFile);
+  const viewFallbackColor = HOME_VIEW_META[activeHomeTab].fallbackColor;
+
+  // Sample hero cover dominant color on our reusable 32x32 offscreen canvas (memoized in memory)
+  useEffect(() => {
+    if (!isHomeView) return;
+    if (!heroTrack || !heroAlbumColorKey) {
+      setHeroSampledColor(viewFallbackColor);
+      return;
+    }
+
+    const cached = getCachedDominantColor(heroAlbumColorKey, heroTrack.id);
+    if (cached) {
+      setHeroSampledColor(cached);
+      return;
+    }
+
+    setHeroSampledColor(heroTrack.dominant_color || viewFallbackColor);
+    if (!heroCoverUrl) return;
+
+    let cancelled = false;
+    void extractDominantColorFromImage(
+      heroCoverUrl,
+      heroAlbumColorKey,
+      heroTrack.id,
+      heroTrack.dominant_color || viewFallbackColor
+    ).then((hex) => {
+      if (!cancelled) {
+        setHeroSampledColor(hex);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [heroAlbumColorKey, heroCoverUrl, heroTrack, isHomeView, viewFallbackColor]);
+
+  const heroTopHexColor = useMemo(() => {
+    if (!isHomeView) return DEFAULT_APP_THEME_COLOR;
+    const cached = heroTrack
+      ? getCachedDominantColor(heroAlbumColorKey, heroTrack.id)
+      : null;
+    return computeNowPlayingTopHex(
+      cached || heroSampledColor || heroTrack?.dominant_color || viewFallbackColor
+    );
+  }, [heroAlbumColorKey, heroSampledColor, heroTrack, isHomeView, viewFallbackColor]);
+
+  // Dynamically sync mobile PWA top status bar & mobile header with the Home hero gradient top
+  useEffect(() => {
+    if (!isHomeView) return;
+    document.documentElement.style.setProperty('--home-hero-top', heroTopHexColor);
+    setDocumentThemeColor(heroTopHexColor);
+    return () => {
+      document.documentElement.style.removeProperty('--home-hero-top');
+      setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
+    };
+  }, [heroTopHexColor, isHomeView]);
+
+  const handleShufflePlay = useCallback(() => {
+    if (filteredTracks.length === 0) {
+      toggleShuffle();
+      return;
+    }
+    if (!shuffle) {
+      toggleShuffle();
+    }
+    const randomTrack = filteredTracks[Math.floor(Math.random() * filteredTracks.length)];
+    playTrack(randomTrack, filteredTracks);
+  }, [filteredTracks, playTrack, shuffle, toggleShuffle]);
+
+  const activeHomeTitle = artistFilter || HOME_VIEW_META[activeHomeTab].title;
   const showFloatingBatchBar = selectionMode && selectedIdArray.length > 0;
 
   return (
@@ -536,7 +752,14 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
       {playlistIdParam ? (
         // --- PLAYLIST DETAIL VIEW (/playlists/:id) ---
-        <div className={`px-4 sm:px-6 lg:px-8 pt-6 max-w-7xl mx-auto ${showFloatingBatchBar ? 'pb-24' : ''}`}>
+        <div
+          className="px-4 sm:px-6 lg:px-8 pt-6 max-w-7xl mx-auto pb-36 md:pb-12"
+          style={{
+            paddingBottom: showFloatingBatchBar
+              ? 'calc(11.5rem + env(safe-area-inset-bottom, 0px))'
+              : 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
           <button
             type="button"
             onClick={() => navigate('/playlists')}
@@ -809,478 +1032,557 @@ export const PlaylistsLibraryPage: React.FC = () => {
           )}
         </div>
       ) : (
-        // --- MAIN LIBRARY & PLAYLISTS VIEW ---
-        <div className={`px-4 sm:px-6 lg:px-8 pt-6 max-w-7xl mx-auto space-y-6 ${showFloatingBatchBar ? 'pb-24' : ''}`}>
-          {/* Offline Mode Banner when Disconnected */}
-          {offline && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-[#181818] border border-amber-500/30 px-4 py-3.5">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-400">
-                  <WifiOff className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-bold text-white">Offline Mode</p>
-                  <p className="text-xs text-[#B3B3B3]">
-                    Showing{' '}
-                    <span className="font-mono tabular-nums text-white">{cachedTrackIds.size}</span>{' '}
-                    cached {cachedTrackIds.size === 1 ? 'track' : 'tracks'} and{' '}
-                    <span className="font-mono tabular-nums text-white">{playlists.length}</span>{' '}
-                    offline {playlists.length === 1 ? 'playlist' : 'playlists'} stored on this device.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => navigate('/settings')}
-                className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[#282828] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#333333] transition-colors whitespace-nowrap shrink-0"
-              >
-                <HardDriveDownload className="w-3.5 h-3.5 text-[#1DB954]" />
-                Manage Offline Storage
-              </button>
-            </div>
-          )}
-
-          {/* Header Row */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
-                {offline
-                  ? activeTab === 'playlists'
-                    ? 'Offline Playlists'
-                    : 'Offline Mode'
-                  : activeTab === 'playlists'
-                    ? 'Your Playlists'
-                    : activeTab === 'liked'
-                      ? 'Liked Songs'
-                      : activeTab === 'recent'
-                        ? 'Recently Downloaded'
-                        : activeTab === 'offline'
-                          ? 'Offline Library'
-                          : 'Music Library'}
-              </h1>
-              <p className="mt-1 text-sm text-[#B3B3B3]">
-                {offline ? (
-                  <>
-                    <span className="font-mono tabular-nums">{cachedTrackIds.size}</span> cached
-                    tracks
-                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">{playlists.length}</span> cached
-                    playlists
-                  </>
-                ) : (
-                  <>
-                    <span className="font-mono tabular-nums">{stats.totalTracks}</span> tracks
-                    indexed
-                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">{stats.likedTracks}</span> liked
-                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">{cachedTrackIds.size}</span> offline
-                    <span className="mx-2 text-[#6A6A6A]" aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">{playlists.length}</span> playlists
-                  </>
-                )}
-              </p>
-            </div>
-
-            {!offline && (
-              <button
-                type="button"
-                onClick={() => setCreateOpen(true)}
-                className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] transition-colors whitespace-nowrap shrink-0"
-              >
-                <Plus className="w-4 h-4 stroke-[2.5]" />
-                Create Playlist
-              </button>
-            )}
-          </div>
-
-          {/* Quick Collection Cards (Top Spotlight Row) */}
-          {!offline && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchParams({});
-                  setActiveTab('all');
-                }}
-                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                  activeTab === 'all' && !artistFilter
-                    ? 'bg-[#282828] ring-1 ring-white/15'
-                    : 'bg-[#181818] hover:bg-[#282828]'
-                }`}
-              >
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#282828] to-[#121212]">
-                  <Library className="w-6 h-6 text-[#1DB954]" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-white truncate">All Tracks</p>
-                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
-                    {stats.totalTracks} songs
-                  </p>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchParams({});
-                  setActiveTab('liked');
-                }}
-                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                  activeTab === 'liked'
-                    ? 'bg-[#282828] ring-1 ring-white/15'
-                    : 'bg-[#181818] hover:bg-[#282828]'
-                }`}
-              >
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#3b28cc] via-[#2b4d8f] to-[#1DB954]">
-                  <Heart className="w-6 h-6 text-white fill-white" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-white truncate">Liked Songs</p>
-                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
-                    {stats.likedTracks} saved
-                  </p>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchParams({});
-                  setActiveTab('recent');
-                }}
-                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                  activeTab === 'recent'
-                    ? 'bg-[#282828] ring-1 ring-white/15'
-                    : 'bg-[#181818] hover:bg-[#282828]'
-                }`}
-              >
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-[#1DB954] to-[#124e28]">
-                  <Clock className="w-6 h-6 text-white" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-white truncate">Recently Downloaded</p>
-                  <p className="text-xs text-[#B3B3B3]">Latest additions</p>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchParams({});
-                  setActiveTab('offline');
-                }}
-                className={`group flex items-center gap-3.5 rounded-md overflow-hidden pr-4 text-left transition-colors ${
-                  activeTab === 'offline'
-                    ? 'bg-[#282828] ring-1 ring-[#1DB954]/40'
-                    : 'bg-[#181818] hover:bg-[#282828]'
-                }`}
-              >
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center bg-gradient-to-br from-emerald-600 to-[#0e2d1d]">
-                  <HardDriveDownload className="w-6 h-6 text-white" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-white truncate">Offline Library</p>
-                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
-                    {cachedTrackIds.size} cached
-                  </p>
-                </div>
-              </button>
-            </div>
-          )}
-
-          {/* Interactive Filter Tabs + Search Bar */}
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-1">
-            <div className="flex items-center gap-1 overflow-x-auto rounded-lg bg-[#181818] p-1 w-fit max-w-full">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => {
-                    setSearchParams({});
-                    setActiveTab(tab.id);
-                  }}
-                  className={`px-3.5 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                    activeTab === tab.id
-                      ? 'bg-[#282828] text-white'
-                      : 'text-[#B3B3B3] hover:text-white'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-3">
-              {artistFilter && (
-                <button
-                  type="button"
-                  onClick={() => setSearchParams({})}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-[#282828] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#333333]"
-                >
-                  <span>Artist: {artistFilter}</span>
-                  <X className="w-3.5 h-3.5 text-[#B3B3B3]" />
-                </button>
-              )}
-              {activeTab !== 'playlists' && (
-                <div className="relative flex-1 md:w-72">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#B3B3B3]" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search title, artist, album..."
-                    className="w-full rounded-md bg-[#181818] border border-white/10 pl-9 pr-8 py-2 text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
-                  />
-                  {searchQuery && (
+        // --- MAIN HOME & PLAYLISTS VIEW ---
+        <div
+          className="min-h-full pb-36 md:pb-12"
+          style={{
+            paddingBottom: showFloatingBatchBar
+              ? 'calc(11.5rem + env(safe-area-inset-bottom, 0px))'
+              : 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
+          {/* SPOTIFY-STYLE DYNAMIC GRADIENT HERO HEADER (Home View Only) */}
+          {isHomeView ? (
+            <div
+              className="relative transition-colors duration-500"
+              style={{
+                background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, #121212 100%)`,
+              }}
+            >
+              <div className="px-4 sm:px-6 lg:px-8 pt-4 pb-4 max-w-7xl mx-auto space-y-4">
+                {/* Offline Mode Banner when Disconnected */}
+                {offline && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-black/35 backdrop-blur-md border border-amber-500/35 px-4 py-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400">
+                        <WifiOff className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-white">Offline Mode</p>
+                        <p className="text-xs text-white/75">
+                          <span className="font-mono tabular-nums text-white">
+                            {cachedTrackIds.size}
+                          </span>{' '}
+                          cached {cachedTrackIds.size === 1 ? 'track' : 'tracks'} ·{' '}
+                          <span className="font-mono tabular-nums text-white">
+                            {playlists.length}
+                          </span>{' '}
+                          offline {playlists.length === 1 ? 'playlist' : 'playlists'}
+                        </p>
+                      </div>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => setSearchQuery('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#B3B3B3] hover:text-white"
+                      onClick={() => navigate('/settings')}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors whitespace-nowrap shrink-0"
                     >
-                      <X className="w-4 h-4" />
+                      <HardDriveDownload className="w-3.5 h-3.5 text-[#1DB954]" />
+                      Manage Offline
+                    </button>
+                  </div>
+                )}
+
+                {/* Top Row: Time-of-Day Greeting + Sleek Compact Filter Pills */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <p className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-white">
+                    {offline ? 'Offline Mode' : greeting}
+                  </p>
+
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-1 px-1">
+                    {homeFilterPills.map((pill) => {
+                      const isActive = activeHomeTab === pill.id;
+                      return (
+                        <button
+                          key={pill.id}
+                          type="button"
+                          onClick={() => {
+                            setSearchParams({});
+                            setActiveTab(pill.id);
+                          }}
+                          className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                            isActive
+                              ? 'bg-[#1DB954] text-black shadow-sm'
+                              : 'bg-black/30 text-white/90 hover:bg-black/45 border border-white/10'
+                          }`}
+                        >
+                          {pill.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Centered 220x220 Hero Cover Showcase + Right-Edge Peek Card */}
+                <div
+                  className="relative flex items-center justify-center pt-1 pb-2 overflow-hidden -mx-4 px-4 sm:mx-0 sm:px-0 select-none"
+                  style={{touchAction: 'pan-y'}}
+                  onPointerDown={(e) => {
+                    heroSwipeStartXRef.current = e.clientX;
+                  }}
+                  onPointerUp={(e) => {
+                    if (heroSwipeStartXRef.current === null) return;
+                    const dx = e.clientX - heroSwipeStartXRef.current;
+                    heroSwipeStartXRef.current = null;
+                    if (Math.abs(dx) >= 48) {
+                      cycleHomeView(dx < 0 ? 1 : -1);
+                    }
+                  }}
+                  onPointerCancel={() => {
+                    heroSwipeStartXRef.current = null;
+                  }}
+                >
+                  {/* Primary Centered 220x220 Rounded-Square Hero Cover */}
+                  <div className="relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.55)] ring-1 ring-white/10">
+                    {heroTrack?.cover_file ? (
+                      <AlbumArt
+                        coverFile={heroTrack.cover_file}
+                        alt={activeHomeTitle}
+                        color={heroSampledColor || heroTrack.dominant_color}
+                        className="w-full h-full rounded-2xl pointer-events-none"
+                        iconSize={64}
+                      />
+                    ) : (
+                      <div
+                        className={`flex w-full h-full flex-col items-center justify-center bg-gradient-to-br ${HOME_VIEW_META[activeHomeTab].gradient}`}
+                      >
+                        {activeHomeTab === 'liked' ? (
+                          <Heart className="w-16 h-16 text-white fill-white drop-shadow-lg" />
+                        ) : activeHomeTab === 'recent' ? (
+                          <Clock className="w-16 h-16 text-white drop-shadow-lg" />
+                        ) : activeHomeTab === 'offline' ? (
+                          <HardDriveDownload className="w-16 h-16 text-white drop-shadow-lg" />
+                        ) : (
+                          <Library className="w-16 h-16 text-white drop-shadow-lg" />
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Subtle Right-Edge Peek Card (Tappable to Cycle Home Views) */}
+                  {nextHomeView && (
+                    <button
+                      type="button"
+                      onClick={() => cycleHomeView(1)}
+                      aria-label={`Switch to ${nextHomeView.label}`}
+                      title={`Next: ${nextHomeView.label}`}
+                      className="group absolute left-[calc(50%+128px)] w-[184px] h-[184px] rounded-2xl overflow-hidden opacity-55 hover:opacity-85 transition-all duration-200 shadow-2xl ring-1 ring-white/10 focus:outline-none"
+                    >
+                      {peekCoverFile ? (
+                        <AlbumArt
+                          coverFile={peekCoverFile}
+                          alt={nextHomeView.label}
+                          color={HOME_VIEW_META[nextHomeView.id].fallbackColor}
+                          className="w-full h-full rounded-2xl pointer-events-none"
+                          iconSize={48}
+                        />
+                      ) : (
+                        <div
+                          className={`flex w-full h-full items-center justify-center bg-gradient-to-br ${HOME_VIEW_META[nextHomeView.id].gradient}`}
+                        >
+                          {nextHomeView.id === 'liked' ? (
+                            <Heart className="w-12 h-12 text-white/90 fill-white/90" />
+                          ) : nextHomeView.id === 'recent' ? (
+                            <Clock className="w-12 h-12 text-white/90" />
+                          ) : nextHomeView.id === 'offline' ? (
+                            <HardDriveDownload className="w-12 h-12 text-white/90" />
+                          ) : (
+                            <Library className="w-12 h-12 text-white/90" />
+                          )}
+                        </div>
+                      )}
+                      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/35 to-transparent px-3 py-2.5 text-left">
+                        <span className="block text-[11px] font-bold text-white truncate">
+                          {nextHomeView.label}
+                        </span>
+                      </div>
                     </button>
                   )}
                 </div>
-              )}
-            </div>
-          </div>
 
-          {/* Content Stage */}
-          {activeTab === 'playlists' ? (
-            playlists.length === 0 ? (
-              <div className="rounded-xl bg-[#181818] p-12 text-center">
-                <Disc3 className="w-10 h-10 text-[#6A6A6A] mx-auto mb-3" />
-                <h2 className="font-display text-lg font-bold text-white">
-                  {offline ? 'No offline playlists cached' : 'No playlists created yet'}
-                </h2>
-                <p className="mt-1 text-sm text-[#B3B3B3] max-w-md mx-auto">
-                  {offline
-                    ? 'When back online, open any playlist and tap Download Playlist Offline to listen in Airplane Mode.'
-                    : 'Organize your NAS tracks into custom collections, or place .m3u / .m3u8 files inside your music folder and run a library scan.'}
-                </p>
+                {/* Left-Aligned Active View Title & Compact Metadata */}
+                <div className="space-y-1">
+                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white truncate">
+                    {activeHomeTitle}
+                  </h1>
+                  <p className="text-xs sm:text-sm text-[#B3B3B3]">
+                    <span className="font-mono tabular-nums text-white/90">
+                      {filteredTracks.length}
+                    </span>{' '}
+                    {filteredTracks.length === 1 ? 'track' : 'tracks'}
+                    {totalDuration > 0 && (
+                      <>
+                        <span className="mx-1.5 text-[#6A6A6A]" aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums">
+                          {formatHumanDuration(totalDuration)}
+                        </span>
+                      </>
+                    )}
+                    {!artistFilter && !searchQuery && activeHomeTab === 'all' && playlists.length > 0 && (
+                      <>
+                        <span className="mx-1.5 text-[#6A6A6A]" aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums">{playlists.length}</span>{' '}
+                        {playlists.length === 1 ? 'playlist' : 'playlists'}
+                      </>
+                    )}
+                  </p>
+                </div>
+
+                {/* Clean Single-Row Action Bar: Left (Select + Search Toggle + Active Chips) | Right (Shuffle + Circular Green Play) */}
+                <div className="flex items-center justify-between gap-3 pt-0.5">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    {!offline && filteredTracks.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectionMode) exitSelectionMode();
+                          else setSelectionMode(true);
+                        }}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors shrink-0 ${
+                          selectionMode
+                            ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
+                            : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
+                        }`}
+                      >
+                        <CheckSquare className="w-3.5 h-3.5" />
+                        <span>{selectionMode ? 'Done' : 'Select'}</span>
+                      </button>
+                    )}
+
+                    {selectionMode && !offline && filteredTracks.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={toggleSelectAll}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 transition-colors shrink-0"
+                      >
+                        {allVisibleSelected ? (
+                          <>
+                            <Square className="w-3.5 h-3.5 text-[#B3B3B3]" />
+                            <span>Deselect All</span>
+                          </>
+                        ) : (
+                          <>
+                            <CheckSquare className="w-3.5 h-3.5 text-[#1DB954]" />
+                            <span>Select All</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchOpen((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            requestAnimationFrame(() => searchInputRef.current?.focus());
+                          }
+                          return next;
+                        });
+                      }}
+                      className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors shrink-0 ${
+                        searchOpen || searchQuery
+                          ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
+                          : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
+                      }`}
+                      aria-label="Filter tracks"
+                      title="Filter tracks"
+                    >
+                      <Search className="w-3.5 h-3.5" />
+                      <span className="hidden xs:inline sm:inline">Filter</span>
+                    </button>
+
+                    {artistFilter && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchParams({})}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-white/15 border border-white/15 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/25 shrink-0"
+                      >
+                        <span className="truncate max-w-[120px]">{artistFilter}</span>
+                        <X className="w-3.5 h-3.5 text-white/80" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Right Side: Shuffle + Prominent Circular Spotify-Green Play */}
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleShufflePlay}
+                      disabled={filteredTracks.length === 0}
+                      className={`relative flex h-10 w-10 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
+                        shuffle
+                          ? 'text-[#1DB954] bg-[#1DB954]/15'
+                          : 'text-[#B3B3B3] hover:text-white hover:bg-white/10'
+                      }`}
+                      aria-label="Shuffle play"
+                      title="Shuffle play"
+                    >
+                      <Shuffle className="w-5 h-5" />
+                      {shuffle && (
+                        <span className="absolute bottom-1 h-1 w-1 rounded-full bg-[#1DB954]" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handlePlayAll}
+                      disabled={filteredTracks.length === 0}
+                      className="flex w-12 h-12 items-center justify-center rounded-full bg-[#1DB954] text-black shadow-xl hover:bg-[#1ED760] hover:scale-105 active:scale-95 disabled:opacity-40 transition-all"
+                      aria-label={`Play ${activeHomeTitle}`}
+                      title={`Play ${activeHomeTitle}`}
+                    >
+                      <Play className="w-5 h-5 fill-current ml-0.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Collapsible Quick Inline Search Filter */}
+                {(searchOpen || Boolean(searchQuery)) && (
+                  <div className="relative pt-1">
+                    <Search className="pointer-events-none absolute left-3 top-[calc(50%+2px)] -translate-y-1/2 w-4 h-4 text-[#8A8A8A]" />
+                    <input
+                      ref={searchInputRef}
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Filter title, artist, album..."
+                      className="w-full sm:max-w-sm rounded-lg bg-[#181818]/90 border border-white/15 pl-9 pr-9 py-2 text-sm text-white placeholder-[#8A8A8A] focus:border-[#1DB954] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setSearchOpen(false);
+                      }}
+                      className="absolute right-2.5 sm:left-[352px] sm:right-auto top-[calc(50%+2px)] -translate-y-1/2 text-[#B3B3B3] hover:text-white"
+                      aria-label="Close filter"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* PLAYLISTS TAB HEADER (/playlists) */
+            <div className="px-4 sm:px-6 lg:px-8 pt-5 pb-4 max-w-7xl mx-auto">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white truncate">
+                    {offline ? 'Offline Playlists' : 'Your Playlists'}
+                  </h1>
+                  <p className="mt-0.5 text-xs sm:text-sm text-[#B3B3B3]">
+                    <span className="font-mono tabular-nums">{playlists.length}</span>{' '}
+                    {playlists.length === 1 ? 'playlist' : 'playlists'}
+                    {!offline && (
+                      <>
+                        <span className="mx-1.5 text-[#6A6A6A]" aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums">{stats.totalTracks}</span>{' '}
+                        {stats.totalTracks === 1 ? 'track' : 'tracks'}
+                      </>
+                    )}
+                  </p>
+                </div>
+
                 {!offline && (
                   <button
                     type="button"
                     onClick={() => setCreateOpen(true)}
-                    className="mt-5 rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
+                    className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-4 sm:px-5 py-2 sm:py-2.5 text-xs sm:text-sm font-bold text-black hover:bg-[#1ED760] transition-colors whitespace-nowrap shrink-0"
                   >
-                    Create First Playlist
+                    <Plus className="w-4 h-4 stroke-[2.5]" />
+                    Create Playlist
                   </button>
                 )}
               </div>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
-                {playlists.map((pl) => {
-                  const isPlMenuOpen = playlistMenuId === pl.id;
-                  return (
-                    <div
-                      key={pl.id}
-                      onClick={() => navigate(`/playlists/${pl.id}`)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') navigate(`/playlists/${pl.id}`);
-                      }}
-                      className="group relative rounded-lg bg-[#181818] p-4 hover:bg-[#282828] transition-colors cursor-pointer"
-                    >
-                      <div className="relative mb-3.5">
-                        <PlaylistMosaic
-                          covers={pl.covers || []}
-                          alt={pl.name}
-                          className="w-full aspect-square rounded-md"
-                        />
-
-                        {pl.source === 'm3u' && (
-                          <span className="absolute top-2 left-2 font-mono text-[10px] font-bold tracking-wide text-[#1DB954] bg-black/75 border border-[#1DB954]/40 rounded px-1.5 py-0.5 leading-none backdrop-blur-xs">
-                            M3U
-                          </span>
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={(e) => void handleQuickPlayPlaylist(e, pl.id)}
-                          className="absolute bottom-2.5 right-2.5 flex h-12 w-12 items-center justify-center rounded-full bg-[#1DB954] text-black shadow-xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 hover:bg-[#1ED760] hover:scale-105 transition-all"
-                          aria-label={`Play ${pl.name}`}
-                        >
-                          <Play className="w-5 h-5 fill-current ml-0.5" />
-                        </button>
-                      </div>
-
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-bold text-white truncate">{pl.name}</p>
-                          <p className="mt-1 text-xs text-[#B3B3B3] truncate">
-                            {pl.description || `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`}
-                          </p>
-                        </div>
-
-                        {!offline && (
-                          <div
-                            className="relative shrink-0"
-                            ref={isPlMenuOpen ? playlistMenuRef : null}
-                          >
-                            <button
-                              type="button"
-                              disabled={exportingPlaylistId === pl.id}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setPlaylistMenuId(isPlMenuOpen ? null : pl.id);
-                              }}
-                              className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-white/10 hover:text-white transition-colors"
-                              aria-label={`Options for ${pl.name}`}
-                            >
-                              {exportingPlaylistId === pl.id ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1DB954]" />
-                              ) : (
-                                <MoreHorizontal className="w-4 h-4" />
-                              )}
-                            </button>
-
-                            {isPlMenuOpen && (
-                              <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
-                              >
-                                <button
-                                  type="button"
-                                  onClick={() => void handleExportM3u(pl)}
-                                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-white hover:bg-white/10"
-                                >
-                                  <FileDown className="w-3.5 h-3.5 text-[#1DB954]" />
-                                  Export as .m3u
-                                </button>
-                                <div className="my-1 border-t border-white/10" />
-                                <button
-                                  type="button"
-                                  onClick={() => void handleDeletePlaylist(pl.id)}
-                                  className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-red-400 hover:bg-white/10"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  Delete Playlist
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )
-          ) : loading ? (
-            <div className="flex items-center justify-center py-20 text-[#B3B3B3] gap-2">
-              <Loader2 className="w-5 h-5 animate-spin text-[#1DB954]" />
-              <span className="text-sm">Loading tracks...</span>
             </div>
-          ) : filteredTracks.length === 0 ? (
-            <div className="rounded-xl bg-[#181818] p-12 text-center space-y-3">
-              {activeTab === 'offline' || offline ? (
-                <HardDriveDownload className="w-10 h-10 text-[#6A6A6A] mx-auto" />
-              ) : (
-                <Library className="w-10 h-10 text-[#6A6A6A] mx-auto" />
-              )}
-              <h2 className="font-display text-lg font-bold text-white">
-                {searchQuery || artistFilter
-                  ? 'No matching tracks found'
-                  : activeTab === 'offline' || offline
-                    ? 'No offline music downloaded yet'
-                    : activeTab === 'liked'
-                      ? 'No liked songs yet'
-                      : 'Your music library is empty'}
-              </h2>
-              <p className="text-sm text-[#B3B3B3] max-w-md mx-auto">
-                {searchQuery || artistFilter
-                  ? 'Try adjusting your search or clearing the active filter.'
-                  : activeTab === 'offline' || offline
-                    ? 'Tap the download button next to any track, or open a playlist and tap Download Playlist Offline to listen without an internet connection.'
-                    : activeTab === 'liked'
-                      ? 'Tap the heart icon next to any track to save it to your Liked Songs.'
-                      : 'Search and download tracks with yt-dlp, or configure and scan your NAS mount path in Settings.'}
-              </p>
-              {!searchQuery && !artistFilter && activeTab !== 'liked' && activeTab !== 'offline' && !offline && (
-                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                  {(user?.can_download || user?.role === 'admin') && (
-                    <button
-                      type="button"
-                      onClick={() => navigate('/search')}
-                      className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
-                    >
-                      <Search className="w-4 h-4" />
-                      Search YouTube & Download
-                    </button>
-                  )}
-                  {user?.role === 'admin' && (
-                    <button
-                      type="button"
-                      onClick={() => navigate('/settings')}
-                      className="inline-flex items-center gap-2 rounded-full bg-[#282828] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#333333]"
-                    >
-                      <Settings className="w-4 h-4" />
-                      Configure NAS Mount & Scan
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div>
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <button
-                    type="button"
-                    onClick={handlePlayAll}
-                    className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2 text-sm font-bold text-black hover:bg-[#1ED760] transition-colors"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    Play All ({filteredTracks.length})
-                  </button>
+          )}
 
+          {/* Content Stage (Starts Immediately Below Hero Action Bar) */}
+          <div className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
+            {activeTab === 'playlists' ? (
+              playlists.length === 0 ? (
+                <div className="rounded-xl bg-[#181818] p-12 text-center">
+                  <Disc3 className="w-10 h-10 text-[#6A6A6A] mx-auto mb-3" />
+                  <h2 className="font-display text-lg font-bold text-white">
+                    {offline ? 'No offline playlists cached' : 'No playlists created yet'}
+                  </h2>
+                  <p className="mt-1 text-sm text-[#B3B3B3] max-w-md mx-auto">
+                    {offline
+                      ? 'When back online, open any playlist and tap Download Playlist Offline to listen in Airplane Mode.'
+                      : 'Organize your NAS tracks into custom collections, or place .m3u / .m3u8 files inside your music folder and run a library scan.'}
+                  </p>
                   {!offline && (
                     <button
                       type="button"
-                      onClick={() => {
-                        if (selectionMode) exitSelectionMode();
-                        else setSelectionMode(true);
-                      }}
-                      className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold transition-colors ${
-                        selectionMode
-                          ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
-                          : 'border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white'
-                      }`}
+                      onClick={() => setCreateOpen(true)}
+                      className="mt-5 rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
                     >
-                      <CheckSquare className="w-3.5 h-3.5" />
-                      {selectionMode ? 'Done' : 'Select'}
-                    </button>
-                  )}
-
-                  {selectionMode && !offline && (
-                    <button
-                      type="button"
-                      onClick={toggleSelectAll}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-white/15 px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#282828] transition-colors"
-                    >
-                      {allVisibleSelected ? (
-                        <>
-                          <Square className="w-3.5 h-3.5 text-[#B3B3B3]" />
-                          Deselect All
-                        </>
-                      ) : (
-                        <>
-                          <CheckSquare className="w-3.5 h-3.5 text-[#1DB954]" />
-                          Select All
-                        </>
-                      )}
+                      Create First Playlist
                     </button>
                   )}
                 </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+                  {playlists.map((pl) => {
+                    const isPlMenuOpen = playlistMenuId === pl.id;
+                    return (
+                      <div
+                        key={pl.id}
+                        onClick={() => navigate(`/playlists/${pl.id}`)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') navigate(`/playlists/${pl.id}`);
+                        }}
+                        className="group relative rounded-lg bg-[#181818] p-4 hover:bg-[#282828] transition-colors cursor-pointer"
+                      >
+                        <div className="relative mb-3.5">
+                          <PlaylistMosaic
+                            covers={pl.covers || []}
+                            alt={pl.name}
+                            className="w-full aspect-square rounded-md"
+                          />
 
-                <span className="font-mono text-xs tabular-nums text-[#6A6A6A]">
-                  Total {formatDuration(totalDuration)}
-                </span>
+                          {pl.source === 'm3u' && (
+                            <span className="absolute top-2 left-2 font-mono text-[10px] font-bold tracking-wide text-[#1DB954] bg-black/75 border border-[#1DB954]/40 rounded px-1.5 py-0.5 leading-none backdrop-blur-xs">
+                              M3U
+                            </span>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={(e) => void handleQuickPlayPlaylist(e, pl.id)}
+                            className="absolute bottom-2.5 right-2.5 flex h-12 w-12 items-center justify-center rounded-full bg-[#1DB954] text-black shadow-xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 hover:bg-[#1ED760] hover:scale-105 transition-all"
+                            aria-label={`Play ${pl.name}`}
+                          >
+                            <Play className="w-5 h-5 fill-current ml-0.5" />
+                          </button>
+                        </div>
+
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-bold text-white truncate">{pl.name}</p>
+                            <p className="mt-1 text-xs text-[#B3B3B3] truncate">
+                              {pl.description ||
+                                `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`}
+                            </p>
+                          </div>
+
+                          {!offline && (
+                            <div
+                              className="relative shrink-0"
+                              ref={isPlMenuOpen ? playlistMenuRef : null}
+                            >
+                              <button
+                                type="button"
+                                disabled={exportingPlaylistId === pl.id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPlaylistMenuId(isPlMenuOpen ? null : pl.id);
+                                }}
+                                className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-white/10 hover:text-white transition-colors"
+                                aria-label={`Options for ${pl.name}`}
+                              >
+                                {exportingPlaylistId === pl.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1DB954]" />
+                                ) : (
+                                  <MoreHorizontal className="w-4 h-4" />
+                                )}
+                              </button>
+
+                              {isPlMenuOpen && (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleExportM3u(pl)}
+                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-white hover:bg-white/10"
+                                  >
+                                    <FileDown className="w-3.5 h-3.5 text-[#1DB954]" />
+                                    Export as .m3u
+                                  </button>
+                                  <div className="my-1 border-t border-white/10" />
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeletePlaylist(pl.id)}
+                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-red-400 hover:bg-white/10"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    Delete Playlist
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            ) : loading ? (
+              <div className="flex items-center justify-center py-16 text-[#B3B3B3] gap-2">
+                <Loader2 className="w-5 h-5 animate-spin text-[#1DB954]" />
+                <span className="text-sm">Loading tracks...</span>
               </div>
-
+            ) : filteredTracks.length === 0 ? (
+              <div className="rounded-xl bg-[#181818] p-10 text-center space-y-3">
+                {activeTab === 'offline' || offline ? (
+                  <HardDriveDownload className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+                ) : (
+                  <Library className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+                )}
+                <h2 className="font-display text-lg font-bold text-white">
+                  {searchQuery || artistFilter
+                    ? 'No matching tracks found'
+                    : activeTab === 'offline' || offline
+                      ? 'No offline music downloaded yet'
+                      : activeTab === 'liked'
+                        ? 'No liked songs yet'
+                        : 'Your music library is empty'}
+                </h2>
+                <p className="text-sm text-[#B3B3B3] max-w-md mx-auto">
+                  {searchQuery || artistFilter
+                    ? 'Try adjusting your search or clearing the active filter.'
+                    : activeTab === 'offline' || offline
+                      ? 'Tap the download button next to any track, or open a playlist and tap Download Playlist Offline to listen without an internet connection.'
+                      : activeTab === 'liked'
+                        ? 'Tap the heart icon next to any track to save it to your Liked Songs.'
+                        : 'Search and download tracks with yt-dlp, or configure and scan your NAS mount path in Settings.'}
+                </p>
+                {!searchQuery &&
+                  !artistFilter &&
+                  activeTab !== 'liked' &&
+                  activeTab !== 'offline' &&
+                  !offline && (
+                    <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                      {(user?.can_download || user?.role === 'admin') && (
+                        <button
+                          type="button"
+                          onClick={() => navigate('/search')}
+                          className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
+                        >
+                          <Search className="w-4 h-4" />
+                          Search YouTube & Download
+                        </button>
+                      )}
+                      {user?.role === 'admin' && (
+                        <button
+                          type="button"
+                          onClick={() => navigate('/settings')}
+                          className="inline-flex items-center gap-2 rounded-full bg-[#282828] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#333333]"
+                        >
+                          <Settings className="w-4 h-4" />
+                          Configure NAS Mount & Scan
+                        </button>
+                      )}
+                    </div>
+                  )}
+              </div>
+            ) : (
               <TrackTable
                 tracks={filteredTracks}
                 playlists={playlists}
@@ -1302,8 +1604,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   });
                 }}
               />
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
 

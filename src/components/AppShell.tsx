@@ -1,7 +1,7 @@
 import {
   Download,
   Heart,
-  Library,
+  Home,
   ListMusic,
   LogOut,
   Maximize2,
@@ -110,18 +110,23 @@ export const AppShell: React.FC = () => {
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const volPct = (isMuted ? 0 : volume) * 100;
   const isNowPlayingPage = location.pathname === '/now-playing';
-  const isSearchPage = location.pathname === '/search';
+  const isHomePage = location.pathname === '/';
+  const hasOwnBottomClearance =
+    isHomePage ||
+    location.pathname === '/search' ||
+    location.pathname.startsWith('/playlists');
   const stageTint = currentTrack?.dominant_color || '#1c3b29';
 
-  // Keep mobile status bar synced to the main app header background (#121212) whenever not in Now Playing
+  // Keep mobile status bar synced to #121212 on standard views (Now Playing & Home sync dynamically)
   useEffect(() => {
-    if (!isNowPlayingPage) {
+    if (!isNowPlayingPage && !isHomePage) {
+      document.documentElement.style.removeProperty('--home-hero-top');
       setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
     }
-  }, [isNowPlayingPage]);
+  }, [isNowPlayingPage, isHomePage]);
 
   const navItems = [
-    {to: '/', label: 'Library', icon: Library, end: true},
+    {to: '/', label: 'Home', icon: Home, end: true},
     {to: '/playlists', label: 'Playlists', icon: ListMusic, end: false},
     {to: '/search', label: 'Search', icon: Search, end: false},
     {to: '/settings', label: 'Settings', icon: Settings, end: false},
@@ -246,7 +251,18 @@ export const AppShell: React.FC = () => {
         <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[#121212] relative">
           {/* Mobile Top Bar with iOS notch / Dynamic Island safe-area-inset-top */}
           {!isNowPlayingPage && (
-            <header className="md:hidden shrink-0 pt-safe bg-[#121212]/95 backdrop-blur-md border-b border-white/[0.06] z-20">
+            <header
+              className={`md:hidden shrink-0 pt-safe backdrop-blur-md z-20 transition-colors duration-300 ${
+                isHomePage
+                  ? 'border-b border-white/[0.04]'
+                  : 'bg-[#121212]/95 border-b border-white/[0.06]'
+              }`}
+              style={
+                isHomePage
+                  ? {backgroundColor: 'var(--home-hero-top, #121212)'}
+                  : undefined
+              }
+            >
               <div className="flex h-[52px] items-center justify-between px-4">
                 <button type="button" onClick={() => navigate('/')}>
                   <BrandLogo size="sm" />
@@ -278,14 +294,19 @@ export const AppShell: React.FC = () => {
           <main
             className="flex-1 overflow-y-auto relative"
             style={{
-              backgroundImage: isNowPlayingPage
-                ? undefined
-                : `linear-gradient(180deg, ${stageTint}55 0%, #121212 280px, #121212 100%)`,
+              backgroundImage:
+                isNowPlayingPage || isHomePage
+                  ? undefined
+                  : `linear-gradient(180deg, ${stageTint}55 0%, #121212 280px, #121212 100%)`,
             }}
           >
             <div
               className={
-                isNowPlayingPage ? 'h-full' : isSearchPage ? '' : 'pb-mobile-stage md:pb-8'
+                isNowPlayingPage
+                  ? 'h-full'
+                  : hasOwnBottomClearance
+                    ? ''
+                    : 'pb-mobile-stage md:pb-8'
               }
             >
               <Outlet />
