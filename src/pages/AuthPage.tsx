@@ -37,23 +37,23 @@ export const AuthPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen w-full bg-[#121212] flex flex-col items-center justify-center p-4 pt-safe pb-safe relative overflow-hidden">
-      {/* Subtle emerald radial glow at top */}
+    <div className="min-h-screen w-full bg-[var(--bg-primary)] flex flex-col items-center justify-center p-4 pt-safe pb-safe relative overflow-hidden">
+      {/* Subtle accent radial glow at top */}
       <div
-        className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-[720px] h-[340px] opacity-25 blur-3xl"
+        className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-[720px] h-[340px] opacity-20 blur-3xl"
         style={{
-          background: 'radial-gradient(ellipse at center, #1DB954 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse at center, var(--accent) 0%, transparent 70%)',
         }}
         aria-hidden="true"
       />
 
-      <div className="relative z-10 w-full max-w-md rounded-xl bg-[#181818] border border-white/[0.08] p-8 shadow-2xl">
+      <div className="relative z-10 w-full max-w-md rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 shadow-2xl">
         <div className="flex flex-col items-center text-center mb-8">
           <BrandLogo size="lg" />
-          <h1 className="font-display mt-5 text-2xl font-bold tracking-tight text-white">
+          <h1 className="font-display mt-5 text-2xl font-bold tracking-tight text-[var(--text-primary)]">
             {isSetup ? 'Create Admin Account' : 'Sign in to xlabplayer'}
           </h1>
-          <p className="mt-2 text-sm text-[#B3B3B3] max-w-xs">
+          <p className="mt-2 text-sm text-[var(--text-secondary)] max-w-xs">
             {isSetup
               ? 'First-run setup. Create the primary administrator account to configure your NAS mount and music library.'
               : 'Stream and manage your self-hosted NAS music collection.'}
@@ -62,11 +62,11 @@ export const AuthPage: React.FC = () => {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label htmlFor="auth-username" className="block text-xs font-semibold text-[#B3B3B3] mb-1.5">
+            <label htmlFor="auth-username" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
               Username
             </label>
             <div className="relative">
-              <User className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#6A6A6A]" />
+              <User className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
               <input
                 id="auth-username"
                 type="text"
@@ -78,17 +78,17 @@ export const AuthPage: React.FC = () => {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder={isSetup ? 'admin' : 'Enter your username'}
-                className="w-full rounded-md bg-[#121212] pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-[#6A6A6A] border border-white/10 focus:border-[#1DB954] focus:outline-none transition-colors"
+                className="w-full rounded-md bg-[var(--bg-input)] pl-10 pr-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none transition-colors"
               />
             </div>
           </div>
 
           <div>
-            <label htmlFor="auth-password" className="block text-xs font-semibold text-[#B3B3B3] mb-1.5">
+            <label htmlFor="auth-password" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
               Password
             </label>
             <div className="relative">
-              <Lock className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#6A6A6A]" />
+              <Lock className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
               <input
                 id="auth-password"
                 type="password"
@@ -98,18 +98,18 @@ export const AuthPage: React.FC = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={isSetup ? 'Minimum 6 characters' : 'Enter your password'}
-                className="w-full rounded-md bg-[#121212] pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-[#6A6A6A] border border-white/10 focus:border-[#1DB954] focus:outline-none transition-colors"
+                className="w-full rounded-md bg-[var(--bg-input)] pl-10 pr-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none transition-colors"
               />
             </div>
           </div>
 
           {isSetup && (
             <div>
-              <label htmlFor="auth-confirm" className="block text-xs font-semibold text-[#B3B3B3] mb-1.5">
+              <label htmlFor="auth-confirm" className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5">
                 Confirm Password
               </label>
               <div className="relative">
-                <ShieldCheck className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#6A6A6A]" />
+                <ShieldCheck className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
                 <input
                   id="auth-confirm"
                   type="password"
@@ -119,14 +119,14 @@ export const AuthPage: React.FC = () => {
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="Re-enter password"
-                  className="w-full rounded-md bg-[#121212] pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-[#6A6A6A] border border-white/10 focus:border-[#1DB954] focus:outline-none transition-colors"
+                  className="w-full rounded-md bg-[var(--bg-input)] pl-10 pr-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none transition-colors"
                 />
               </div>
             </div>
           )}
 
           {error && (
-            <div className="flex items-start gap-2.5 rounded-md bg-red-500/10 border border-red-500/25 px-3.5 py-2.5 text-sm text-red-300">
+            <div className="flex items-start gap-2.5 rounded-md bg-[var(--danger-bg)] border border-[var(--danger-border)] px-3.5 py-2.5 text-sm text-[var(--danger-text)]">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
@@ -135,7 +135,7 @@ export const AuthPage: React.FC = () => {
           <button
             type="submit"
             disabled={submitting}
-            className="mt-2 flex w-full items-center justify-center gap-2 rounded-full bg-[#1DB954] py-3 text-sm font-bold text-black hover:bg-[#1ED760] active:scale-[0.99] disabled:opacity-60 transition-all"
+            className="mt-2 flex w-full items-center justify-center gap-2 rounded-full bg-[var(--accent)] py-3 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] active:scale-[0.99] disabled:opacity-60 transition-all"
           >
             {submitting ? (
               <>

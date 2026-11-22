@@ -31,20 +31,20 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-[2px]"
+        className="fixed inset-0 bg-black/55 backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden="true"
       />
-      <aside className="relative z-10 flex h-full w-full max-w-sm flex-col bg-[#181818] border-l border-white/10 shadow-2xl pt-safe pb-safe">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+      <aside className="relative z-10 flex h-full w-full max-w-sm flex-col bg-[var(--bg-secondary)] border-l border-[var(--border-subtle)] shadow-2xl pt-safe pb-safe">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-2.5">
-            <ListMusic className="w-5 h-5 text-[#1DB954]" />
-            <h2 className="font-display text-base font-bold text-white">Up Next Queue</h2>
+            <ListMusic className="w-5 h-5 text-[var(--accent)]" />
+            <h2 className="font-display text-base font-bold text-[var(--text-primary)]">Up Next Queue</h2>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white transition-colors"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
             aria-label="Close queue"
           >
             <X className="w-5 h-5" />
@@ -55,8 +55,8 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
           {/* Now Playing */}
           {currentTrack && (
             <section>
-              <h3 className="text-xs font-semibold text-[#B3B3B3] mb-2.5 px-1">Now playing</h3>
-              <div className="flex items-center gap-3 rounded-md bg-[#282828] p-2.5">
+              <h3 className="text-xs font-semibold text-[var(--text-secondary)] mb-2.5 px-1">Now playing</h3>
+              <div className="flex items-center gap-3 rounded-lg bg-[var(--bg-elevated)] p-2.5">
                 <AlbumArt
                   coverFile={currentTrack.cover_file}
                   alt={currentTrack.title}
@@ -65,12 +65,12 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                   iconSize={18}
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-[#1DB954] truncate">
+                  <p className="text-sm font-semibold text-[var(--accent)] truncate">
                     {currentTrack.title}
                   </p>
-                  <p className="text-xs text-[#B3B3B3] truncate">{currentTrack.artist}</p>
+                  <p className="text-xs text-[var(--text-secondary)] truncate">{currentTrack.artist}</p>
                 </div>
-                <span className="font-mono text-xs tabular-nums text-[#B3B3B3]">
+                <span className="font-mono text-xs tabular-nums text-[var(--text-secondary)]">
                   {formatDuration(currentTrack.duration)}
                 </span>
               </div>
@@ -80,14 +80,14 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
           {/* Upcoming */}
           <section>
             <div className="flex items-center justify-between mb-2.5 px-1">
-              <h3 className="text-xs font-semibold text-[#B3B3B3]">
+              <h3 className="text-xs font-semibold text-[var(--text-secondary)]">
                 Next in queue ({upcoming.length})
               </h3>
               {upcoming.length > 0 && (
                 <button
                   type="button"
                   onClick={clearUpcomingQueue}
-                  className="text-xs text-[#B3B3B3] hover:text-white transition-colors"
+                  className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                 >
                   Clear queue
                 </button>
@@ -95,9 +95,9 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
             </div>
 
             {upcoming.length === 0 ? (
-              <div className="rounded-md bg-[#121212] p-6 text-center">
-                <p className="text-sm text-[#B3B3B3]">No tracks queued up next.</p>
-                <p className="mt-1 text-xs text-[#6A6A6A]">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-6 text-center">
+                <p className="text-sm text-[var(--text-secondary)]">No tracks queued up next.</p>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">
                   Play an album, playlist, or add tracks from the library menu.
                 </p>
               </div>
@@ -115,7 +115,7 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                       }
                       setDragIndex(null);
                     }}
-                    className="group flex items-center gap-2.5 rounded-md p-2 hover:bg-[#282828] transition-colors cursor-grab active:cursor-grabbing"
+                    className="group flex items-center gap-2.5 rounded-lg p-2 hover:bg-[var(--bg-hover)] transition-colors cursor-grab active:cursor-grabbing"
                   >
                     <button
                       type="button"
@@ -130,8 +130,8 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                         iconSize={16}
                       />
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-white truncate">{track.title}</p>
-                        <p className="text-xs text-[#B3B3B3] truncate">{track.artist}</p>
+                        <p className="text-sm font-medium text-[var(--text-primary)] truncate">{track.title}</p>
+                        <p className="text-xs text-[var(--text-secondary)] truncate">{track.artist}</p>
                       </div>
                     </button>
 
@@ -140,7 +140,7 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                         type="button"
                         disabled={localIdx === 0}
                         onClick={() => reorderQueue(idx, idx - 1)}
-                        className="p-1.5 rounded text-[#B3B3B3] hover:text-white disabled:opacity-25"
+                        className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-25"
                         aria-label="Move up"
                       >
                         <ArrowUp className="w-3.5 h-3.5" />
@@ -149,7 +149,7 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                         type="button"
                         disabled={localIdx === upcoming.length - 1}
                         onClick={() => reorderQueue(idx, idx + 1)}
-                        className="p-1.5 rounded text-[#B3B3B3] hover:text-white disabled:opacity-25"
+                        className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-25"
                         aria-label="Move down"
                       >
                         <ArrowDown className="w-3.5 h-3.5" />
@@ -157,7 +157,7 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                       <button
                         type="button"
                         onClick={() => removeFromQueue(idx)}
-                        className="p-1.5 rounded text-[#B3B3B3] hover:text-red-400"
+                        className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--danger-text)]"
                         aria-label="Remove from queue"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

@@ -32,13 +32,14 @@ import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useTheme} from '../context/ThemeContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration, getCoverUrl} from '../lib/api';
 import {
+  computeLightTintedTopHex,
   computeNowPlayingTopHex,
-  DEFAULT_APP_THEME_COLOR,
   extractDominantColorFromImage,
   getAlbumColorCacheKey,
   getCachedDominantColor,
@@ -128,6 +129,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     libraryRefreshVersion,
     bumpLibraryRefresh,
   } = usePlayer();
+  const {isLight, baseThemeColor} = useTheme();
 
   const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
   const isPlaylistsRoot = location.pathname === '/playlists';
@@ -705,23 +707,33 @@ export const PlaylistsLibraryPage: React.FC = () => {
   }, [heroAlbumColorKey, heroCoverUrl, heroTrack, isHomeView, viewFallbackColor]);
 
   const heroTopHexColor = useMemo(() => {
-    if (!isHomeView) return DEFAULT_APP_THEME_COLOR;
+    if (!isHomeView) return baseThemeColor;
     const cached = heroTrack
       ? getCachedDominantColor(heroAlbumColorKey, heroTrack.id)
       : null;
-    return computeNowPlayingTopHex(
-      cached || heroSampledColor || heroTrack?.dominant_color || viewFallbackColor
-    );
-  }, [heroAlbumColorKey, heroSampledColor, heroTrack, isHomeView, viewFallbackColor]);
+    const rawColor =
+      cached || heroSampledColor || heroTrack?.dominant_color || viewFallbackColor;
+    return isLight
+      ? computeLightTintedTopHex(rawColor, 0.22)
+      : computeNowPlayingTopHex(rawColor);
+  }, [
+    baseThemeColor,
+    heroAlbumColorKey,
+    heroSampledColor,
+    heroTrack,
+    isHomeView,
+    isLight,
+    viewFallbackColor,
+  ]);
 
   // Dynamically sync mobile PWA top status bar with the top of the Home hero gradient
   useEffect(() => {
     if (!isHomeView) return;
     setDocumentThemeColor(heroTopHexColor);
     return () => {
-      setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
+      setDocumentThemeColor(baseThemeColor);
     };
-  }, [heroTopHexColor, isHomeView]);
+  }, [baseThemeColor, heroTopHexColor, isHomeView]);
 
   // Smooth 1:1 horizontal swipe on the Home hero square cover to skip next/previous tracks
   const handleHeroSwipeNext = useCallback(() => {
@@ -768,7 +780,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   return (
     <>
       {pageToast && (
-        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[#1DB954] px-4 py-2 text-sm font-semibold text-black shadow-xl max-w-[90vw] truncate">
+        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
           {pageToast}
         </div>
       )}
@@ -787,24 +799,24 @@ export const PlaylistsLibraryPage: React.FC = () => {
           <button
             type="button"
             onClick={() => navigate('/playlists')}
-            className="inline-flex items-center gap-2 text-sm font-medium text-[#B3B3B3] hover:text-white mb-6 transition-colors"
+            className="inline-flex items-center gap-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] mb-6 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             Back to Playlists
           </button>
 
           {loading && !activePlaylist ? (
-            <div className="flex items-center justify-center py-20 text-[#B3B3B3] gap-2">
-              <Loader2 className="w-5 h-5 animate-spin text-[#1DB954]" />
+            <div className="flex items-center justify-center py-20 text-[var(--text-secondary)] gap-2">
+              <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
               <span>Loading playlist...</span>
             </div>
           ) : !activePlaylist ? (
-            <div className="rounded-xl bg-[#181818] p-10 text-center">
-              <p className="text-base font-semibold text-white">Playlist not found</p>
+            <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-10 text-center">
+              <p className="text-base font-semibold text-[var(--text-primary)]">Playlist not found</p>
               <button
                 type="button"
                 onClick={() => navigate('/playlists')}
-                className="mt-4 rounded-full bg-white px-5 py-2 text-sm font-bold text-black"
+                className="mt-4 rounded-full bg-[var(--btn-contrast-bg)] px-5 py-2 text-sm font-bold text-[var(--btn-contrast-text)]"
               >
                 Return to Playlists
               </button>
@@ -820,26 +832,28 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 />
                 <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex items-center gap-2">
-                    <p className="text-xs font-semibold text-[#B3B3B3]">Playlist</p>
+                    <p className="text-xs font-semibold text-[var(--text-secondary)]">Playlist</p>
                     {activePlaylist.source === 'm3u' && (
-                      <span className="font-mono text-[10px] font-semibold text-[#1DB954] border border-[#1DB954]/40 bg-[#1DB954]/10 rounded px-1.5 py-0.5 leading-none">
+                      <span className="font-mono text-[10px] font-semibold text-[var(--accent)] border border-[var(--accent)]/40 bg-[var(--accent-soft)] rounded px-1.5 py-0.5 leading-none">
                         M3U
                       </span>
                     )}
                   </div>
-                  <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-white break-words">
+                  <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-[var(--text-primary)] break-words">
                     {activePlaylist.name}
                   </h1>
                   {activePlaylist.description && (
-                    <p className="text-sm text-[#B3B3B3] max-w-2xl">{activePlaylist.description}</p>
+                    <p className="text-sm text-[var(--text-secondary)] max-w-2xl">
+                      {activePlaylist.description}
+                    </p>
                   )}
                   {activePlaylist.m3u_path && (
-                    <p className="font-mono text-xs text-[#6A6A6A] truncate">
+                    <p className="font-mono text-xs text-[var(--text-muted)] truncate">
                       {activePlaylist.m3u_path}
                     </p>
                   )}
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#B3B3B3] pt-1">
-                    <span className="font-semibold text-white">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] pt-1">
+                    <span className="font-semibold text-[var(--text-primary)]">
                       {activePlaylist.owner_username || user?.username}
                     </span>
                     <span aria-hidden="true">·</span>
@@ -853,13 +867,13 @@ export const PlaylistsLibraryPage: React.FC = () => {
               </div>
 
               {/* Action Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-3 py-4 border-b border-white/10 mb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 py-4 border-b border-[var(--border-subtle)] mb-4">
                 <div className="flex flex-wrap items-center gap-3">
                   <button
                     type="button"
                     disabled={filteredTracks.length === 0}
                     onClick={handlePlayAll}
-                    className="flex h-12 w-12 items-center justify-center rounded-full bg-[#1DB954] text-black shadow-lg hover:bg-[#1ED760] hover:scale-105 active:scale-95 disabled:opacity-40 transition-all"
+                    className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg hover:bg-[var(--accent-hover)] hover:scale-105 active:scale-95 disabled:opacity-40 transition-all"
                     aria-label="Play playlist"
                   >
                     <Play className="w-5 h-5 fill-current ml-0.5" />
@@ -869,14 +883,18 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   {tracks.length > 0 && (
                     <button
                       type="button"
-                      disabled={!playlistAllTracksCached && offline && playlistDownloadProgress?.playlistId !== activePlaylist.id}
+                      disabled={
+                        !playlistAllTracksCached &&
+                        offline &&
+                        playlistDownloadProgress?.playlistId !== activePlaylist.id
+                      }
                       onClick={() => void handleDownloadPlaylistOffline()}
                       className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-xs font-semibold transition-colors disabled:opacity-40 whitespace-nowrap ${
                         playlistDownloadProgress?.playlistId === activePlaylist.id
-                          ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
+                          ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
                           : playlistAllTracksCached
-                            ? 'border-[#1DB954]/50 bg-[#1DB954]/15 text-[#1DB954] hover:bg-[#1DB954]/20'
-                            : 'border-white/15 bg-[#181818] text-white hover:border-white/40 hover:bg-[#282828]'
+                            ? 'border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)]'
+                            : 'border-[var(--border-strong)] bg-[var(--bg-secondary)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]'
                       }`}
                       title={
                         playlistDownloadProgress?.playlistId === activePlaylist.id
@@ -900,7 +918,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         </>
                       ) : (
                         <>
-                          <ArrowDownCircle className="w-3.5 h-3.5 text-[#1DB954]" />
+                          <ArrowDownCircle className="w-3.5 h-3.5 text-[var(--accent)]" />
                           <span>
                             {playlistCachedCount > 0
                               ? `Download Offline (${playlistCachedCount}/${tracks.length})`
@@ -921,8 +939,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         }}
                         className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold transition-colors ${
                           selectionMode
-                            ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
-                            : 'border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white'
+                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                            : 'border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]'
                         }`}
                       >
                         <CheckSquare className="w-3.5 h-3.5" />
@@ -933,16 +951,16 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={toggleSelectAll}
-                          className="inline-flex items-center gap-1.5 rounded-full border border-white/15 px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#282828] transition-colors"
+                          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-strong)] px-3.5 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors"
                         >
                           {allVisibleSelected ? (
                             <>
-                              <Square className="w-3.5 h-3.5 text-[#B3B3B3]" />
+                              <Square className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                               Deselect All
                             </>
                           ) : (
                             <>
-                              <CheckSquare className="w-3.5 h-3.5 text-[#1DB954]" />
+                              <CheckSquare className="w-3.5 h-3.5 text-[var(--accent)]" />
                               Select All
                             </>
                           )}
@@ -958,31 +976,31 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         type="button"
                         onClick={() => setDetailMenuOpen((o) => !o)}
                         disabled={exportingPlaylistId === activePlaylist.id}
-                        className="flex h-10 w-10 items-center justify-center rounded-full border border-white/15 text-[#B3B3B3] hover:border-white/40 hover:text-white transition-colors"
+                        className="flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors"
                         aria-label="Playlist options"
                       >
                         {exportingPlaylistId === activePlaylist.id ? (
-                          <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
+                          <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
                         ) : (
                           <MoreHorizontal className="w-5 h-5" />
                         )}
                       </button>
 
                       {detailMenuOpen && (
-                        <div className="absolute left-0 top-12 z-40 w-52 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl">
+                        <div className="absolute left-0 top-12 z-40 w-52 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] p-1.5 shadow-2xl">
                           <button
                             type="button"
                             onClick={() => void handleExportM3u(activePlaylist)}
-                            className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                            className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                           >
-                            <FileDown className="w-4 h-4 text-[#1DB954]" />
+                            <FileDown className="w-4 h-4 text-[var(--accent)]" />
                             Export as .m3u
                           </button>
-                          <div className="my-1 border-t border-white/10" />
+                          <div className="my-1 border-t border-[var(--border-subtle)]" />
                           <button
                             type="button"
                             onClick={() => void handleDeletePlaylist(activePlaylist.id)}
-                            className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-red-400 hover:bg-white/10"
+                            className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-[var(--danger-text)] hover:bg-[var(--bg-hover)]"
                           >
                             <Trash2 className="w-4 h-4" />
                             Delete Playlist
@@ -994,19 +1012,19 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 </div>
 
                 <div className="relative w-full sm:w-72">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#B3B3B3]" />
+                  <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-secondary)]" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Filter in playlist..."
-                    className="w-full rounded-md bg-[#282828] pl-9 pr-8 py-2 text-sm text-white placeholder-[#6A6A6A] focus:outline-none focus:ring-1 focus:ring-[#1DB954]"
+                    className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] pl-9 pr-8 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
                   />
                   {searchQuery && (
                     <button
                       type="button"
                       onClick={() => setSearchQuery('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#B3B3B3] hover:text-white"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -1015,15 +1033,17 @@ export const PlaylistsLibraryPage: React.FC = () => {
               </div>
 
               {filteredTracks.length === 0 ? (
-                <div className="rounded-xl bg-[#181818] p-12 text-center">
-                  <p className="text-base font-semibold text-white">This playlist is empty</p>
-                  <p className="mt-1.5 text-sm text-[#B3B3B3]">
+                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-12 text-center">
+                  <p className="text-base font-semibold text-[var(--text-primary)]">
+                    This playlist is empty
+                  </p>
+                  <p className="mt-1.5 text-sm text-[var(--text-secondary)]">
                     Open your Library and use the track menu or Select mode to add songs here.
                   </p>
                   <button
                     type="button"
                     onClick={() => navigate('/')}
-                    className="mt-5 rounded-full bg-white px-6 py-2.5 text-sm font-bold text-black hover:scale-105 transition-transform"
+                    className="mt-5 rounded-full bg-[var(--btn-contrast-bg)] px-6 py-2.5 text-sm font-bold text-[var(--btn-contrast-text)] hover:scale-105 transition-transform"
                   >
                     Browse Library
                   </button>
@@ -1065,30 +1085,30 @@ export const PlaylistsLibraryPage: React.FC = () => {
               : 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
           }}
         >
-          {/* SPOTIFY-STYLE DYNAMIC GRADIENT HERO HEADER (Home View Only — extends cleanly behind status bar) */}
+          {/* DYNAMIC GRADIENT HERO HEADER (Home View Only — extends cleanly behind status bar) */}
           {isHomeView ? (
             <div
               className="relative pt-safe transition-colors duration-500"
               style={{
-                background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, #121212 100%)`,
+                background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
               }}
             >
               <div className="px-4 sm:px-6 lg:px-8 pt-4 pb-4 max-w-7xl mx-auto space-y-4">
                 {/* Offline Mode Banner when Disconnected */}
                 {offline && (
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-black/35 backdrop-blur-md border border-amber-500/35 px-4 py-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-[var(--warn-bg)] backdrop-blur-md border border-[var(--warn-border)] px-4 py-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-500/20 text-[var(--warn-text)]">
                         <WifiOff className="w-4 h-4" />
                       </div>
                       <div className="min-w-0">
-                        <p className="text-sm font-bold text-white">Offline Mode</p>
-                        <p className="text-xs text-white/75">
-                          <span className="font-mono tabular-nums text-white">
+                        <p className="text-sm font-bold text-[var(--text-primary)]">Offline Mode</p>
+                        <p className="text-xs text-[var(--text-secondary)]">
+                          <span className="font-mono tabular-nums text-[var(--text-primary)]">
                             {cachedTrackIds.size}
                           </span>{' '}
                           cached {cachedTrackIds.size === 1 ? 'track' : 'tracks'} ·{' '}
-                          <span className="font-mono tabular-nums text-white">
+                          <span className="font-mono tabular-nums text-[var(--text-primary)]">
                             {playlists.length}
                           </span>{' '}
                           offline {playlists.length === 1 ? 'playlist' : 'playlists'}
@@ -1098,9 +1118,9 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => navigate('/settings')}
-                      className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20 transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-full bg-[var(--surface-overlay)] px-3.5 py-1.5 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-overlay-hover)] transition-colors whitespace-nowrap shrink-0"
                     >
-                      <HardDriveDownload className="w-3.5 h-3.5 text-[#1DB954]" />
+                      <HardDriveDownload className="w-3.5 h-3.5 text-[var(--accent)]" />
                       Manage Offline
                     </button>
                   </div>
@@ -1108,7 +1128,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
                 {/* Top Row: Time-of-Day Greeting + Sleek Compact Filter Pills */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <p className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-white">
+                  <p className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-[var(--text-primary)]">
                     {offline ? 'Offline Mode' : greeting}
                   </p>
 
@@ -1125,8 +1145,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
                           }}
                           className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                             isActive
-                              ? 'bg-[#1DB954] text-black shadow-sm'
-                              : 'bg-black/30 text-white/90 hover:bg-black/45 border border-white/10'
+                              ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-sm'
+                              : isLight
+                                ? 'bg-black/[0.06] text-[var(--text-primary)] hover:bg-black/[0.11] border border-black/[0.08]'
+                                : 'bg-black/30 text-white/90 hover:bg-black/45 border border-white/10'
                           }`}
                         >
                           {pill.label}
@@ -1143,7 +1165,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     {...heroCoverSwipe.handlers}
                     style={heroCoverSwipe.style}
                     aria-label="Swipe left for next track or right for previous track"
-                    className="relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.55)] ring-1 ring-white/10 select-none cursor-grab active:cursor-grabbing"
+                    className={`relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden ring-1 ring-[var(--border-subtle)] select-none cursor-grab active:cursor-grabbing ${
+                      isLight
+                        ? 'shadow-[0_18px_42px_rgba(0,0,0,0.16)]'
+                        : 'shadow-[0_20px_50px_rgba(0,0,0,0.55)]'
+                    }`}
                   >
                     {heroTrack?.cover_file ? (
                       <AlbumArt
@@ -1177,7 +1203,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       onClick={() => cycleHomeView(1)}
                       aria-label={`Switch to ${nextHomeView.label}`}
                       title={`Next: ${nextHomeView.label}`}
-                      className="group absolute left-[calc(50%+128px)] w-[184px] h-[184px] rounded-2xl overflow-hidden opacity-55 hover:opacity-85 transition-all duration-200 shadow-2xl ring-1 ring-white/10 focus:outline-none"
+                      className="group absolute left-[calc(50%+128px)] w-[184px] h-[184px] rounded-2xl overflow-hidden opacity-55 hover:opacity-85 transition-all duration-200 shadow-2xl ring-1 ring-[var(--border-subtle)] focus:outline-none"
                     >
                       {peekCoverFile ? (
                         <AlbumArt
@@ -1213,17 +1239,17 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
                 {/* Left-Aligned Active View Title & Compact Metadata */}
                 <div className="space-y-1">
-                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white truncate">
+                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)] truncate">
                     {activeHomeTitle}
                   </h1>
-                  <p className="text-xs sm:text-sm text-[#B3B3B3]">
-                    <span className="font-mono tabular-nums text-white/90">
+                  <p className="text-xs sm:text-sm text-[var(--text-secondary)]">
+                    <span className="font-mono tabular-nums text-[var(--text-primary)]">
                       {filteredTracks.length}
                     </span>{' '}
                     {filteredTracks.length === 1 ? 'track' : 'tracks'}
                     {totalDuration > 0 && (
                       <>
-                        <span className="mx-1.5 text-[#6A6A6A]" aria-hidden="true">·</span>
+                        <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
                         <span className="font-mono tabular-nums">
                           {formatHumanDuration(totalDuration)}
                         </span>
@@ -1231,7 +1257,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     )}
                     {!artistFilter && !searchQuery && activeHomeTab === 'all' && playlists.length > 0 && (
                       <>
-                        <span className="mx-1.5 text-[#6A6A6A]" aria-hidden="true">·</span>
+                        <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
                         <span className="font-mono tabular-nums">{playlists.length}</span>{' '}
                         {playlists.length === 1 ? 'playlist' : 'playlists'}
                       </>
@@ -1239,7 +1265,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Clean Single-Row Action Bar: Left (Select + Search Toggle + Active Chips) | Right (Shuffle + Circular Green Play) */}
+                {/* Clean Single-Row Action Bar: Left (Select + Search Toggle + Active Chips) | Right (Shuffle + Circular Accent Play) */}
                 <div className="flex items-center justify-between gap-3 pt-0.5">
                   <div className="flex flex-wrap items-center gap-2 min-w-0">
                     {!offline && filteredTracks.length > 0 && (
@@ -1251,8 +1277,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         }}
                         className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors shrink-0 ${
                           selectionMode
-                            ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
-                            : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
+                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                            : isLight
+                              ? 'border-black/[0.12] bg-black/[0.05] text-[var(--text-primary)] hover:bg-black/[0.1]'
+                              : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
                         }`}
                       >
                         <CheckSquare className="w-3.5 h-3.5" />
@@ -1264,16 +1292,20 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={toggleSelectAll}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 transition-colors shrink-0"
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors shrink-0 ${
+                          isLight
+                            ? 'border-black/[0.12] bg-black/[0.05] text-[var(--text-primary)] hover:bg-black/[0.1]'
+                            : 'border-white/20 bg-black/25 text-white hover:bg-white/10'
+                        }`}
                       >
                         {allVisibleSelected ? (
                           <>
-                            <Square className="w-3.5 h-3.5 text-[#B3B3B3]" />
+                            <Square className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                             <span>Deselect All</span>
                           </>
                         ) : (
                           <>
-                            <CheckSquare className="w-3.5 h-3.5 text-[#1DB954]" />
+                            <CheckSquare className="w-3.5 h-3.5 text-[var(--accent)]" />
                             <span>Select All</span>
                           </>
                         )}
@@ -1293,8 +1325,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       }}
                       className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors shrink-0 ${
                         searchOpen || searchQuery
-                          ? 'border-[#1DB954] bg-[#1DB954]/15 text-[#1DB954]'
-                          : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
+                          ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : isLight
+                            ? 'border-black/[0.12] bg-black/[0.05] text-[var(--text-primary)] hover:bg-black/[0.1]'
+                            : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
                       }`}
                       aria-label="Filter tracks"
                       title="Filter tracks"
@@ -1307,15 +1341,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => setSearchParams({})}
-                        className="inline-flex items-center gap-1.5 rounded-full bg-white/15 border border-white/15 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/25 shrink-0"
+                        className="inline-flex items-center gap-1.5 rounded-full bg-[var(--surface-overlay)] border border-[var(--border-subtle)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--surface-overlay-hover)] shrink-0"
                       >
                         <span className="truncate max-w-[120px]">{artistFilter}</span>
-                        <X className="w-3.5 h-3.5 text-white/80" />
+                        <X className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                       </button>
                     )}
                   </div>
 
-                  {/* Right Side: Shuffle + Prominent Circular Spotify-Green Play */}
+                  {/* Right Side: Shuffle + Prominent Circular Accent Play */}
                   <div className="flex items-center gap-3 shrink-0">
                     <button
                       type="button"
@@ -1323,15 +1357,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       disabled={filteredTracks.length === 0}
                       className={`relative flex h-10 w-10 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                         shuffle
-                          ? 'text-[#1DB954] bg-[#1DB954]/15'
-                          : 'text-[#B3B3B3] hover:text-white hover:bg-white/10'
+                          ? 'text-[var(--accent)] bg-[var(--accent-soft)]'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-overlay)]'
                       }`}
                       aria-label="Shuffle play"
                       title="Shuffle play"
                     >
                       <Shuffle className="w-5 h-5" />
                       {shuffle && (
-                        <span className="absolute bottom-1 h-1 w-1 rounded-full bg-[#1DB954]" />
+                        <span className="absolute bottom-1 h-1 w-1 rounded-full bg-[var(--accent)]" />
                       )}
                     </button>
 
@@ -1339,7 +1373,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       type="button"
                       onClick={handlePlayAll}
                       disabled={filteredTracks.length === 0}
-                      className="flex w-12 h-12 items-center justify-center rounded-full bg-[#1DB954] text-black shadow-xl hover:bg-[#1ED760] hover:scale-105 active:scale-95 disabled:opacity-40 transition-all"
+                      className="flex w-12 h-12 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-xl hover:bg-[var(--accent-hover)] hover:scale-105 active:scale-95 disabled:opacity-40 transition-all"
                       aria-label={`Play ${activeHomeTitle}`}
                       title={`Play ${activeHomeTitle}`}
                     >
@@ -1351,14 +1385,14 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 {/* Collapsible Quick Inline Search Filter */}
                 {(searchOpen || Boolean(searchQuery)) && (
                   <div className="relative pt-1">
-                    <Search className="pointer-events-none absolute left-3 top-[calc(50%+2px)] -translate-y-1/2 w-4 h-4 text-[#8A8A8A]" />
+                    <Search className="pointer-events-none absolute left-3 top-[calc(50%+2px)] -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
                     <input
                       ref={searchInputRef}
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       placeholder="Filter title, artist, album..."
-                      className="w-full sm:max-w-sm rounded-lg bg-[#181818]/90 border border-white/15 pl-9 pr-9 py-2 text-sm text-white placeholder-[#8A8A8A] focus:border-[#1DB954] focus:outline-none"
+                      className="w-full sm:max-w-sm rounded-lg bg-[var(--bg-input)] border border-[var(--border-strong)] pl-9 pr-9 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
                     />
                     <button
                       type="button"
@@ -1366,7 +1400,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         setSearchQuery('');
                         setSearchOpen(false);
                       }}
-                      className="absolute right-2.5 sm:left-[352px] sm:right-auto top-[calc(50%+2px)] -translate-y-1/2 text-[#B3B3B3] hover:text-white"
+                      className="absolute right-2.5 sm:left-[352px] sm:right-auto top-[calc(50%+2px)] -translate-y-1/2 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                       aria-label="Close filter"
                     >
                       <X className="w-4 h-4" />
@@ -1383,15 +1417,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
             >
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0">
-                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white truncate">
+                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)] truncate">
                     {offline ? 'Offline Playlists' : 'Your Playlists'}
                   </h1>
-                  <p className="mt-0.5 text-xs sm:text-sm text-[#B3B3B3]">
+                  <p className="mt-0.5 text-xs sm:text-sm text-[var(--text-secondary)]">
                     <span className="font-mono tabular-nums">{playlists.length}</span>{' '}
                     {playlists.length === 1 ? 'playlist' : 'playlists'}
                     {!offline && (
                       <>
-                        <span className="mx-1.5 text-[#6A6A6A]" aria-hidden="true">·</span>
+                        <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
                         <span className="font-mono tabular-nums">{stats.totalTracks}</span>{' '}
                         {stats.totalTracks === 1 ? 'track' : 'tracks'}
                       </>
@@ -1403,7 +1437,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setCreateOpen(true)}
-                    className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-4 sm:px-5 py-2 sm:py-2.5 text-xs sm:text-sm font-bold text-black hover:bg-[#1ED760] transition-colors whitespace-nowrap shrink-0"
+                    className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-4 sm:px-5 py-2 sm:py-2.5 text-xs sm:text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap shrink-0"
                   >
                     <Plus className="w-4 h-4 stroke-[2.5]" />
                     Create Playlist
@@ -1417,12 +1451,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
           <div className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
             {activeTab === 'playlists' ? (
               playlists.length === 0 ? (
-                <div className="rounded-xl bg-[#181818] p-12 text-center">
-                  <Disc3 className="w-10 h-10 text-[#6A6A6A] mx-auto mb-3" />
-                  <h2 className="font-display text-lg font-bold text-white">
+                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-12 text-center">
+                  <Disc3 className="w-10 h-10 text-[var(--text-muted)] mx-auto mb-3" />
+                  <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
                     {offline ? 'No offline playlists cached' : 'No playlists created yet'}
                   </h2>
-                  <p className="mt-1 text-sm text-[#B3B3B3] max-w-md mx-auto">
+                  <p className="mt-1 text-sm text-[var(--text-secondary)] max-w-md mx-auto">
                     {offline
                       ? 'When back online, open any playlist and tap Download Playlist Offline to listen in Airplane Mode.'
                       : 'Organize your NAS tracks into custom collections, or place .m3u / .m3u8 files inside your music folder and run a library scan.'}
@@ -1431,7 +1465,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => setCreateOpen(true)}
-                      className="mt-5 rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
+                      className="mt-5 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                     >
                       Create First Playlist
                     </button>
@@ -1450,7 +1484,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') navigate(`/playlists/${pl.id}`);
                         }}
-                        className="group relative rounded-lg bg-[#181818] p-4 hover:bg-[#282828] transition-colors cursor-pointer"
+                        className="group relative rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-4 hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer"
                       >
                         <div className="relative mb-3.5">
                           <PlaylistMosaic
@@ -1460,7 +1494,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                           />
 
                           {pl.source === 'm3u' && (
-                            <span className="absolute top-2 left-2 font-mono text-[10px] font-bold tracking-wide text-[#1DB954] bg-black/75 border border-[#1DB954]/40 rounded px-1.5 py-0.5 leading-none backdrop-blur-xs">
+                            <span className="absolute top-2 left-2 font-mono text-[10px] font-bold tracking-wide text-[var(--accent)] bg-black/75 border border-[var(--accent)]/40 rounded px-1.5 py-0.5 leading-none backdrop-blur-xs">
                               M3U
                             </span>
                           )}
@@ -1468,7 +1502,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={(e) => void handleQuickPlayPlaylist(e, pl.id)}
-                            className="absolute bottom-2.5 right-2.5 flex h-12 w-12 items-center justify-center rounded-full bg-[#1DB954] text-black shadow-xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 hover:bg-[#1ED760] hover:scale-105 transition-all"
+                            className="absolute bottom-2.5 right-2.5 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 hover:bg-[var(--accent-hover)] hover:scale-105 transition-all"
                             aria-label={`Play ${pl.name}`}
                           >
                             <Play className="w-5 h-5 fill-current ml-0.5" />
@@ -1477,8 +1511,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1">
-                            <p className="text-sm font-bold text-white truncate">{pl.name}</p>
-                            <p className="mt-1 text-xs text-[#B3B3B3] truncate">
+                            <p className="text-sm font-bold text-[var(--text-primary)] truncate">
+                              {pl.name}
+                            </p>
+                            <p className="mt-1 text-xs text-[var(--text-secondary)] truncate">
                               {pl.description ||
                                 `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`}
                             </p>
@@ -1496,11 +1532,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                                   e.stopPropagation();
                                   setPlaylistMenuId(isPlMenuOpen ? null : pl.id);
                                 }}
-                                className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-white/10 hover:text-white transition-colors"
+                                className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] transition-colors"
                                 aria-label={`Options for ${pl.name}`}
                               >
                                 {exportingPlaylistId === pl.id ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1DB954]" />
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
                                 ) : (
                                   <MoreHorizontal className="w-4 h-4" />
                                 )}
@@ -1509,21 +1545,21 @@ export const PlaylistsLibraryPage: React.FC = () => {
                               {isPlMenuOpen && (
                                 <div
                                   onClick={(e) => e.stopPropagation()}
-                                  className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
+                                  className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] p-1.5 shadow-2xl"
                                 >
                                   <button
                                     type="button"
                                     onClick={() => void handleExportM3u(pl)}
-                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-white hover:bg-white/10"
+                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                                   >
-                                    <FileDown className="w-3.5 h-3.5 text-[#1DB954]" />
+                                    <FileDown className="w-3.5 h-3.5 text-[var(--accent)]" />
                                     Export as .m3u
                                   </button>
-                                  <div className="my-1 border-t border-white/10" />
+                                  <div className="my-1 border-t border-[var(--border-subtle)]" />
                                   <button
                                     type="button"
                                     onClick={() => void handleDeletePlaylist(pl.id)}
-                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-red-400 hover:bg-white/10"
+                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-[var(--danger-text)] hover:bg-[var(--bg-hover)]"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                     Delete Playlist
@@ -1539,18 +1575,18 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 </div>
               )
             ) : loading ? (
-              <div className="flex items-center justify-center py-16 text-[#B3B3B3] gap-2">
-                <Loader2 className="w-5 h-5 animate-spin text-[#1DB954]" />
+              <div className="flex items-center justify-center py-16 text-[var(--text-secondary)] gap-2">
+                <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
                 <span className="text-sm">Loading tracks...</span>
               </div>
             ) : filteredTracks.length === 0 ? (
-              <div className="rounded-xl bg-[#181818] p-10 text-center space-y-3">
+              <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-10 text-center space-y-3">
                 {activeTab === 'offline' || offline ? (
-                  <HardDriveDownload className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+                  <HardDriveDownload className="w-10 h-10 text-[var(--text-muted)] mx-auto" />
                 ) : (
-                  <Library className="w-10 h-10 text-[#6A6A6A] mx-auto" />
+                  <Library className="w-10 h-10 text-[var(--text-muted)] mx-auto" />
                 )}
-                <h2 className="font-display text-lg font-bold text-white">
+                <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
                   {searchQuery || artistFilter
                     ? 'No matching tracks found'
                     : activeTab === 'offline' || offline
@@ -1559,7 +1595,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         ? 'No liked songs yet'
                         : 'Your music library is empty'}
                 </h2>
-                <p className="text-sm text-[#B3B3B3] max-w-md mx-auto">
+                <p className="text-sm text-[var(--text-secondary)] max-w-md mx-auto">
                   {searchQuery || artistFilter
                     ? 'Try adjusting your search or clearing the active filter.'
                     : activeTab === 'offline' || offline
@@ -1578,7 +1614,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => navigate('/search')}
-                          className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
+                          className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                         >
                           <Search className="w-4 h-4" />
                           Search YouTube & Download
@@ -1588,7 +1624,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => navigate('/settings')}
-                          className="inline-flex items-center gap-2 rounded-full bg-[#282828] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#333333]"
+                          className="inline-flex items-center gap-2 rounded-full bg-[var(--bg-elevated)] px-5 py-2.5 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                         >
                           <Settings className="w-4 h-4" />
                           Configure NAS Mount & Scan
@@ -1633,15 +1669,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
               : 'bottom-[calc(70px+env(safe-area-inset-bottom,0px))]'
           } md:bottom-[104px]`}
         >
-          <div className="pointer-events-auto flex flex-wrap items-center justify-between gap-2 sm:gap-3 w-full max-w-3xl rounded-xl bg-[#222222]/95 backdrop-blur-md border border-white/15 px-3.5 sm:px-4 py-2.5 shadow-2xl">
+          <div className="pointer-events-auto flex flex-wrap items-center justify-between gap-2 sm:gap-3 w-full max-w-3xl rounded-xl bg-[var(--bg-mini-glass)] backdrop-blur-xl border border-[var(--border-strong)] px-3.5 sm:px-4 py-2.5 shadow-2xl">
             <div className="flex items-center gap-2.5">
-              <span className="font-mono text-xs sm:text-sm font-bold tabular-nums text-white">
+              <span className="font-mono text-xs sm:text-sm font-bold tabular-nums text-[var(--text-primary)]">
                 {selectedIdArray.length} selected
               </span>
               <button
                 type="button"
                 onClick={exitSelectionMode}
-                className="text-xs text-[#B3B3B3] hover:text-white underline-offset-2 hover:underline"
+                className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline-offset-2 hover:underline"
               >
                 Clear
               </button>
@@ -1651,7 +1687,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setBatchPlaylistOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded-full bg-[#1DB954] px-3.5 py-2 text-xs font-bold text-black hover:bg-[#1ED760] transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-3.5 py-2 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
                 <span>Add to Playlist</span>
@@ -1660,7 +1696,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               <button
                 type="button"
                 onClick={handleBatchAddToQueue}
-                className="inline-flex items-center gap-1.5 rounded-full bg-[#333333] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#3f3f3f] transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-full bg-[var(--bg-elevated)] px-3.5 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
               >
                 <ListPlus className="w-3.5 h-3.5" />
                 <span>Add to Queue</span>

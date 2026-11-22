@@ -1,4 +1,23 @@
 export const DEFAULT_APP_THEME_COLOR = '#121212';
+export const THEME_BASE_COLORS = {
+  'spotify-dark': '#121212',
+  'apple-dark': '#000000',
+  'apple-light': '#FFFFFF',
+} as const;
+
+export function getThemeBaseColor(
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
+): string {
+  if (theme === 'apple-dark') return THEME_BASE_COLORS['apple-dark'];
+  if (theme === 'apple-light') return THEME_BASE_COLORS['apple-light'];
+  return THEME_BASE_COLORS['spotify-dark'];
+}
+
+export function getActiveDocumentBaseThemeColor(): string {
+  if (typeof document === 'undefined') return DEFAULT_APP_THEME_COLOR;
+  return getThemeBaseColor(document.documentElement.getAttribute('data-theme'));
+}
+
 const DEFAULT_NOW_PLAYING_ACCENT = '#1f3a2e';
 const COLOR_SAMPLE_SIZE = 32;
 
@@ -266,7 +285,7 @@ export function extractDominantColorFromImage(
 
 /**
  * Computes the exact darkened top gradient hex color used at the top edge of
- * the full-screen Now Playing view so the mobile status bar blends seamlessly
+ * dark-mode Now Playing / Home views so the mobile status bar blends seamlessly
  * while keeping white status bar clock/battery icons legible.
  */
 export function computeNowPlayingTopHex(dominantColor: string | null | undefined): string {
@@ -281,12 +300,30 @@ export function computeNowPlayingTopHex(dominantColor: string | null | undefined
 }
 
 /**
+ * Computes a soft, airy pastel tint from the dominant album color for Apple Music Light
+ * headers and Now Playing backdrops so dark text and status bar icons remain highly legible.
+ */
+export function computeLightTintedTopHex(
+  dominantColor: string | null | undefined,
+  tintStrength = 0.24
+): string {
+  const hex = normalizeHexColor(dominantColor, '#fa243c');
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+
+  const clamped = Math.max(0.08, Math.min(0.4, tintStrength));
+  const mix = (channel: number) => 255 * (1 - clamped) + channel * clamped;
+  return rgbToHex(mix(r), mix(g), mix(b));
+}
+
+/**
  * Dynamically updates `<meta name="theme-color">` and root background backing so
  * Android Chrome and iOS Safari status bars match the active screen color.
  */
 export function setDocumentThemeColor(hexColor: string): void {
   if (typeof document === 'undefined') return;
-  const normalized = normalizeHexColor(hexColor, DEFAULT_APP_THEME_COLOR);
+  const normalized = normalizeHexColor(hexColor, getActiveDocumentBaseThemeColor());
 
   let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (!meta) {

@@ -66,11 +66,11 @@ export const AlbumArt: React.FC<AlbumArtProps> = ({
       <div
         className={`${className} flex items-center justify-center shrink-0 overflow-hidden select-none`}
         style={{
-          background: `linear-gradient(135deg, ${color} 0%, #181818 100%)`,
+          background: `linear-gradient(135deg, ${color} 0%, var(--bg-elevated) 100%)`,
         }}
         aria-label={alt}
       >
-        <Music2 size={iconSize} className="text-white/50" />
+        <Music2 size={iconSize} className="text-white/60" />
       </div>
     );
   }
@@ -82,7 +82,7 @@ export const AlbumArt: React.FC<AlbumArtProps> = ({
       draggable={false}
       referrerPolicy="no-referrer"
       onError={handleImageError}
-      className={`${className} object-cover shrink-0 bg-[#282828] select-none`}
+      className={`${className} object-cover shrink-0 bg-[var(--bg-elevated)] select-none`}
       loading="lazy"
     />
   );
@@ -104,7 +104,7 @@ export const PlaylistMosaic: React.FC<PlaylistMosaicProps> = ({
   if (variant === 'liked') {
     return (
       <div
-        className={`${className} flex items-center justify-center bg-gradient-to-br from-[#3b28cc] via-[#2b4d8f] to-[#1DB954] shadow-lg`}
+        className={`${className} flex items-center justify-center bg-gradient-to-br from-[#3b28cc] via-[#2b4d8f] to-[var(--accent)] shadow-lg`}
         aria-label={alt}
       >
         <Heart className="w-1/3 h-1/3 text-white fill-white" />
@@ -115,7 +115,7 @@ export const PlaylistMosaic: React.FC<PlaylistMosaicProps> = ({
   if (variant === 'recent') {
     return (
       <div
-        className={`${className} flex items-center justify-center bg-gradient-to-br from-[#1DB954] via-[#157a3c] to-[#121212] shadow-lg`}
+        className={`${className} flex items-center justify-center bg-gradient-to-br from-[var(--accent)] via-[#157a3c] to-[#121212] shadow-lg`}
         aria-label={alt}
       >
         <Disc3 className="w-1/3 h-1/3 text-white" />
@@ -128,10 +128,10 @@ export const PlaylistMosaic: React.FC<PlaylistMosaicProps> = ({
   if (valid.length === 0) {
     return (
       <div
-        className={`${className} flex items-center justify-center bg-gradient-to-br from-[#282828] to-[#181818]`}
+        className={`${className} flex items-center justify-center bg-[var(--bg-elevated)] border border-[var(--border-subtle)]`}
         aria-label={alt}
       >
-        <Music2 className="w-1/3 h-1/3 text-[#6A6A6A]" />
+        <Music2 className="w-1/3 h-1/3 text-[var(--text-muted)]" />
       </div>
     );
   }
@@ -149,7 +149,7 @@ export const PlaylistMosaic: React.FC<PlaylistMosaicProps> = ({
 
   return (
     <div
-      className={`${className} grid grid-cols-2 grid-rows-2 overflow-hidden bg-[#282828] shadow-lg`}
+      className={`${className} grid grid-cols-2 grid-rows-2 overflow-hidden bg-[var(--bg-elevated)] shadow-lg`}
       aria-label={alt}
     >
       {valid.map((file, i) => (

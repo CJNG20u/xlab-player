@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en" class="dark" data-theme="spotify-dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
@@ -21,8 +21,27 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('xlabplayer-theme');
+          if (t !== 'spotify-dark' && t !== 'apple-dark' && t !== 'apple-light') {
+            t = 'spotify-dark';
+          }
+          var root = document.documentElement;
+          root.setAttribute('data-theme', t);
+          root.classList.toggle('dark', t !== 'apple-light');
+          var color = t === 'apple-light' ? '#FFFFFF' : t === 'apple-dark' ? '#000000' : '#121212';
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', color);
+          var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+          if (appleMeta) appleMeta.setAttribute('content', t === 'apple-light' ? 'default' : 'black-translucent');
+          root.style.backgroundColor = color;
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#121212] text-white antialiased selection:bg-[#1DB954]/30 selection:text-white">
+  <body class="bg-[var(--bg-primary)] text-[var(--text-primary)] antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

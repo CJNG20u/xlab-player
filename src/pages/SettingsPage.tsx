@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   Cookie,
   Download,
@@ -9,6 +10,7 @@ import {
   KeyRound,
   Loader2,
   LogOut,
+  Palette,
   RefreshCw,
   Save,
   Shield,
@@ -26,6 +28,7 @@ import React, {useCallback, useEffect, useState} from 'react';
 import {DirectoryBrowserModal} from '../components/DirectoryBrowserModal';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {THEME_OPTIONS, useTheme} from '../context/ThemeContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {apiFetch, formatBytes, getSSEUrl} from '../lib/api';
@@ -43,6 +46,7 @@ export const SettingsPage: React.FC = () => {
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
   const {bumpLibraryRefresh} = usePlayer();
+  const {theme, setTheme} = useTheme();
   const {isInstallable, isInstalled, isIOS, install} = usePWAInstall();
   const isAdmin = user?.role === 'admin' && !offline;
 
@@ -440,42 +444,179 @@ export const SettingsPage: React.FC = () => {
       style={{paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))'}}
     >
       <div>
-        <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
+        <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
           Settings
         </h1>
-        <p className="mt-1 text-sm text-[#B3B3B3]">
-          Configure your NAS music mount, offline storage, library scanner, accounts, PWA installation, and yt-dlp engine.
+        <p className="mt-1 text-sm text-[var(--text-secondary)]">
+          Customize appearance, NAS music mount, offline storage, library scanner, accounts, PWA installation, and yt-dlp engine.
         </p>
       </div>
 
       {offline && (
-        <div className="flex items-center gap-3 rounded-xl bg-[#181818] border border-amber-500/30 px-4 py-3 text-xs text-[#B3B3B3]">
-          <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
+        <div className="flex items-center gap-3 rounded-xl bg-[var(--warn-bg)] border border-[var(--warn-border)] px-4 py-3 text-xs text-[var(--warn-text)]">
+          <WifiOff className="w-4 h-4 shrink-0" />
           <span>
-            Offline Mode is active. Server settings require a NAS connection, while Offline Storage management below works anytime.
+            Offline Mode is active. Server settings require a NAS connection, while Appearance and Offline Storage work anytime.
           </span>
         </div>
       )}
 
+      {/* 0. APPEARANCE / MULTI-THEME SWITCHER (ALL USERS) */}
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-5">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
+            <Palette className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+              Appearance
+            </h2>
+            <p className="text-xs text-[var(--text-secondary)]">
+              Switch between Spotify Dark, Apple Music Dark, and Apple Music Light.
+            </p>
+          </div>
+        </div>
+
+        <div
+          role="radiogroup"
+          aria-label="App visual theme"
+          className="grid grid-cols-1 sm:grid-cols-3 gap-3.5"
+        >
+          {THEME_OPTIONS.map((option) => {
+            const isSelected = theme === option.id;
+            const p = option.preview;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                role="radio"
+                aria-checked={isSelected}
+                onClick={() => setTheme(option.id)}
+                className={`group flex flex-col text-left rounded-xl p-3 border transition-all focus:outline-none ${
+                  isSelected
+                    ? 'border-[var(--accent)] ring-1 ring-[var(--accent)] bg-[var(--accent-soft)]'
+                    : 'border-[var(--border-subtle)] bg-[var(--bg-primary)] hover:border-[var(--border-strong)]'
+                }`}
+              >
+                {/* Miniature UI Preview */}
+                <div
+                  className="relative w-full h-24 rounded-lg overflow-hidden mb-3 flex flex-col justify-between p-2.5 select-none"
+                  style={{
+                    backgroundColor: p.bg,
+                    border: `1px solid ${p.border}`,
+                  }}
+                >
+                  {/* Top mock header + accent play dot */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="space-y-1 flex-1 min-w-0">
+                      <div
+                        className="h-2 w-16 rounded-full"
+                        style={{backgroundColor: p.text, opacity: 0.9}}
+                      />
+                      <div
+                        className="h-1.5 w-11 rounded-full"
+                        style={{backgroundColor: p.muted, opacity: 0.65}}
+                      />
+                    </div>
+                    <div
+                      className="h-6 w-6 rounded-full flex items-center justify-center shrink-0 shadow-sm"
+                      style={{backgroundColor: p.accent}}
+                    >
+                      <div
+                        className="ml-0.5 w-0 h-0 border-y-[4px] border-y-transparent border-l-[6px]"
+                        style={{
+                          borderLeftColor: option.id === 'spotify-dark' ? '#000000' : '#FFFFFF',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Mock surface card row */}
+                  <div
+                    className="rounded-md px-2 py-1.5 flex items-center gap-2"
+                    style={{backgroundColor: p.card}}
+                  >
+                    <div
+                      className="w-4 h-4 rounded-sm shrink-0"
+                      style={{backgroundColor: p.elevated}}
+                    />
+                    <div className="flex-1 space-y-1 min-w-0">
+                      <div
+                        className="h-1.5 w-14 rounded-full"
+                        style={{backgroundColor: p.text, opacity: 0.8}}
+                      />
+                      <div
+                        className="h-1 w-9 rounded-full"
+                        style={{backgroundColor: p.muted, opacity: 0.55}}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Frosted bottom bar indicator */}
+                  <div
+                    className="h-2.5 -mx-2.5 -mb-2.5 px-3 flex items-center justify-around"
+                    style={{
+                      backgroundColor: p.navBg,
+                      borderTop: `1px solid ${p.border}`,
+                    }}
+                  >
+                    <span className="h-1 w-4 rounded-full" style={{backgroundColor: p.accent}} />
+                    <span
+                      className="h-1 w-4 rounded-full"
+                      style={{backgroundColor: p.muted, opacity: 0.45}}
+                    />
+                    <span
+                      className="h-1 w-4 rounded-full"
+                      style={{backgroundColor: p.muted, opacity: 0.45}}
+                    />
+                  </div>
+                </div>
+
+                {/* Label & Active Check */}
+                <div className="flex items-start justify-between gap-2 w-full">
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-[var(--text-primary)] truncate">
+                      {option.name}
+                    </p>
+                    <p className="mt-0.5 text-[11px] leading-snug text-[var(--text-secondary)]">
+                      {option.description}
+                    </p>
+                  </div>
+                  <span
+                    className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                      isSelected
+                        ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
+                        : 'border-[var(--border-strong)] bg-transparent'
+                    }`}
+                  >
+                    {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
       {/* 1. NAS MUSIC MOUNT & LIBRARY SCANNER (ADMIN ONLY — TOP PRIORITY CARD) */}
       {isAdmin && (
-        <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6 space-y-6">
+        <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#1DB954]/15 text-[#1DB954]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
                 <HardDrive className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="font-display text-lg font-bold text-white">
+                <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
                   NAS Music Mount & Library Scanner
                 </h2>
-                <p className="text-xs text-[#B3B3B3]">
-                  Active music mount for streaming, scanning, uploads, and yt-dlp downloads.
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Active music mount for streaming, scanning, and yt-dlp downloads.
                 </p>
               </div>
             </div>
             {sysStatus && (
-              <div className="text-xs text-[#B3B3B3] font-mono tabular-nums">
+              <div className="text-xs text-[var(--text-secondary)] font-mono tabular-nums">
                 {sysStatus.trackCount} indexed tracks
               </div>
             )}
@@ -483,7 +624,10 @@ export const SettingsPage: React.FC = () => {
 
           {/* Mount Path Input + Browse + Save */}
           <div className="space-y-3">
-            <label htmlFor="nas-mount-input" className="block text-xs font-semibold text-[#B3B3B3]">
+            <label
+              htmlFor="nas-mount-input"
+              className="block text-xs font-semibold text-[var(--text-secondary)]"
+            >
               Music Directory Mount Path (e.g. /mnt/nas/music)
             </label>
             <div className="flex flex-col sm:flex-row gap-2.5">
@@ -494,21 +638,21 @@ export const SettingsPage: React.FC = () => {
                 onChange={(e) => setMountInput(e.target.value)}
                 onBlur={() => void checkPathHealth(mountInput)}
                 placeholder="/mnt/nas/music"
-                className="flex-1 rounded-md bg-[#121212] border border-white/10 px-3.5 py-2.5 font-mono text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+                className="flex-1 rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3.5 py-2.5 font-mono text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
               />
               <button
                 type="button"
                 onClick={() => setDirBrowserOpen(true)}
-                className="inline-flex items-center justify-center gap-2 rounded-md bg-[#282828] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#333333] transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center justify-center gap-2 rounded-md bg-[var(--bg-elevated)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors whitespace-nowrap shrink-0"
               >
-                <FolderSearch className="w-4 h-4 text-[#1DB954]" />
+                <FolderSearch className="w-4 h-4 text-[var(--accent)]" />
                 Browse Folders
               </button>
               <button
                 type="button"
                 disabled={savingMount || !mountInput.trim()}
                 onClick={() => void handleSaveMountPath()}
-                className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
               >
                 {savingMount ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -521,23 +665,23 @@ export const SettingsPage: React.FC = () => {
 
             {/* Live Mount Health Indicator + Free Disk Space */}
             {mountHealth && (
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
                   {mountHealth.status === 'ok' ? (
-                    <CheckCircle2 className="w-5 h-5 text-[#1DB954] shrink-0" />
+                    <CheckCircle2 className="w-5 h-5 text-[var(--accent)] shrink-0" />
                   ) : mountHealth.status === 'read-only' ? (
-                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+                    <AlertTriangle className="w-5 h-5 text-[var(--warn-text)] shrink-0" />
                   ) : (
-                    <XCircle className="w-5 h-5 text-red-400 shrink-0" />
+                    <XCircle className="w-5 h-5 text-[var(--danger-text)] shrink-0" />
                   )}
                   <div>
                     <p
                       className={`text-sm font-semibold ${
                         mountHealth.status === 'ok'
-                          ? 'text-[#1DB954]'
+                          ? 'text-[var(--accent)]'
                           : mountHealth.status === 'read-only'
-                            ? 'text-amber-300'
-                            : 'text-red-400'
+                            ? 'text-[var(--warn-text)]'
+                            : 'text-[var(--danger-text)]'
                       }`}
                     >
                       {mountHealth.status === 'ok'
@@ -546,7 +690,7 @@ export const SettingsPage: React.FC = () => {
                           ? 'Read-Only Warning (Streaming OK, downloads disabled)'
                           : 'Path Not Found'}
                     </p>
-                    <p className="font-mono text-xs text-[#6A6A6A] truncate max-w-md">
+                    <p className="font-mono text-xs text-[var(--text-muted)] truncate max-w-md">
                       {mountHealth.path}
                     </p>
                   </div>
@@ -555,17 +699,17 @@ export const SettingsPage: React.FC = () => {
                 {mountHealth.freeBytes !== null && mountHealth.totalBytes !== null && (
                   <div className="sm:w-56 space-y-1.5">
                     <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-                      <span className="text-white font-medium">
+                      <span className="text-[var(--text-primary)] font-medium">
                         {formatBytes(mountHealth.freeBytes)} free
                       </span>
-                      <span className="text-[#6A6A6A]">
+                      <span className="text-[var(--text-muted)]">
                         of {formatBytes(mountHealth.totalBytes)}
                       </span>
                     </div>
                     {usedDiskPct !== null && (
-                      <div className="h-1.5 w-full rounded-full bg-[#282828] overflow-hidden">
+                      <div className="h-1.5 w-full rounded-full bg-[var(--slider-track)] overflow-hidden">
                         <div
-                          className="h-full bg-[#1DB954]"
+                          className="h-full bg-[var(--accent)]"
                           style={{width: `${usedDiskPct}%`}}
                         />
                       </div>
@@ -576,18 +720,18 @@ export const SettingsPage: React.FC = () => {
             )}
 
             {mountMessage && (
-              <p className="text-xs text-[#1DB954] font-medium">{mountMessage}</p>
+              <p className="text-xs text-[var(--accent)] font-medium">{mountMessage}</p>
             )}
           </div>
 
           {/* Library Scanner Controls + Live SSE Progress */}
-          <div className="border-t border-white/10 pt-5 space-y-4">
+          <div className="border-t border-[var(--border-subtle)] pt-5 space-y-4">
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
                 disabled={scanState.status === 'scanning'}
                 onClick={() => void handleTriggerScan(false)}
-                className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] disabled:opacity-50 transition-colors"
+                className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors"
               >
                 <RefreshCw
                   className={`w-4 h-4 ${scanState.status === 'scanning' ? 'animate-spin' : ''}`}
@@ -600,30 +744,30 @@ export const SettingsPage: React.FC = () => {
                 type="button"
                 disabled={scanState.status === 'scanning'}
                 onClick={() => void handleTriggerScan(true)}
-                className="inline-flex items-center gap-2 rounded-full bg-[#282828] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#333333] disabled:opacity-50 transition-colors"
+                className="inline-flex items-center gap-2 rounded-full bg-[var(--bg-elevated)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 transition-colors"
               >
                 Full Re-index
               </button>
             </div>
 
             {scanState.status !== 'idle' && (
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-4 space-y-2.5">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-4 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <span className="font-medium text-white">
+                  <span className="font-medium text-[var(--text-primary)]">
                     {scanState.status === 'scanning'
                       ? `Scanning... ${scanState.found} files found, ${scanState.imported} new imported, ${scanState.updated} updated`
                       : scanState.status === 'done'
                         ? `Scan complete — ${scanState.found} files found, ${scanState.imported} new tracks imported, ${scanState.removed} missing removed${scanState.playlistsImported ? `, ${scanState.playlistsImported} M3U playlist${scanState.playlistsImported === 1 ? '' : 's'} synced` : ''}`
                         : scanState.error || 'Scan error'}
                   </span>
-                  <span className="font-mono tabular-nums text-[#1DB954]">
+                  <span className="font-mono tabular-nums text-[var(--accent)]">
                     {scanState.status === 'done' ? '100%' : `${scanPct}%`}
                   </span>
                 </div>
-                <div className="h-1.5 w-full rounded-full bg-[#282828] overflow-hidden">
+                <div className="h-1.5 w-full rounded-full bg-[var(--slider-track)] overflow-hidden">
                   <div
                     className={`h-full transition-[width] duration-200 ${
-                      scanState.status === 'error' ? 'bg-red-500' : 'bg-[#1DB954]'
+                      scanState.status === 'error' ? 'bg-red-500' : 'bg-[var(--accent)]'
                     }`}
                     style={{
                       width: `${scanState.status === 'done' ? 100 : Math.max(scanPct, scanState.status === 'scanning' ? 6 : 0)}%`,
@@ -631,7 +775,7 @@ export const SettingsPage: React.FC = () => {
                   />
                 </div>
                 {scanState.currentFile && scanState.status === 'scanning' && (
-                  <p className="font-mono text-[11px] text-[#6A6A6A] truncate">
+                  <p className="font-mono text-[11px] text-[var(--text-muted)] truncate">
                     Reading: {scanState.currentFile}
                   </p>
                 )}
@@ -642,15 +786,17 @@ export const SettingsPage: React.FC = () => {
       )}
 
       {/* 2. ACCOUNT & PWA INSTALL STATUS (ALL USERS) */}
-      <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6 space-y-6">
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-6">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/10 text-white">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--bg-elevated)] text-[var(--text-primary)]">
             <KeyRound className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="font-display text-lg font-bold text-white">Account & PWA App Status</h2>
-            <p className="text-xs text-[#B3B3B3]">
-              Signed in as <strong className="text-white">{user?.username}</strong> ({user?.role})
+            <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+              Account & PWA App Status
+            </h2>
+            <p className="text-xs text-[var(--text-secondary)]">
+              Signed in as <strong className="text-[var(--text-primary)]">{user?.username}</strong> ({user?.role})
             </p>
           </div>
         </div>
@@ -658,19 +804,23 @@ export const SettingsPage: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Change Password */}
           <form onSubmit={handleChangePassword} className="space-y-3.5">
-            <h3 className="text-sm font-bold text-white">Change Password</h3>
+            <h3 className="text-sm font-bold text-[var(--text-primary)]">Change Password</h3>
             <div>
-              <label className="block text-xs text-[#B3B3B3] mb-1">Current Password</label>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                Current Password
+              </label>
               <input
                 type="password"
                 required
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
-                className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-xs text-[#B3B3B3] mb-1">New Password</label>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                New Password
+              </label>
               <input
                 type="password"
                 required
@@ -678,52 +828,58 @@ export const SettingsPage: React.FC = () => {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="Minimum 6 characters"
-                className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
             {pwFeedback && (
-              <p className={`text-xs ${pwFeedback.ok ? 'text-[#1DB954]' : 'text-red-400'}`}>
+              <p
+                className={`text-xs ${
+                  pwFeedback.ok ? 'text-[var(--accent)]' : 'text-[var(--danger-text)]'
+                }`}
+              >
                 {pwFeedback.text}
               </p>
             )}
             <button
               type="submit"
               disabled={pwSaving}
-              className="rounded-full bg-white px-5 py-2 text-xs font-bold text-black hover:bg-white/90 disabled:opacity-50"
+              className="rounded-full bg-[var(--btn-contrast-bg)] px-5 py-2 text-xs font-bold text-[var(--btn-contrast-text)] hover:opacity-90 disabled:opacity-50"
             >
               {pwSaving ? 'Updating...' : 'Update Password'}
             </button>
           </form>
 
           {/* PWA Install Status Indicator */}
-          <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-5 flex flex-col justify-between space-y-4">
+          <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-5 flex flex-col justify-between space-y-4">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <Smartphone className="w-4 h-4 text-[#1DB954]" />
-                <h3 className="text-sm font-bold text-white">xlabplayer Progressive Web App</h3>
+                <Smartphone className="w-4 h-4 text-[var(--accent)]" />
+                <h3 className="text-sm font-bold text-[var(--text-primary)]">
+                  xlabplayer Progressive Web App
+                </h3>
               </div>
-              <p className="text-xs text-[#B3B3B3] leading-relaxed">
+              <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                 Install xlabplayer to your phone or desktop home screen for standalone full-screen
                 playback, lock-screen MediaSession controls, and CarPlay / Bluetooth integration.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/10">
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--border-subtle)]">
               <div className="flex items-center gap-2 text-xs font-semibold">
                 {isInstalled ? (
                   <>
-                    <CheckCircle2 className="w-4 h-4 text-[#1DB954]" />
-                    <span className="text-[#1DB954]">Installed (Standalone Mode)</span>
+                    <CheckCircle2 className="w-4 h-4 text-[var(--accent)]" />
+                    <span className="text-[var(--accent)]">Installed (Standalone Mode)</span>
                   </>
                 ) : isInstallable ? (
                   <>
-                    <Download className="w-4 h-4 text-[#1DB954]" />
-                    <span className="text-white">Ready to Install</span>
+                    <Download className="w-4 h-4 text-[var(--accent)]" />
+                    <span className="text-[var(--text-primary)]">Ready to Install</span>
                   </>
                 ) : (
                   <>
-                    <Smartphone className="w-4 h-4 text-[#B3B3B3]" />
-                    <span className="text-[#B3B3B3]">
+                    <Smartphone className="w-4 h-4 text-[var(--text-secondary)]" />
+                    <span className="text-[var(--text-secondary)]">
                       {isIOS ? 'iOS Safari — Use Share Menu' : 'Browser Mode'}
                     </span>
                   </>
@@ -734,7 +890,7 @@ export const SettingsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => void install()}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-[#1DB954] px-4 py-1.5 text-xs font-bold text-black hover:bg-[#1ED760]"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Install App
@@ -745,7 +901,7 @@ export const SettingsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowIOSGuide(true)}
-                  className="rounded-full bg-[#282828] px-4 py-1.5 text-xs font-semibold text-white hover:bg-[#333333]"
+                  className="rounded-full bg-[var(--bg-elevated)] px-4 py-1.5 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                 >
                   iOS Install Guide
                 </button>
@@ -756,58 +912,60 @@ export const SettingsPage: React.FC = () => {
       </section>
 
       {/* 2B. OFFLINE STORAGE (ALL USERS) */}
-      <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6 space-y-5">
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#1DB954]/15 text-[#1DB954]">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
               <HardDriveDownload className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="font-display text-lg font-bold text-white">Offline Storage</h2>
-              <p className="text-xs text-[#B3B3B3]">
+              <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+                Offline Storage
+              </h2>
+              <p className="text-xs text-[var(--text-secondary)]">
                 Audio files and cover art cached locally on this device for Airplane Mode playback.
               </p>
             </div>
           </div>
 
           <div className="text-left sm:text-right">
-            <p className="font-mono text-2xl font-extrabold tabular-nums text-white">
+            <p className="font-mono text-2xl font-extrabold tabular-nums text-[var(--text-primary)]">
               {offlineUsage ? `${offlineUsage.totalMB.toFixed(1)} MB` : '0.0 MB'}
             </p>
-            <p className="text-xs text-[#6A6A6A] font-mono tabular-nums">
+            <p className="text-xs text-[var(--text-muted)] font-mono tabular-nums">
               {offlineUsage ? formatBytes(offlineUsage.totalBytes) : '0 B'} cached
             </p>
           </div>
         </div>
 
         {!offlineSupported ? (
-          <div className="rounded-lg bg-[#121212] border border-amber-500/30 p-4 text-xs text-amber-300">
+          <div className="rounded-lg bg-[var(--warn-bg)] border border-[var(--warn-border)] p-4 text-xs text-[var(--warn-text)]">
             Offline music caching requires a secure HTTPS context (or localhost) so the browser Cache Storage API and IndexedDB are available.
           </div>
         ) : (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
-                <p className="text-[11px] text-[#B3B3B3]">Cached Tracks</p>
-                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3.5">
+                <p className="text-[11px] text-[var(--text-secondary)]">Cached Tracks</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-[var(--text-primary)]">
                   {offlineUsage?.trackCount ?? 0}
                 </p>
               </div>
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
-                <p className="text-[11px] text-[#B3B3B3]">Cached Playlists</p>
-                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3.5">
+                <p className="text-[11px] text-[var(--text-secondary)]">Cached Playlists</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-[var(--text-primary)]">
                   {offlineUsage?.playlistCount ?? 0}
                 </p>
               </div>
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
-                <p className="text-[11px] text-[#B3B3B3]">Audio Cache</p>
-                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3.5">
+                <p className="text-[11px] text-[var(--text-secondary)]">Audio Cache</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-[var(--text-primary)]">
                   {offlineUsage ? formatBytes(offlineUsage.audioBytes) : '0 B'}
                 </p>
               </div>
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-3.5">
-                <p className="text-[11px] text-[#B3B3B3]">Artwork & Meta</p>
-                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-white">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3.5">
+                <p className="text-[11px] text-[var(--text-secondary)]">Artwork & Meta</p>
+                <p className="mt-1 font-mono text-lg font-bold tabular-nums text-[var(--text-primary)]">
                   {offlineUsage ? formatBytes(offlineUsage.coverBytes) : '0 B'}
                 </p>
               </div>
@@ -816,19 +974,19 @@ export const SettingsPage: React.FC = () => {
             {offlineUsage?.quotaBytes && offlineUsage.quotaBytes > 0 && (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs font-mono tabular-nums">
-                  <span className="text-[#B3B3B3]">
+                  <span className="text-[var(--text-secondary)]">
                     Offline audio uses{' '}
-                    <span className="text-white font-semibold">
+                    <span className="text-[var(--text-primary)] font-semibold">
                       {offlineUsage.totalMB.toFixed(1)} MB
                     </span>
                   </span>
-                  <span className="text-[#6A6A6A]">
+                  <span className="text-[var(--text-muted)]">
                     Browser quota: {formatBytes(offlineUsage.quotaBytes)}
                   </span>
                 </div>
-                <div className="h-1.5 w-full rounded-full bg-[#282828] overflow-hidden">
+                <div className="h-1.5 w-full rounded-full bg-[var(--slider-track)] overflow-hidden">
                   <div
-                    className="h-full bg-[#1DB954] transition-[width] duration-300"
+                    className="h-full bg-[var(--accent)] transition-[width] duration-300"
                     style={{
                       width: `${Math.min(
                         100,
@@ -843,13 +1001,15 @@ export const SettingsPage: React.FC = () => {
               </div>
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/10">
-              <div className="text-xs text-[#B3B3B3]">
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--border-subtle)]">
+              <div className="text-xs text-[var(--text-secondary)]">
                 {offlineFeedback ? (
-                  <span className="text-[#1DB954] font-medium">{offlineFeedback}</span>
+                  <span className="text-[var(--accent)] font-medium">{offlineFeedback}</span>
                 ) : (
                   <span>
-                    Stored in Cache Storage (<code className="font-mono text-white/80">xlabplayer-audio-v1</code>) and IndexedDB.
+                    Stored in Cache Storage (
+                    <code className="font-mono text-[var(--text-primary)]">xlabplayer-audio-v1</code>
+                    ) and IndexedDB.
                   </span>
                 )}
               </div>
@@ -860,7 +1020,7 @@ export const SettingsPage: React.FC = () => {
                     type="button"
                     disabled={clearingOffline}
                     onClick={() => void handleClearAllOffline()}
-                    className="inline-flex items-center gap-1.5 rounded-full bg-red-500 px-4 py-2 text-xs font-bold text-white hover:bg-red-400 disabled:opacity-50 transition-colors"
+                    className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-500 disabled:opacity-50 transition-colors"
                   >
                     {clearingOffline ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -873,7 +1033,7 @@ export const SettingsPage: React.FC = () => {
                     type="button"
                     disabled={clearingOffline}
                     onClick={() => setConfirmClearOffline(false)}
-                    className="rounded-full bg-[#282828] px-3.5 py-2 text-xs font-semibold text-[#B3B3B3] hover:text-white transition-colors"
+                    className="rounded-full bg-[var(--bg-elevated)] px-3.5 py-2 text-xs font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                   >
                     Cancel
                   </button>
@@ -883,7 +1043,7 @@ export const SettingsPage: React.FC = () => {
                   type="button"
                   disabled={clearingOffline || !offlineUsage || offlineUsage.trackCount === 0}
                   onClick={() => setConfirmClearOffline(true)}
-                  className="inline-flex items-center gap-2 rounded-full bg-[#282828] border border-red-500/30 px-4 py-2 text-xs font-semibold text-red-400 hover:bg-red-500/15 disabled:opacity-40 transition-colors whitespace-nowrap"
+                  className="inline-flex items-center gap-2 rounded-full bg-[var(--danger-bg)] border border-[var(--danger-border)] px-4 py-2 text-xs font-semibold text-[var(--danger-text)] hover:opacity-90 disabled:opacity-40 transition-colors whitespace-nowrap"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   Clear All Offline Music
@@ -896,14 +1056,16 @@ export const SettingsPage: React.FC = () => {
 
       {/* 3. USER MANAGEMENT (ADMIN ONLY) */}
       {isAdmin && (
-        <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6 space-y-6">
+        <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-6">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/10 text-white">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--bg-elevated)] text-[var(--text-primary)]">
               <Users className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="font-display text-lg font-bold text-white">User Management</h2>
-              <p className="text-xs text-[#B3B3B3]">
+              <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+                User Management
+              </h2>
+              <p className="text-xs text-[var(--text-secondary)]">
                 Manage admin and listener accounts, download permissions, and password resets.
               </p>
             </div>
@@ -913,26 +1075,26 @@ export const SettingsPage: React.FC = () => {
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead>
-                <tr className="border-b border-white/10 text-xs text-[#B3B3B3]">
+                <tr className="border-b border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
                   <th className="py-2.5 pr-4 font-medium">Username</th>
                   <th className="py-2.5 pr-4 font-medium">Role</th>
                   <th className="py-2.5 pr-4 font-medium">Downloader Access</th>
                   <th className="py-2.5 text-right font-medium">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/[0.05]">
+              <tbody className="divide-y divide-[var(--border-subtle)]">
                 {users.map((u) => (
-                  <tr key={u.id} className="hover:bg-white/[0.02]">
-                    <td className="py-3 pr-4 font-medium text-white">
+                  <tr key={u.id} className="hover:bg-[var(--surface-overlay)]">
+                    <td className="py-3 pr-4 font-medium text-[var(--text-primary)]">
                       {u.username}
                       {u.id === user?.id && (
-                        <span className="ml-2 text-xs text-[#6A6A6A]">(you)</span>
+                        <span className="ml-2 text-xs text-[var(--text-muted)]">(you)</span>
                       )}
                     </td>
                     <td className="py-3 pr-4">
                       <span
                         className={`inline-flex items-center gap-1 text-xs font-semibold ${
-                          u.role === 'admin' ? 'text-[#1DB954]' : 'text-[#B3B3B3]'
+                          u.role === 'admin' ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
                         }`}
                       >
                         {u.role === 'admin' && <Shield className="w-3.5 h-3.5" />}
@@ -941,13 +1103,13 @@ export const SettingsPage: React.FC = () => {
                     </td>
                     <td className="py-3 pr-4">
                       {u.role === 'admin' ? (
-                        <span className="text-xs text-[#B3B3B3]">Full access</span>
+                        <span className="text-xs text-[var(--text-secondary)]">Full access</span>
                       ) : (
                         <button
                           type="button"
                           onClick={() => void handleToggleUserDownload(u)}
                           className={`text-xs font-semibold underline-offset-2 hover:underline ${
-                            u.can_download ? 'text-[#1DB954]' : 'text-[#6A6A6A]'
+                            u.can_download ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'
                           }`}
                         >
                           {u.can_download ? 'Enabled' : 'Disabled'}
@@ -963,12 +1125,12 @@ export const SettingsPage: React.FC = () => {
                               value={resetPasswordVal}
                               onChange={(e) => setResetPasswordVal(e.target.value)}
                               placeholder="New password"
-                              className="w-32 rounded bg-[#121212] border border-white/15 px-2 py-1 text-xs text-white"
+                              className="w-32 rounded bg-[var(--bg-input)] border border-[var(--border-strong)] px-2 py-1 text-xs text-[var(--text-primary)]"
                             />
                             <button
                               type="button"
                               onClick={() => void handleResetUserPassword(u.id)}
-                              className="rounded bg-[#1DB954] px-2.5 py-1 text-xs font-bold text-black"
+                              className="rounded bg-[var(--accent)] px-2.5 py-1 text-xs font-bold text-[var(--accent-contrast)]"
                             >
                               Save
                             </button>
@@ -978,7 +1140,7 @@ export const SettingsPage: React.FC = () => {
                                 setResetUserId(null);
                                 setResetPasswordVal('');
                               }}
-                              className="text-xs text-[#B3B3B3] hover:text-white"
+                              className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                             >
                               Cancel
                             </button>
@@ -990,7 +1152,7 @@ export const SettingsPage: React.FC = () => {
                               setResetUserId(u.id);
                               setResetPasswordVal('');
                             }}
-                            className="text-xs text-[#B3B3B3] hover:text-white px-2 py-1 rounded hover:bg-[#282828]"
+                            className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-2 py-1 rounded hover:bg-[var(--bg-elevated)]"
                           >
                             Reset Password
                           </button>
@@ -999,7 +1161,7 @@ export const SettingsPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => void handleDeleteUser(u.id)}
-                            className="p-1.5 rounded text-[#B3B3B3] hover:text-red-400 hover:bg-[#282828]"
+                            className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--danger-text)] hover:bg-[var(--bg-elevated)]"
                             aria-label={`Delete ${u.username}`}
                           >
                             <Trash2 className="w-4 h-4" />
@@ -1013,15 +1175,15 @@ export const SettingsPage: React.FC = () => {
             </table>
           </div>
 
-          {userFeedback && <p className="text-xs text-[#1DB954]">{userFeedback}</p>}
+          {userFeedback && <p className="text-xs text-[var(--accent)]">{userFeedback}</p>}
 
           {/* Create User Form */}
           <form
             onSubmit={handleCreateUser}
-            className="border-t border-white/10 pt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
+            className="border-t border-[var(--border-subtle)] pt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end"
           >
             <div>
-              <label className="block text-xs text-[#B3B3B3] mb-1">Username</label>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">Username</label>
               <input
                 type="text"
                 required
@@ -1029,11 +1191,11 @@ export const SettingsPage: React.FC = () => {
                 value={newUsername}
                 onChange={(e) => setNewUsername(e.target.value)}
                 placeholder="listener1"
-                className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-xs text-[#B3B3B3] mb-1">Password</label>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">Password</label>
               <input
                 type="password"
                 required
@@ -1041,35 +1203,35 @@ export const SettingsPage: React.FC = () => {
                 value={newUserPassword}
                 onChange={(e) => setNewUserPassword(e.target.value)}
                 placeholder="Min 6 chars"
-                className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-xs text-[#B3B3B3] mb-1">Role</label>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">Role</label>
               <select
                 value={newUserRole}
                 onChange={(e) =>
                   setNewUserRole(e.target.value === 'admin' ? 'admin' : 'listener')
                 }
-                className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
               >
                 <option value="listener">Listener</option>
                 <option value="admin">Admin</option>
               </select>
             </div>
-            <label className="flex items-center gap-2 py-2 text-xs text-[#B3B3B3] cursor-pointer">
+            <label className="flex items-center gap-2 py-2 text-xs text-[var(--text-secondary)] cursor-pointer">
               <input
                 type="checkbox"
                 checked={newUserRole === 'admin' ? true : newUserCanDownload}
                 disabled={newUserRole === 'admin'}
                 onChange={(e) => setNewUserCanDownload(e.target.checked)}
-                className="h-4 w-4 accent-[#1DB954]"
+                className="h-4 w-4 accent-[var(--accent)]"
               />
               <span>Allow Downloads</span>
             </label>
             <button
               type="submit"
-              className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-4 py-2 text-sm font-bold text-black hover:bg-[#1ED760] whitespace-nowrap"
+              className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] whitespace-nowrap"
             >
               <UserPlus className="w-4 h-4" />
               Create User
@@ -1080,17 +1242,17 @@ export const SettingsPage: React.FC = () => {
 
       {/* 4. YT-DLP & COOKIES RESILIENCE ENGINE (ADMIN ONLY) */}
       {isAdmin && settings && (
-        <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6 space-y-6">
+        <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#1DB954]/15 text-[#1DB954]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
                 <Terminal className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="font-display text-lg font-bold text-white">
+                <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
                   yt-dlp & Cookies Resilience Engine
                 </h2>
-                <p className="text-xs text-[#B3B3B3]">
+                <p className="text-xs text-[var(--text-secondary)]">
                   Manage Netscape cookies, YouTube extractor fallbacks, FFmpeg 1:1 cover cropping, and engine updates.
                 </p>
               </div>
@@ -1100,7 +1262,7 @@ export const SettingsPage: React.FC = () => {
               type="button"
               disabled={updatingYtdlp}
               onClick={() => void handleUpdateYtdlp()}
-              className="inline-flex items-center justify-center gap-2 rounded-full bg-[#282828] px-4 py-2 text-xs font-bold text-white hover:bg-[#333333] disabled:opacity-50 whitespace-nowrap shrink-0"
+              className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--bg-elevated)] px-4 py-2 text-xs font-bold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${updatingYtdlp ? 'animate-spin' : ''}`} />
               Update yt-dlp Engine
@@ -1110,60 +1272,62 @@ export const SettingsPage: React.FC = () => {
           {/* Installed Binaries Banner */}
           {sysStatus && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-4 flex items-center justify-between">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-4 flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-[#B3B3B3]">yt-dlp Binary</p>
-                  <p className="font-mono text-sm font-semibold text-white mt-0.5">
+                  <p className="text-xs text-[var(--text-secondary)]">yt-dlp Binary</p>
+                  <p className="font-mono text-sm font-semibold text-[var(--text-primary)] mt-0.5">
                     {sysStatus.ytdlp.installed
                       ? `v${sysStatus.ytdlp.version}`
                       : 'Not installed on host'}
                   </p>
                 </div>
                 {sysStatus.ytdlp.installed ? (
-                  <CheckCircle2 className="w-5 h-5 text-[#1DB954]" />
+                  <CheckCircle2 className="w-5 h-5 text-[var(--accent)]" />
                 ) : (
-                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                  <AlertTriangle className="w-5 h-5 text-[var(--warn-text)]" />
                 )}
               </div>
 
-              <div className="rounded-lg bg-[#121212] border border-white/[0.06] p-4 flex items-center justify-between">
+              <div className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-4 flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-[#B3B3B3]">FFmpeg Binary</p>
-                  <p className="font-mono text-sm font-semibold text-white mt-0.5">
+                  <p className="text-xs text-[var(--text-secondary)]">FFmpeg Binary</p>
+                  <p className="font-mono text-sm font-semibold text-[var(--text-primary)] mt-0.5">
                     {sysStatus.ffmpeg.installed
                       ? sysStatus.ffmpeg.version
                       : 'Not installed on host'}
                   </p>
                 </div>
                 {sysStatus.ffmpeg.installed ? (
-                  <CheckCircle2 className="w-5 h-5 text-[#1DB954]" />
+                  <CheckCircle2 className="w-5 h-5 text-[var(--accent)]" />
                 ) : (
-                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                  <AlertTriangle className="w-5 h-5 text-[var(--warn-text)]" />
                 )}
               </div>
             </div>
           )}
 
           {ytdlpUpdateLog && (
-            <pre className="rounded-lg bg-[#121212] border border-white/10 p-3 font-mono text-xs text-[#B3B3B3] whitespace-pre-wrap overflow-x-auto">
+            <pre className="rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3 font-mono text-xs text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto">
               {ytdlpUpdateLog}
             </pre>
           )}
 
           {/* Cookies Management */}
-          <div className="border-t border-white/10 pt-5 space-y-4">
+          <div className="border-t border-[var(--border-subtle)] pt-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
-                <Cookie className="w-4 h-4 text-[#1DB954]" />
-                <h3 className="text-sm font-bold text-white">Netscape cookies.txt</h3>
+                <Cookie className="w-4 h-4 text-[var(--accent)]" />
+                <h3 className="text-sm font-bold text-[var(--text-primary)]">
+                  Netscape cookies.txt
+                </h3>
                 {sysStatus && (
                   <span
                     className={`text-xs font-semibold ml-2 ${
                       sysStatus.cookies.status === 'active'
-                        ? 'text-[#1DB954]'
+                        ? 'text-[var(--accent)]'
                         : sysStatus.cookies.status === 'expired'
-                          ? 'text-red-400'
-                          : 'text-[#B3B3B3]'
+                          ? 'text-[var(--danger-text)]'
+                          : 'text-[var(--text-secondary)]'
                     }`}
                   >
                     · Status:{' '}
@@ -1179,7 +1343,7 @@ export const SettingsPage: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                <label className="inline-flex items-center gap-1.5 rounded-md bg-[#282828] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#333333] cursor-pointer">
+                <label className="inline-flex items-center gap-1.5 rounded-md bg-[var(--bg-elevated)] px-3 py-1.5 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer">
                   <Upload className="w-3.5 h-3.5" />
                   Upload File
                   <input
@@ -1196,7 +1360,7 @@ export const SettingsPage: React.FC = () => {
                   type="button"
                   disabled={cookiesBusy || !sysStatus?.cookies.exists}
                   onClick={() => void handleTestCookies()}
-                  className="rounded-md bg-[#282828] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#333333] disabled:opacity-40"
+                  className="rounded-md bg-[var(--bg-elevated)] px-3 py-1.5 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-40"
                 >
                   Test Cookies
                 </button>
@@ -1205,7 +1369,7 @@ export const SettingsPage: React.FC = () => {
                     type="button"
                     disabled={cookiesBusy}
                     onClick={() => void handleDeleteCookies()}
-                    className="rounded-md bg-[#282828] px-3 py-1.5 text-xs font-semibold text-red-400 hover:bg-[#333333]"
+                    className="rounded-md bg-[var(--bg-elevated)] px-3 py-1.5 text-xs font-semibold text-[var(--danger-text)] hover:bg-[var(--bg-hover)]"
                   >
                     Remove
                   </button>
@@ -1213,9 +1377,10 @@ export const SettingsPage: React.FC = () => {
               </div>
             </div>
 
-            <p className="text-xs text-[#6A6A6A]">
-              Saved to <code className="font-mono text-[#B3B3B3]">./data/secrets/cookies.txt</code>{' '}
-              with <code className="font-mono text-[#B3B3B3]">0600</code> permissions. Each download
+            <p className="text-xs text-[var(--text-muted)]">
+              Saved to{' '}
+              <code className="font-mono text-[var(--text-secondary)]">./data/secrets/cookies.txt</code>{' '}
+              with <code className="font-mono text-[var(--text-secondary)]">0600</code> permissions. Each download
               uses an isolated temp copy so yt-dlp never corrupts your master file.
             </p>
 
@@ -1225,14 +1390,14 @@ export const SettingsPage: React.FC = () => {
                 value={cookiesText}
                 onChange={(e) => setCookiesText(e.target.value)}
                 placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	..."
-                className="w-full rounded-md bg-[#121212] border border-white/10 p-3 font-mono text-xs text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] p-3 font-mono text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
               />
               <div className="flex items-center justify-between gap-3">
                 <div>
                   {cookiesFeedback && (
                     <p
                       className={`text-xs ${
-                        cookiesFeedback.ok ? 'text-[#1DB954]' : 'text-red-400'
+                        cookiesFeedback.ok ? 'text-[var(--accent)]' : 'text-[var(--danger-text)]'
                       }`}
                     >
                       {cookiesFeedback.text}
@@ -1243,7 +1408,7 @@ export const SettingsPage: React.FC = () => {
                   type="button"
                   disabled={cookiesBusy || !cookiesText.trim()}
                   onClick={() => void handleSaveCookiesText()}
-                  className="rounded-full bg-white px-4 py-1.5 text-xs font-bold text-black hover:bg-white/90 disabled:opacity-40"
+                  className="rounded-full bg-[var(--btn-contrast-bg)] px-4 py-1.5 text-xs font-bold text-[var(--btn-contrast-text)] hover:opacity-90 disabled:opacity-40"
                 >
                   Save Pasted Cookies
                 </button>
@@ -1252,12 +1417,17 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           {/* Resilience Controls Form */}
-          <form onSubmit={handleSaveResilience} className="border-t border-white/10 pt-5 space-y-5">
-            <h3 className="text-sm font-bold text-white">Extractor & Post-Processing Controls</h3>
+          <form
+            onSubmit={handleSaveResilience}
+            className="border-t border-[var(--border-subtle)] pt-5 space-y-5"
+          >
+            <h3 className="text-sm font-bold text-[var(--text-primary)]">
+              Extractor & Post-Processing Controls
+            </h3>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-[#B3B3B3] mb-1">
+                <label className="block text-xs text-[var(--text-secondary)] mb-1">
                   player_client Fallback Order
                 </label>
                 <input
@@ -1267,13 +1437,13 @@ export const SettingsPage: React.FC = () => {
                     setSettings({...settings, ytdlp_player_client: e.target.value})
                   }
                   placeholder="web,mweb,android_vr"
-                  className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 font-mono text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                  className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs text-[#B3B3B3] mb-1">
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1">
                     sleep-interval (sec)
                   </label>
                   <input
@@ -1284,11 +1454,11 @@ export const SettingsPage: React.FC = () => {
                     onChange={(e) =>
                       setSettings({...settings, ytdlp_sleep_interval: e.target.value})
                     }
-                    className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 font-mono text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                    className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-[#B3B3B3] mb-1">
+                  <label className="block text-xs text-[var(--text-secondary)] mb-1">
                     max-sleep-interval (sec)
                   </label>
                   <input
@@ -1299,47 +1469,53 @@ export const SettingsPage: React.FC = () => {
                     onChange={(e) =>
                       setSettings({...settings, ytdlp_max_sleep_interval: e.target.value})
                     }
-                    className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 font-mono text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                    className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs text-[#B3B3B3] mb-1">yt-dlp Binary Path</label>
+                <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                  yt-dlp Binary Path
+                </label>
                 <input
                   type="text"
                   value={settings.ytdlp_path}
                   onChange={(e) => setSettings({...settings, ytdlp_path: e.target.value})}
                   placeholder="yt-dlp"
-                  className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 font-mono text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                  className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-xs text-[#B3B3B3] mb-1">FFmpeg Binary Path</label>
+                <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                  FFmpeg Binary Path
+                </label>
                 <input
                   type="text"
                   value={settings.ffmpeg_path}
                   onChange={(e) => setSettings({...settings, ffmpeg_path: e.target.value})}
                   placeholder="ffmpeg"
-                  className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 font-mono text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                  className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs text-[#B3B3B3] mb-1">Custom Extra CLI Flags</label>
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                Custom Extra CLI Flags
+              </label>
               <input
                 type="text"
                 value={settings.ytdlp_extra_flags}
                 onChange={(e) => setSettings({...settings, ytdlp_extra_flags: e.target.value})}
                 placeholder="--geo-bypass --concurrent-fragments 4"
-                className="w-full rounded-md bg-[#121212] border border-white/10 px-3 py-2 font-mono text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+                className="w-full rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
               />
             </div>
 
             {/* Boolean Resilience Toggles */}
-            <div className="space-y-3 rounded-lg bg-[#121212] border border-white/[0.06] p-4">
+            <div className="space-y-3 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-4">
               <label className="flex items-start gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -1350,13 +1526,13 @@ export const SettingsPage: React.FC = () => {
                       ytdlp_remote_components: e.target.checked ? 'true' : 'false',
                     })
                   }
-                  className="mt-0.5 h-4 w-4 accent-[#1DB954]"
+                  className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
                 />
                 <div>
-                  <span className="text-sm font-medium text-white">
-                    Enable <code className="font-mono text-[#1DB954]">--remote-components ejs:github</code>
+                  <span className="text-sm font-medium text-[var(--text-primary)]">
+                    Enable <code className="font-mono text-[var(--accent)]">--remote-components ejs:github</code>
                   </span>
-                  <p className="text-xs text-[#6A6A6A]">
+                  <p className="text-xs text-[var(--text-muted)]">
                     Fetches up-to-date YouTube JS n-challenge solvers automatically.
                   </p>
                 </div>
@@ -1372,13 +1548,13 @@ export const SettingsPage: React.FC = () => {
                       ytdlp_force_ipv4: e.target.checked ? 'true' : 'false',
                     })
                   }
-                  className="mt-0.5 h-4 w-4 accent-[#1DB954]"
+                  className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
                 />
                 <div>
-                  <span className="text-sm font-medium text-white">
-                    Force IPv4 (<code className="font-mono text-[#1DB954]">--force-ipv4</code>)
+                  <span className="text-sm font-medium text-[var(--text-primary)]">
+                    Force IPv4 (<code className="font-mono text-[var(--accent)]">--force-ipv4</code>)
                   </span>
-                  <p className="text-xs text-[#6A6A6A]">
+                  <p className="text-xs text-[var(--text-muted)]">
                     Prevents IPv6 range throttling and 403 errors on homelab ISPs.
                   </p>
                 </div>
@@ -1394,13 +1570,13 @@ export const SettingsPage: React.FC = () => {
                       ytdlp_crop_cover: e.target.checked ? 'true' : 'false',
                     })
                   }
-                  className="mt-0.5 h-4 w-4 accent-[#1DB954]"
+                  className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
                 />
                 <div>
-                  <span className="text-sm font-medium text-white">
+                  <span className="text-sm font-medium text-[var(--text-primary)]">
                     FFmpeg 1:1 Square Album Art Crop Filter
                   </span>
-                  <p className="text-xs text-[#6A6A6A]">
+                  <p className="text-xs text-[var(--text-muted)]">
                     Applies <code className="font-mono">-vf &quot;crop=&apos;min(iw,ih)&apos;:&apos;min(iw,ih)&apos;&quot;</code> so 16:9 YouTube thumbnails embed as crisp square covers.
                   </p>
                 </div>
@@ -1410,13 +1586,13 @@ export const SettingsPage: React.FC = () => {
             <div className="flex items-center justify-between gap-4">
               <div>
                 {resilienceFeedback && (
-                  <p className="text-xs font-medium text-[#1DB954]">{resilienceFeedback}</p>
+                  <p className="text-xs font-medium text-[var(--accent)]">{resilienceFeedback}</p>
                 )}
               </div>
               <button
                 type="submit"
                 disabled={savingResilience}
-                className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
               >
                 {savingResilience ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -1431,19 +1607,20 @@ export const SettingsPage: React.FC = () => {
       )}
 
       {/* Account Session & Sign Out */}
-      <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6">
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="min-w-0">
-            <h2 className="font-display text-base font-bold text-white">Account</h2>
-            <p className="mt-0.5 text-xs text-[#B3B3B3] truncate">
-              Signed in as <span className="font-semibold text-white">{user?.username}</span>{' '}
-              <span className="capitalize text-[#8A8A8A]">({user?.role})</span>
+            <h2 className="font-display text-base font-bold text-[var(--text-primary)]">Account</h2>
+            <p className="mt-0.5 text-xs text-[var(--text-secondary)] truncate">
+              Signed in as{' '}
+              <span className="font-semibold text-[var(--text-primary)]">{user?.username}</span>{' '}
+              <span className="capitalize text-[var(--text-muted)]">({user?.role})</span>
             </p>
           </div>
           <button
             type="button"
             onClick={() => void logout()}
-            className="inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-full border border-red-500/35 bg-red-500/10 px-6 py-2.5 text-sm font-semibold text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors"
+            className="inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-full border border-[var(--danger-border)] bg-[var(--danger-bg)] px-6 py-2.5 text-sm font-semibold text-[var(--danger-text)] hover:opacity-90 transition-opacity"
           >
             <LogOut className="w-4 h-4" />
             <span>Sign Out</span>
@@ -1465,34 +1642,35 @@ export const SettingsPage: React.FC = () => {
       {/* iOS Safari Install Guide Modal */}
       {showIOSGuide && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-sm rounded-xl bg-[#181818] border border-white/10 p-6 shadow-2xl space-y-4">
+          <div className="w-full max-w-sm rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="font-display text-lg font-bold text-white">
+              <h3 className="font-display text-lg font-bold text-[var(--text-primary)]">
                 Install xlabplayer on iOS
               </h3>
               <button
                 type="button"
                 onClick={() => setShowIOSGuide(false)}
-                className="p-1 text-[#B3B3B3] hover:text-white"
+                className="p-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <ol className="list-decimal list-inside space-y-2 text-sm text-[#B3B3B3]">
+            <ol className="list-decimal list-inside space-y-2 text-sm text-[var(--text-secondary)]">
               <li>
-                Tap the <strong className="text-white">Share</strong> button in Safari&apos;s toolbar.
+                Tap the <strong className="text-[var(--text-primary)]">Share</strong> button in Safari&apos;s toolbar.
               </li>
               <li>
-                Scroll down and tap <strong className="text-white">Add to Home Screen</strong>.
+                Scroll down and tap{' '}
+                <strong className="text-[var(--text-primary)]">Add to Home Screen</strong>.
               </li>
               <li>
-                Tap <strong className="text-white">Add</strong> to launch xlabplayer as a standalone app.
+                Tap <strong className="text-[var(--text-primary)]">Add</strong> to launch xlabplayer as a standalone app.
               </li>
             </ol>
             <button
               type="button"
               onClick={() => setShowIOSGuide(false)}
-              className="w-full rounded-full bg-[#1DB954] py-2.5 text-sm font-bold text-black"
+              className="w-full rounded-full bg-[var(--accent)] py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
             >
               Got It
             </button>

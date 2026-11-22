@@ -24,11 +24,12 @@ import React, {useCallback, useEffect, useState} from 'react';
 import {NavLink, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useTheme} from '../context/ThemeContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
-import {DEFAULT_APP_THEME_COLOR, setDocumentThemeColor} from '../lib/themeColor';
+import {setDocumentThemeColor} from '../lib/themeColor';
 import type {Playlist} from '../types';
 import {getOfflinePlaylists, subscribeOfflineStore} from '../utils/offlineStore';
 import {AlbumArt} from './AlbumArt';
@@ -38,6 +39,7 @@ import {QueueDrawer} from './QueueDrawer';
 
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
+  const {theme, isLight, isAppleStyle, baseThemeColor} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -115,14 +117,14 @@ export const AppShell: React.FC = () => {
     isHomePage ||
     location.pathname === '/search' ||
     location.pathname.startsWith('/playlists');
-  const stageTint = currentTrack?.dominant_color || '#1c3b29';
+  const stageTint = currentTrack?.dominant_color || (isAppleStyle ? '#4a1822' : '#1c3b29');
 
-  // Keep mobile status bar synced to #121212 on standard views (Now Playing & Home sync dynamically)
+  // Keep mobile status bar synced to the active theme's base color on standard views
   useEffect(() => {
     if (!isNowPlayingPage && !isHomePage) {
-      setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
+      setDocumentThemeColor(baseThemeColor);
     }
-  }, [isNowPlayingPage, isHomePage]);
+  }, [isNowPlayingPage, isHomePage, baseThemeColor, theme]);
 
   const navItems = [
     {to: '/', label: 'Home', icon: Home, end: true},
@@ -131,12 +133,36 @@ export const AppShell: React.FC = () => {
     {to: '/settings', label: 'Settings', icon: Settings, end: false},
   ];
 
+  const miniPlayerSurfaceStyle: React.CSSProperties =
+    theme === 'spotify-dark'
+      ? {
+          background: `linear-gradient(90deg, ${stageTint} 0%, #1c1c1c 100%)`,
+          touchAction: 'pan-y',
+        }
+      : {
+          touchAction: 'pan-y',
+        };
+
+  const miniPlayerClassName =
+    theme === 'apple-light'
+      ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-2xl bg-white/85 backdrop-blur-xl border border-black/[0.08] shadow-[0_8px_28px_rgba(0,0,0,0.12)] overflow-hidden select-none'
+      : theme === 'apple-dark'
+        ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-2xl bg-[#1C1C1E]/80 backdrop-blur-xl border border-white/[0.12] shadow-2xl overflow-hidden select-none'
+        : 'md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden select-none';
+
+  const bottomNavClassName =
+    theme === 'apple-light'
+      ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-white/85 backdrop-blur-xl border-t border-black/[0.08]'
+      : theme === 'apple-dark'
+        ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[#1C1C1E]/80 backdrop-blur-xl border-t border-white/[0.10]'
+        : 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--bg-glass)] backdrop-blur-md border-t border-[var(--border-subtle)]';
+
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#121212] text-white">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Main Area: Sidebar (Desktop) + Scrollable Stage */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Desktop Fixed Left Sidebar (240px) */}
-        <aside className="hidden md:flex w-[240px] shrink-0 flex-col bg-[#0A0A0A] border-r border-white/[0.06]">
+        <aside className="hidden md:flex w-[240px] shrink-0 flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)]">
           <div className="px-5 pt-6 pb-5">
             <button
               type="button"
@@ -158,8 +184,8 @@ export const AppShell: React.FC = () => {
                   className={({isActive}) =>
                     `flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
                       isActive
-                        ? 'bg-[#282828] text-white'
-                        : 'text-[#B3B3B3] hover:text-white hover:bg-[#181818]'
+                        ? 'bg-[var(--bg-elevated)] text-[var(--accent)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
                     }`
                   }
                 >
@@ -171,16 +197,16 @@ export const AppShell: React.FC = () => {
           </nav>
 
           {/* Quick Playlist List */}
-          <div className="mt-6 flex flex-1 min-h-0 flex-col border-t border-white/[0.06] pt-4 px-3">
+          <div className="mt-6 flex flex-1 min-h-0 flex-col border-t border-[var(--border-subtle)] pt-4 px-3">
             <div className="flex items-center justify-between px-3 mb-2">
-              <span className="text-xs font-semibold text-[#B3B3B3]">
+              <span className="text-xs font-semibold text-[var(--text-secondary)]">
                 {offline ? 'Offline Playlists' : 'Playlists'}
               </span>
               {!offline && (
                 <button
                   type="button"
                   onClick={() => setCreateOpen(true)}
-                  className="flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white transition-colors"
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
                   title="Create playlist"
                   aria-label="Create playlist"
                 >
@@ -190,7 +216,7 @@ export const AppShell: React.FC = () => {
             </div>
             <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
               {playlists.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-[#6A6A6A]">
+                <p className="px-3 py-2 text-xs text-[var(--text-muted)]">
                   {offline ? 'No offline playlists cached' : 'No playlists yet'}
                 </p>
               ) : (
@@ -201,13 +227,13 @@ export const AppShell: React.FC = () => {
                     className={({isActive}) =>
                       `flex items-center justify-between rounded-md px-3 py-2 text-sm transition-colors ${
                         isActive
-                          ? 'bg-[#282828] text-white font-medium'
-                          : 'text-[#B3B3B3] hover:text-white hover:bg-[#181818]'
+                          ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
                       }`
                     }
                   >
                     <span className="truncate">{pl.name}</span>
-                    <span className="font-mono text-xs tabular-nums text-[#6A6A6A] ml-2">
+                    <span className="font-mono text-xs tabular-nums text-[var(--text-muted)] ml-2">
                       {pl.track_count}
                     </span>
                   </NavLink>
@@ -217,26 +243,26 @@ export const AppShell: React.FC = () => {
           </div>
 
           {/* Sidebar Footer: PWA Install (if available) + User */}
-          <div className="border-t border-white/[0.06] p-3 space-y-2">
+          <div className="border-t border-[var(--border-subtle)] p-3 space-y-2">
             {isInstallable && !isInstalled && (
               <button
                 type="button"
                 onClick={() => void install()}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-[#181818] border border-white/10 px-3 py-2 text-xs font-semibold text-white hover:bg-[#282828] transition-colors"
+                className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors"
               >
-                <Download className="w-3.5 h-3.5 text-[#1DB954]" />
+                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
                 Install xlabplayer App
               </button>
             )}
             <div className="flex items-center justify-between rounded-md px-2.5 py-2">
               <div className="min-w-0">
-                <p className="text-sm font-medium text-white truncate">{user?.username}</p>
-                <p className="text-xs text-[#6A6A6A] capitalize">{user?.role}</p>
+                <p className="text-sm font-medium text-[var(--text-primary)] truncate">{user?.username}</p>
+                <p className="text-xs text-[var(--text-muted)] capitalize">{user?.role}</p>
               </div>
               <button
                 type="button"
                 onClick={() => void logout()}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white transition-colors"
+                className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
                 title="Sign out"
                 aria-label="Sign out"
               >
@@ -247,15 +273,15 @@ export const AppShell: React.FC = () => {
         </aside>
 
         {/* Main Scrollable Viewport */}
-        <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[#121212] relative">
+        <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[var(--bg-primary)] relative">
           {/* Dynamic Subtle Top-to-Bottom Gradient Backdrop */}
           <main
             className="flex-1 overflow-y-auto relative"
             style={{
               backgroundImage:
-                isNowPlayingPage || isHomePage
+                isNowPlayingPage || isHomePage || isLight
                   ? undefined
-                  : `linear-gradient(180deg, ${stageTint}55 0%, #121212 280px, #121212 100%)`,
+                  : `linear-gradient(180deg, ${stageTint}44 0%, var(--bg-primary) 260px, var(--bg-primary) 100%)`,
             }}
           >
             <div
@@ -274,7 +300,11 @@ export const AppShell: React.FC = () => {
       </div>
 
       {/* Desktop Fixed Bottom Playback Bar (90px) */}
-      <footer className="hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(220px,1fr)] items-center gap-4 bg-[#181818] border-t border-white/[0.08] px-4 z-30">
+      <footer
+        className={`hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(220px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] px-4 z-30 ${
+          isAppleStyle ? 'bg-[var(--bg-glass)] backdrop-blur-xl' : 'bg-[var(--bg-secondary)]'
+        }`}
+      >
         {/* Left: Mini Cover + Title + Artist + Heart */}
         <div className="flex items-center gap-3.5 min-w-0">
           {currentTrack ? (
@@ -289,7 +319,7 @@ export const AppShell: React.FC = () => {
                   coverFile={currentTrack.cover_file}
                   alt={currentTrack.title}
                   color={currentTrack.dominant_color}
-                  className="w-14 h-14 rounded shadow-md"
+                  className="w-14 h-14 rounded-md shadow-md"
                   iconSize={22}
                 />
               </button>
@@ -297,7 +327,7 @@ export const AppShell: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => navigate('/now-playing')}
-                  className="block max-w-full truncate text-sm font-semibold text-white hover:underline text-left"
+                  className="block max-w-full truncate text-sm font-semibold text-[var(--text-primary)] hover:underline text-left"
                 >
                   {currentTrack.title}
                 </button>
@@ -306,7 +336,7 @@ export const AppShell: React.FC = () => {
                   onClick={() =>
                     navigate(`/?artist=${encodeURIComponent(currentTrack.artist)}`)
                   }
-                  className="block max-w-full truncate text-xs text-[#B3B3B3] hover:text-white hover:underline text-left"
+                  className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left"
                 >
                   {currentTrack.artist}
                 </button>
@@ -315,7 +345,9 @@ export const AppShell: React.FC = () => {
                 type="button"
                 onClick={() => void toggleLikeTrack(currentTrack.id)}
                 className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
-                  currentTrack.liked ? 'text-[#1DB954]' : 'text-[#B3B3B3] hover:text-white'
+                  currentTrack.liked
+                    ? 'text-[var(--accent)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
                 aria-label={currentTrack.liked ? 'Unlike track' : 'Like track'}
               >
@@ -323,13 +355,13 @@ export const AppShell: React.FC = () => {
               </button>
             </>
           ) : (
-            <div className="flex items-center gap-3 text-[#6A6A6A]">
-              <div className="h-14 w-14 rounded bg-[#242424] flex items-center justify-center">
+            <div className="flex items-center gap-3 text-[var(--text-muted)]">
+              <div className="h-14 w-14 rounded-md bg-[var(--bg-elevated)] flex items-center justify-center">
                 <ListMusic className="w-5 h-5" />
               </div>
               <div>
-                <p className="text-sm font-medium text-[#B3B3B3]">Not playing</p>
-                <p className="text-xs text-[#6A6A6A]">Select a track to begin</p>
+                <p className="text-sm font-medium text-[var(--text-secondary)]">Not playing</p>
+                <p className="text-xs text-[var(--text-muted)]">Select a track to begin</p>
               </div>
             </div>
           )}
@@ -342,7 +374,9 @@ export const AppShell: React.FC = () => {
               type="button"
               onClick={toggleShuffle}
               className={`relative p-1.5 transition-colors ${
-                shuffle ? 'text-[#1DB954]' : 'text-[#B3B3B3] hover:text-white'
+                shuffle
+                  ? 'text-[var(--accent)]'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               }`}
               aria-label="Shuffle"
             >
@@ -352,7 +386,7 @@ export const AppShell: React.FC = () => {
               type="button"
               onClick={prevTrack}
               disabled={!currentTrack}
-              className="p-1.5 text-[#B3B3B3] hover:text-white disabled:opacity-30 transition-colors"
+              className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors"
               aria-label="Previous track"
             >
               <SkipBack className="w-5 h-5 fill-current" />
@@ -361,7 +395,7 @@ export const AppShell: React.FC = () => {
               type="button"
               onClick={togglePlay}
               disabled={!currentTrack}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-black hover:scale-105 active:scale-95 disabled:opacity-40 transition-transform"
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--btn-contrast-bg)] text-[var(--btn-contrast-text)] hover:scale-105 active:scale-95 disabled:opacity-40 transition-transform"
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? (
@@ -374,7 +408,7 @@ export const AppShell: React.FC = () => {
               type="button"
               onClick={nextTrack}
               disabled={!currentTrack}
-              className="p-1.5 text-[#B3B3B3] hover:text-white disabled:opacity-30 transition-colors"
+              className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors"
               aria-label="Next track"
             >
               <SkipForward className="w-5 h-5 fill-current" />
@@ -383,7 +417,9 @@ export const AppShell: React.FC = () => {
               type="button"
               onClick={cycleRepeat}
               className={`p-1.5 transition-colors ${
-                repeat !== 'off' ? 'text-[#1DB954]' : 'text-[#B3B3B3] hover:text-white'
+                repeat !== 'off'
+                  ? 'text-[var(--accent)]'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               }`}
               aria-label={`Repeat: ${repeat}`}
             >
@@ -396,7 +432,7 @@ export const AppShell: React.FC = () => {
           </div>
 
           <div className="xlab-slider-group flex w-full max-w-xl items-center gap-2.5">
-            <span className="font-mono text-[11px] tabular-nums text-[#B3B3B3] w-10 text-right">
+            <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10 text-right">
               {formatDuration(currentTime)}
             </span>
             <input
@@ -409,12 +445,12 @@ export const AppShell: React.FC = () => {
               onChange={(e) => seek(parseFloat(e.target.value))}
               className="xlab-slider flex-1 h-1"
               style={{
-                background: `linear-gradient(to right, #1DB954 ${progressPct}%, #4D4D4D ${progressPct}%)`,
+                background: `linear-gradient(to right, var(--accent) ${progressPct}%, var(--slider-track) ${progressPct}%)`,
                 borderRadius: '9999px',
               }}
               aria-label="Seek progress"
             />
-            <span className="font-mono text-[11px] tabular-nums text-[#B3B3B3] w-10">
+            <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10">
               {formatDuration(duration)}
             </span>
           </div>
@@ -429,7 +465,7 @@ export const AppShell: React.FC = () => {
               navigate('/now-playing');
             }}
             disabled={!currentTrack}
-            className="p-2 text-[#B3B3B3] hover:text-white disabled:opacity-30 transition-colors"
+            className="p-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors"
             title="Lyrics"
             aria-label="Open Lyrics"
           >
@@ -439,7 +475,9 @@ export const AppShell: React.FC = () => {
             type="button"
             onClick={() => setQueueOpen(!queueOpen)}
             className={`p-2 transition-colors ${
-              queueOpen ? 'text-[#1DB954]' : 'text-[#B3B3B3] hover:text-white'
+              queueOpen
+                ? 'text-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
             title="Queue"
             aria-label="Toggle Queue"
@@ -451,7 +489,7 @@ export const AppShell: React.FC = () => {
             <button
               type="button"
               onClick={toggleMute}
-              className="text-[#B3B3B3] hover:text-white transition-colors"
+              className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
               aria-label={isMuted ? 'Unmute' : 'Mute'}
             >
               {isMuted || volume === 0 ? (
@@ -469,7 +507,7 @@ export const AppShell: React.FC = () => {
               onChange={(e) => setVolume(parseFloat(e.target.value))}
               className="xlab-slider flex-1 h-1"
               style={{
-                background: `linear-gradient(to right, #1DB954 ${volPct}%, #4D4D4D ${volPct}%)`,
+                background: `linear-gradient(to right, var(--accent) ${volPct}%, var(--slider-track) ${volPct}%)`,
                 borderRadius: '9999px',
               }}
               aria-label="Volume"
@@ -480,7 +518,9 @@ export const AppShell: React.FC = () => {
             type="button"
             onClick={() => navigate(isNowPlayingPage ? '/' : '/now-playing')}
             className={`p-2 transition-colors ${
-              isNowPlayingPage ? 'text-[#1DB954]' : 'text-[#B3B3B3] hover:text-white'
+              isNowPlayingPage
+                ? 'text-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
             title="Expand Now Playing"
             aria-label="Expand Now Playing"
@@ -494,11 +534,8 @@ export const AppShell: React.FC = () => {
       {!isNowPlayingPage && currentTrack && (
         <div
           {...miniPlayerSwipe.handlers}
-          className="md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden select-none"
-          style={{
-            background: `linear-gradient(90deg, ${stageTint} 0%, #1c1c1c 100%)`,
-            touchAction: 'pan-y',
-          }}
+          className={miniPlayerClassName}
+          style={miniPlayerSurfaceStyle}
         >
           <div className="flex h-full items-center gap-3 px-3">
             <button
@@ -514,12 +551,24 @@ export const AppShell: React.FC = () => {
                 coverFile={currentTrack.cover_file}
                 alt={currentTrack.title}
                 color={currentTrack.dominant_color}
-                className="w-11 h-11 rounded pointer-events-none"
+                className="w-11 h-11 rounded-md pointer-events-none shadow-sm"
                 iconSize={18}
               />
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold text-white truncate">{currentTrack.title}</p>
-                <p className="text-xs text-white/75 truncate">{currentTrack.artist}</p>
+                <p
+                  className={`text-sm font-semibold truncate ${
+                    theme === 'apple-light' ? 'text-[#1C1C1E]' : 'text-white'
+                  }`}
+                >
+                  {currentTrack.title}
+                </p>
+                <p
+                  className={`text-xs truncate ${
+                    theme === 'apple-light' ? 'text-[#6E6E73]' : 'text-white/75'
+                  }`}
+                >
+                  {currentTrack.artist}
+                </p>
               </div>
             </button>
 
@@ -528,7 +577,11 @@ export const AppShell: React.FC = () => {
               data-no-swipe="true"
               onClick={() => void toggleLikeTrack(currentTrack.id)}
               className={`flex h-11 w-11 items-center justify-center ${
-                currentTrack.liked ? 'text-[#1DB954]' : 'text-white/80'
+                currentTrack.liked
+                  ? 'text-[var(--accent)]'
+                  : theme === 'apple-light'
+                    ? 'text-[#6E6E73]'
+                    : 'text-white/80'
               }`}
               aria-label="Like track"
             >
@@ -538,7 +591,9 @@ export const AppShell: React.FC = () => {
               type="button"
               data-no-swipe="true"
               onClick={togglePlay}
-              className="flex h-11 w-11 items-center justify-center text-white"
+              className={`flex h-11 w-11 items-center justify-center ${
+                theme === 'apple-light' ? 'text-[#1C1C1E]' : 'text-white'
+              }`}
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? (
@@ -549,9 +604,13 @@ export const AppShell: React.FC = () => {
             </button>
           </div>
           {/* Thin progress strip along bottom of mini-player */}
-          <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-white/15">
+          <div
+            className={`absolute bottom-0 left-0 right-0 h-[2px] ${
+              theme === 'apple-light' ? 'bg-black/10' : 'bg-white/15'
+            }`}
+          >
             <div
-              className="h-full bg-[#1DB954] transition-[width] duration-150"
+              className="h-full bg-[var(--accent)] transition-[width] duration-150"
               style={{width: `${progressPct}%`}}
             />
           </div>
@@ -560,7 +619,7 @@ export const AppShell: React.FC = () => {
 
       {/* Mobile 4-Tab Bottom Navigation Bar (60px + safe-area-inset-bottom) */}
       {!isNowPlayingPage && (
-        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[#121212]/95 backdrop-blur-md border-t border-white/10">
+        <nav className={bottomNavClassName}>
           <div
             className="grid h-[60px] items-center"
             style={{gridTemplateColumns: `repeat(${navItems.length}, minmax(0, 1fr))`}}
@@ -574,7 +633,7 @@ export const AppShell: React.FC = () => {
                   end={item.end}
                   className={({isActive}) =>
                     `flex flex-col items-center justify-center gap-1 h-full text-[11px] font-medium transition-colors ${
-                      isActive ? 'text-[#1DB954]' : 'text-[#B3B3B3]'
+                      isActive ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
                     }`
                   }
                 >

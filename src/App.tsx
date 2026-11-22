@@ -4,6 +4,7 @@ import {BrowserRouter, Navigate, Route, Routes} from 'react-router-dom';
 import {AppShell} from './components/AppShell';
 import {AuthProvider, useAuth} from './context/AuthContext';
 import {PlayerProvider} from './context/PlayerContext';
+import {ThemeProvider} from './context/ThemeContext';
 import {AuthPage} from './pages/AuthPage';
 import {NowPlayingPage} from './pages/NowPlayingPage';
 import {PlaylistsLibraryPage} from './pages/PlaylistsLibraryPage';
@@ -15,8 +16,8 @@ const AuthenticatedRoutes: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-[#121212] text-[#B3B3B3] gap-3">
-        <Loader2 className="w-6 h-6 animate-spin text-[#1DB954]" />
+      <div className="flex h-screen w-screen items-center justify-center bg-[var(--bg-primary)] text-[var(--text-secondary)] gap-3">
+        <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
         <span className="font-display text-sm font-medium">Loading xlabplayer...</span>
       </div>
     );
@@ -46,10 +47,12 @@ const AuthenticatedRoutes: React.FC = () => {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AuthenticatedRoutes />
-      </AuthProvider>
-    </BrowserRouter>
+    <ThemeProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <AuthenticatedRoutes />
+        </AuthProvider>
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }

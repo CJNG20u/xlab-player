@@ -1,0 +1,161 @@
+import React, {createContext, useCallback, useContext, useEffect, useMemo, useState} from 'react';
+import {getThemeBaseColor, setDocumentThemeColor} from '../lib/themeColor';
+
+export type AppTheme = 'spotify-dark' | 'apple-dark' | 'apple-light';
+
+export interface ThemeOption {
+  id: AppTheme;
+  name: string;
+  description: string;
+  themeColor: string;
+  isLight: boolean;
+  preview: {
+    bg: string;
+    card: string;
+    elevated: string;
+    text: string;
+    muted: string;
+    accent: string;
+    navBg: string;
+    border: string;
+  };
+}
+
+export const THEME_STORAGE_KEY = 'xlabplayer-theme';
+
+export const THEME_OPTIONS: ThemeOption[] = [
+  {
+    id: 'spotify-dark',
+    name: 'Spotify Dark',
+    description: 'Charcoal surfaces with emerald green accents',
+    themeColor: '#121212',
+    isLight: false,
+    preview: {
+      bg: '#121212',
+      card: '#181818',
+      elevated: '#282828',
+      text: '#FFFFFF',
+      muted: '#B3B3B3',
+      accent: '#1DB954',
+      navBg: 'rgba(18, 18, 18, 0.94)',
+      border: 'rgba(255, 255, 255, 0.1)',
+    },
+  },
+  {
+    id: 'apple-dark',
+    name: 'Apple Music Dark',
+    description: 'True black OLED canvas with crimson & frosted glass',
+    themeColor: '#000000',
+    isLight: false,
+    preview: {
+      bg: '#000000',
+      card: '#1C1C1E',
+      elevated: '#2C2C2E',
+      text: '#FFFFFF',
+      muted: '#98989F',
+      accent: '#FA243C',
+      navBg: 'rgba(28, 28, 30, 0.82)',
+      border: 'rgba(255, 255, 255, 0.12)',
+    },
+  },
+  {
+    id: 'apple-light',
+    name: 'Apple Music Light',
+    description: 'Pure white canvas with soft gray cards & crimson accents',
+    themeColor: '#FFFFFF',
+    isLight: true,
+    preview: {
+      bg: '#FFFFFF',
+      card: '#F2F2F7',
+      elevated: '#E5E5EA',
+      text: '#1C1C1E',
+      muted: '#6E6E73',
+      accent: '#FA243C',
+      navBg: 'rgba(255, 255, 255, 0.88)',
+      border: 'rgba(0, 0, 0, 0.08)',
+    },
+  },
+];
+
+function isValidTheme(value: string | null): value is AppTheme {
+  return value === 'spotify-dark' || value === 'apple-dark' || value === 'apple-light';
+}
+
+function readStoredTheme(): AppTheme {
+  if (typeof window === 'undefined') return 'spotify-dark';
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (isValidTheme(stored)) return stored;
+  } catch {
+    // ignore storage errors
+  }
+  return 'spotify-dark';
+}
+
+function applyThemeToDocument(theme: AppTheme): void {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  root.setAttribute('data-theme', theme);
+  root.classList.toggle('dark', theme !== 'apple-light');
+
+  const statusBarMeta = document.querySelector<HTMLMetaElement>(
+    'meta[name="apple-mobile-web-app-status-bar-style"]'
+  );
+  if (statusBarMeta) {
+    statusBarMeta.setAttribute(
+      'content',
+      theme === 'apple-light' ? 'default' : 'black-translucent'
+    );
+  }
+}
+
+interface ThemeContextValue {
+  theme: AppTheme;
+  setTheme: (next: AppTheme) => void;
+  isLight: boolean;
+  isAppleStyle: boolean;
+  baseThemeColor: string;
+}
+
+const ThemeContext = createContext<ThemeContextValue | null>(null);
+
+export const ThemeProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
+  const [theme, setThemeState] = useState<AppTheme>(() => readStoredTheme());
+
+  const setTheme = useCallback((next: AppTheme) => {
+    setThemeState(next);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      // ignore storage errors
+    }
+    applyThemeToDocument(next);
+    setDocumentThemeColor(getThemeBaseColor(next));
+  }, []);
+
+  useEffect(() => {
+    applyThemeToDocument(theme);
+    setDocumentThemeColor(getThemeBaseColor(theme));
+  }, [theme]);
+
+  const value = useMemo<ThemeContextValue>(
+    () => ({
+      theme,
+      setTheme,
+      isLight: theme === 'apple-light',
+      isAppleStyle: theme === 'apple-dark' || theme === 'apple-light',
+      baseThemeColor: getThemeBaseColor(theme),
+    }),
+    [theme, setTheme]
+  );
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+};
+
+export function useTheme(): ThemeContextValue {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) {
+    throw new Error('useTheme must be used within ThemeProvider');
+  }
+  return ctx;
+}

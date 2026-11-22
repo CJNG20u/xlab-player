@@ -476,23 +476,23 @@ export const SearchPage: React.FC = () => {
       }}
     >
       {actionToast && (
-        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[#1DB954] px-4 py-2 text-sm font-semibold text-black shadow-xl max-w-[90vw] truncate">
+        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
           {actionToast}
         </div>
       )}
 
       {/* Compact Single-Row Header */}
       <div className="flex items-center justify-between gap-3">
-        <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
+        <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
           Search
         </h1>
         {canDownload && (
           <div
-            className="inline-flex items-center gap-1.5 rounded-md bg-white/[0.06] border border-white/[0.08] px-2.5 py-1 text-xs text-[#B3B3B3] max-w-[60vw]"
+            className="inline-flex items-center gap-1.5 rounded-md bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-2.5 py-1 text-xs text-[var(--text-secondary)] max-w-[60vw]"
             title={`Download destination: ${destinationLabel}`}
           >
-            <FolderOpen className="w-3.5 h-3.5 text-[#1DB954] shrink-0" />
-            <code className="font-mono text-white/90 truncate">{destinationLabel}</code>
+            <FolderOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+            <code className="font-mono text-[var(--text-primary)] truncate">{destinationLabel}</code>
           </div>
         )}
       </div>
@@ -501,9 +501,9 @@ export const SearchPage: React.FC = () => {
       <form onSubmit={handleFetchMetadata} className="space-y-3">
         <div className="relative">
           {isUrlInput ? (
-            <Link2 className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#1DB954]" />
+            <Link2 className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--accent)]" />
           ) : (
-            <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#B3B3B3]" />
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-secondary)]" />
           )}
           <input
             ref={searchInputRef}
@@ -512,13 +512,13 @@ export const SearchPage: React.FC = () => {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Songs, artists, or YouTube URL..."
             aria-label="Search library or YouTube"
-            className="w-full rounded-lg bg-[#181818] border border-white/10 pl-10 pr-10 py-3 text-sm text-white placeholder-[#8A8A8A] focus:border-[#1DB954] focus:bg-[#202020] focus:outline-none transition-colors"
+            className="w-full rounded-lg bg-[var(--bg-input)] border border-[var(--border-subtle)] pl-10 pr-10 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none transition-colors"
           />
           {query && (
             <button
               type="button"
               onClick={handleClearInput}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-white/10 hover:text-white transition-colors"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] transition-colors"
               aria-label="Clear search"
             >
               <X className="w-4 h-4" />
@@ -528,7 +528,7 @@ export const SearchPage: React.FC = () => {
 
         {canDownload && (
           <div className="flex items-center justify-between gap-2.5">
-            <div className="inline-flex items-center rounded-md bg-[#181818] p-0.5 border border-white/10">
+            <div className="inline-flex items-center rounded-md bg-[var(--bg-secondary)] p-0.5 border border-[var(--border-subtle)]">
               {(['m4a', 'opus'] as const).map((fmt) => (
                 <button
                   key={fmt}
@@ -539,8 +539,8 @@ export const SearchPage: React.FC = () => {
                   }}
                   className={`px-3 py-1.5 rounded text-xs font-mono font-medium transition-colors ${
                     defaultFormat === fmt
-                      ? 'bg-[#282828] text-white'
-                      : 'text-[#8A8A8A] hover:text-white'
+                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                   }`}
                 >
                   .{fmt}
@@ -551,7 +551,7 @@ export const SearchPage: React.FC = () => {
             <button
               type="submit"
               disabled={fetchingMeta || !trimmedQuery || offline}
-              className="inline-flex items-center justify-center gap-2 rounded-full bg-[#1DB954] px-5 py-2 text-sm font-bold text-black hover:bg-[#1ED760] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0"
+              className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0"
             >
               {fetchingMeta ? (
                 <>
@@ -574,9 +574,9 @@ export const SearchPage: React.FC = () => {
         !offline &&
         publicInfo &&
         (!publicInfo.ytdlpInstalled || !publicInfo.ffmpegInstalled) && (
-          <div className="rounded-lg bg-amber-500/10 border border-amber-500/25 p-3.5 flex items-start gap-3">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-            <p className="text-xs text-amber-200/90 leading-relaxed">
+          <div className="rounded-lg bg-[var(--warn-bg)] border border-[var(--warn-border)] p-3.5 flex items-start gap-3">
+            <AlertTriangle className="w-4 h-4 text-[var(--warn-text)] shrink-0 mt-0.5" />
+            <p className="text-xs text-[var(--warn-text)] leading-relaxed">
               {!publicInfo.ytdlpInstalled && !publicInfo.ffmpegInstalled
                 ? 'yt-dlp and ffmpeg are not installed in this container.'
                 : !publicInfo.ytdlpInstalled
@@ -588,7 +588,7 @@ export const SearchPage: React.FC = () => {
         )}
 
       {metaError && (
-        <div className="rounded-lg bg-red-500/10 border border-red-500/25 px-4 py-3 text-sm text-red-300">
+        <div className="rounded-lg bg-[var(--danger-bg)] border border-[var(--danger-border)] px-4 py-3 text-sm text-[var(--danger-text)]">
           {metaError}
         </div>
       )}
@@ -597,10 +597,10 @@ export const SearchPage: React.FC = () => {
       {trimmedQuery && !isUrlInput && (
         <section className="space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="font-display text-sm font-bold uppercase tracking-wider text-[#B3B3B3]">
+            <h2 className="font-display text-sm font-bold uppercase tracking-wider text-[var(--text-secondary)]">
               In Your Library
             </h2>
-            <span className="font-mono text-xs tabular-nums text-[#6A6A6A]">
+            <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
               {libraryLoading
                 ? 'Loading...'
                 : `${localMatches.length} ${localMatches.length === 1 ? 'track' : 'tracks'}`}
@@ -608,10 +608,10 @@ export const SearchPage: React.FC = () => {
           </div>
 
           {localMatches.length === 0 ? (
-            <div className="rounded-xl bg-[#181818] border border-white/[0.06] px-4 py-5 flex items-center justify-between gap-3">
+            <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-4 py-5 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
-                <Music2 className="w-5 h-5 text-[#6A6A6A] shrink-0" />
-                <p className="text-sm text-[#B3B3B3] truncate">
+                <Music2 className="w-5 h-5 text-[var(--text-muted)] shrink-0" />
+                <p className="text-sm text-[var(--text-secondary)] truncate">
                   No local tracks matching &ldquo;{trimmedQuery}&rdquo;
                 </p>
               </div>
@@ -620,7 +620,7 @@ export const SearchPage: React.FC = () => {
                   type="button"
                   disabled={fetchingMeta}
                   onClick={(e) => void handleFetchMetadata(e)}
-                  className="text-xs font-semibold text-[#1DB954] hover:text-[#1ED760] whitespace-nowrap shrink-0"
+                  className="text-xs font-semibold text-[var(--accent)] hover:text-[var(--accent-hover)] whitespace-nowrap shrink-0"
                 >
                   Search YouTube →
                 </button>
@@ -639,8 +639,8 @@ export const SearchPage: React.FC = () => {
                     onClick={() => handlePlayLocalTrack(track)}
                     className={`group w-full flex items-center gap-3 rounded-lg p-2.5 border text-left transition-colors ${
                       isCurrent
-                        ? 'bg-[#242424] border-[#1DB954]/50'
-                        : 'bg-[#181818] border-white/[0.05] hover:bg-[#222222] hover:border-white/10'
+                        ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/50'
+                        : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
                     }`}
                   >
                     <div className="relative shrink-0">
@@ -657,7 +657,7 @@ export const SearchPage: React.FC = () => {
                         }`}
                       >
                         {isCurrent && isPlaying ? (
-                          <Pause className="w-4 h-4 text-[#1DB954] fill-current" />
+                          <Pause className="w-4 h-4 text-[var(--accent)] fill-current" />
                         ) : (
                           <Play className="w-4 h-4 text-white fill-current ml-0.5" />
                         )}
@@ -667,12 +667,12 @@ export const SearchPage: React.FC = () => {
                     <div className="min-w-0 flex-1">
                       <p
                         className={`text-sm font-semibold truncate ${
-                          isCurrent ? 'text-[#1DB954]' : 'text-white'
+                          isCurrent ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
                         }`}
                       >
                         {track.title}
                       </p>
-                      <p className="text-xs text-[#B3B3B3] truncate mt-0.5">
+                      <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
                         {track.artist}
                         {track.album ? ` · ${track.album}` : ''}
                       </p>
@@ -681,14 +681,14 @@ export const SearchPage: React.FC = () => {
                     <div className="flex items-center gap-2.5 shrink-0">
                       {isCachedOffline && (
                         <span
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-[#1DB954]"
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--accent)]"
                           title="Available offline"
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
                           <span className="hidden sm:inline">Offline</span>
                         </span>
                       )}
-                      <span className="font-mono text-xs tabular-nums text-[#8A8A8A]">
+                      <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
                         {track.duration > 0 ? formatDuration(track.duration) : '--:--'}
                       </span>
                     </div>
@@ -696,7 +696,7 @@ export const SearchPage: React.FC = () => {
                 );
               })}
               {localMatches.length > 25 && (
-                <p className="text-center text-xs text-[#6A6A6A] pt-1">
+                <p className="text-center text-xs text-[var(--text-muted)] pt-1">
                   Showing top 25 of {localMatches.length} matches in your library.
                 </p>
               )}
@@ -709,7 +709,7 @@ export const SearchPage: React.FC = () => {
       {canDownload && (
         <section className="space-y-4">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="font-display text-sm font-bold uppercase tracking-wider text-[#B3B3B3]">
+            <h2 className="font-display text-sm font-bold uppercase tracking-wider text-[var(--text-secondary)]">
               YouTube (yt-dlp) Results
             </h2>
             {searchResults.length > 0 && (
@@ -721,7 +721,7 @@ export const SearchPage: React.FC = () => {
                   setLastSearchTerm(null);
                   setActiveSearchResultId(null);
                 }}
-                className="text-xs font-medium text-[#B3B3B3] hover:text-white shrink-0"
+                className="text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] shrink-0"
               >
                 Clear results
               </button>
@@ -729,10 +729,10 @@ export const SearchPage: React.FC = () => {
           </div>
 
           {offline ? (
-            <div className="rounded-xl bg-[#181818] border border-white/[0.06] p-6 text-center space-y-2">
-              <WifiOff className="w-6 h-6 text-amber-400 mx-auto" />
-              <p className="text-sm font-medium text-white">Offline Mode</p>
-              <p className="text-xs text-[#B3B3B3]">
+            <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-2">
+              <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
+              <p className="text-sm font-medium text-[var(--text-primary)]">Offline Mode</p>
+              <p className="text-xs text-[var(--text-secondary)]">
                 You can search and play your cached tracks above. Reconnect to search or download
                 from YouTube.
               </p>
@@ -741,24 +741,24 @@ export const SearchPage: React.FC = () => {
             <>
               {/* Empty state before any YouTube search or pasted URL */}
               {searchResults.length === 0 && previewItems.length === 0 && !fetchingMeta && (
-                <div className="rounded-xl bg-[#181818] border border-white/[0.06] px-5 py-7 text-center space-y-1.5">
-                  <p className="text-sm font-medium text-white">
+                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-5 py-7 text-center space-y-1.5">
+                  <p className="text-sm font-medium text-[var(--text-primary)]">
                     {trimmedQuery
                       ? `Press Enter or tap "${isUrlInput ? 'Fetch YouTube URL' : 'Search YouTube'}"`
                       : 'Find tracks in your library or on YouTube'}
                   </p>
-                  <p className="text-xs text-[#8A8A8A]">
+                  <p className="text-xs text-[var(--text-muted)]">
                     Preview audio inline and download directly into{' '}
-                    <code className="font-mono text-[#B3B3B3]">{destinationLabel}</code> as{' '}
-                    <code className="font-mono text-[#B3B3B3]">.{defaultFormat}</code>.
+                    <code className="font-mono text-[var(--text-secondary)]">{destinationLabel}</code> as{' '}
+                    <code className="font-mono text-[var(--text-secondary)]">.{defaultFormat}</code>.
                   </p>
                 </div>
               )}
 
               {/* Loading skeleton state */}
               {fetchingMeta && (
-                <div className="rounded-xl bg-[#181818] border border-white/[0.06] p-8 flex items-center justify-center gap-3 text-sm text-[#B3B3B3]">
-                  <Loader2 className="w-5 h-5 animate-spin text-[#1DB954]" />
+                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 flex items-center justify-center gap-3 text-sm text-[var(--text-secondary)]">
+                  <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
                   <span>
                     {isUrlInput
                       ? 'Reading YouTube metadata...'
@@ -771,10 +771,10 @@ export const SearchPage: React.FC = () => {
               {searchResults.length > 0 && (
                 <div className="space-y-2">
                   {lastSearchTerm && (
-                    <p className="text-xs text-[#8A8A8A]">
+                    <p className="text-xs text-[var(--text-muted)]">
                       Results for &ldquo;{lastSearchTerm}&rdquo; · Tap a track to edit tags, or{' '}
-                      <span className="text-[#B3B3B3] font-semibold">+</span> for one-tap{' '}
-                      <code className="font-mono text-[#B3B3B3]">.{defaultFormat}</code> download.
+                      <span className="text-[var(--text-secondary)] font-semibold">+</span> for one-tap{' '}
+                      <code className="font-mono text-[var(--text-secondary)]">.{defaultFormat}</code> download.
                     </p>
                   )}
 
@@ -810,8 +810,8 @@ export const SearchPage: React.FC = () => {
                           }}
                           className={`group rounded-lg p-2.5 border transition-colors cursor-pointer space-y-2 ${
                             isSelected
-                              ? 'bg-[#262626] border-[#1DB954]/60'
-                              : 'bg-[#181818] border-white/[0.06] hover:bg-[#222222] hover:border-white/15'
+                              ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
+                              : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
                           }`}
                         >
                           <div className="flex items-center gap-3">
@@ -826,22 +826,24 @@ export const SearchPage: React.FC = () => {
                               <div className="flex items-center gap-2">
                                 <p
                                   className={`text-sm font-semibold truncate ${
-                                    isSelected ? 'text-[#1DB954]' : 'text-white'
+                                    isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
                                   }`}
                                 >
                                   {item.title}
                                 </p>
                                 {item.duplicateTrack && (
-                                  <span className="text-[10px] font-semibold text-amber-300 border border-amber-400/35 bg-amber-500/10 rounded px-1.5 py-0.5 leading-none shrink-0">
+                                  <span className="text-[10px] font-semibold text-[var(--warn-text)] border border-[var(--warn-border)] bg-[var(--warn-bg)] rounded px-1.5 py-0.5 leading-none shrink-0">
                                     In Library
                                   </span>
                                 )}
                               </div>
-                              <p className="text-xs text-[#B3B3B3] truncate mt-0.5">{subLine}</p>
+                              <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
+                                {subLine}
+                              </p>
                             </div>
 
                             <div className="flex items-center gap-2 shrink-0">
-                              <span className="hidden sm:inline font-mono text-xs tabular-nums text-[#8A8A8A] w-11 text-right">
+                              <span className="hidden sm:inline font-mono text-xs tabular-nums text-[var(--text-muted)] w-11 text-right">
                                 {item.duration > 0 ? formatDuration(item.duration) : '--:--'}
                               </span>
 
@@ -860,8 +862,8 @@ export const SearchPage: React.FC = () => {
                                 }
                                 className={`flex h-9 w-9 items-center justify-center rounded-full border transition-all ${
                                   previewingId === item.id || previewLoadingId === item.id
-                                    ? 'bg-[#1DB954] border-[#1DB954] text-black'
-                                    : 'bg-[#121212] border-white/15 text-white hover:border-[#1DB954] hover:text-[#1DB954]'
+                                    ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
+                                    : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
                                 }`}
                               >
                                 {previewLoadingId === item.id ? (
@@ -883,7 +885,7 @@ export const SearchPage: React.FC = () => {
                                   }}
                                   title="Play downloaded track"
                                   aria-label={`Play ${item.title}`}
-                                  className="flex h-9 px-3 items-center justify-center gap-1 rounded-full bg-[#1DB954] text-xs font-bold text-black hover:bg-[#1ED760]"
+                                  className="flex h-9 px-3 items-center justify-center gap-1 rounded-full bg-[var(--accent)] text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                                 >
                                   <Check className="w-3.5 h-3.5 stroke-[2.5]" />
                                   <span className="hidden sm:inline">Play</span>
@@ -897,8 +899,8 @@ export const SearchPage: React.FC = () => {
                                   aria-label={`Download ${item.title}`}
                                   className={`flex h-9 w-9 items-center justify-center rounded-full border transition-all ${
                                     isQuickQueued
-                                      ? 'bg-[#1DB954]/20 border-[#1DB954] text-[#1DB954]'
-                                      : 'bg-[#121212] border-white/15 text-white hover:bg-[#1DB954] hover:border-[#1DB954] hover:text-black'
+                                      ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
+                                      : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:bg-[var(--accent)] hover:border-[var(--accent)] hover:text-[var(--accent-contrast)]'
                                   }`}
                                 >
                                   {isQuickQueueing || isJobActive ? (
@@ -916,13 +918,13 @@ export const SearchPage: React.FC = () => {
                           {/* Inline live progress bar for this track while downloading */}
                           {matchingJob && isJobActive && (
                             <div className="space-y-1 pt-0.5">
-                              <div className="h-1 w-full overflow-hidden rounded-full bg-[#2A2A2A]">
+                              <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--slider-track)]">
                                 <div
-                                  className="h-full bg-[#1DB954] transition-[width] duration-200"
+                                  className="h-full bg-[var(--accent)] transition-[width] duration-200"
                                   style={{width: `${Math.max(matchingJob.progress, 5)}%`}}
                                 />
                               </div>
-                              <div className="flex items-center justify-between text-[11px] font-mono text-[#B3B3B3] tabular-nums">
+                              <div className="flex items-center justify-between text-[11px] font-mono text-[var(--text-secondary)] tabular-nums">
                                 <span className="truncate">{matchingJob.stage}</span>
                                 <span>{Math.round(matchingJob.progress)}%</span>
                               </div>
@@ -939,20 +941,20 @@ export const SearchPage: React.FC = () => {
               {previewItems.length > 0 && (
                 <div
                   ref={metadataEditorRef}
-                  className="rounded-xl bg-[#181818] border border-white/10 p-4 sm:p-5 space-y-4"
+                  className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-4 sm:p-5 space-y-4"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h3 className="text-sm font-bold text-white">
+                      <h3 className="text-sm font-bold text-[var(--text-primary)]">
                         {playlistTitle
                           ? `Playlist: ${playlistTitle}`
                           : activeSearchResultId
                             ? 'Edit Metadata Before Download'
                             : 'YouTube Metadata Preview'}
                       </h3>
-                      <p className="text-xs text-[#8A8A8A]">
+                      <p className="text-xs text-[var(--text-muted)]">
                         Saves to{' '}
-                        <code className="font-mono text-[#B3B3B3]">
+                        <code className="font-mono text-[var(--text-secondary)]">
                           {destinationLabel}/&lt;Artist&gt;/&lt;Album&gt;/&lt;Title&gt;.
                           {isSingleEditor ? previewItems[0].format : defaultFormat}
                         </code>
@@ -967,7 +969,7 @@ export const SearchPage: React.FC = () => {
                           setIsPlaylistPreview(false);
                           setPlaylistTitle(null);
                         }}
-                        className="rounded-full border border-white/15 px-3.5 py-2 text-xs font-semibold text-[#B3B3B3] hover:text-white hover:border-white/30 transition-colors"
+                        className="rounded-full border border-[var(--border-strong)] px-3.5 py-2 text-xs font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                       >
                         Dismiss
                       </button>
@@ -975,7 +977,7 @@ export const SearchPage: React.FC = () => {
                         type="button"
                         disabled={enqueueing || selectedCount === 0}
                         onClick={handleStartDownloads}
-                        className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2 text-sm font-bold text-black hover:bg-[#1ED760] disabled:opacity-50 transition-colors whitespace-nowrap"
+                        className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors whitespace-nowrap"
                       >
                         {enqueueing ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -997,8 +999,8 @@ export const SearchPage: React.FC = () => {
                         key={item.id}
                         className={`rounded-lg p-3.5 border transition-colors ${
                           item.selected
-                            ? 'bg-[#121212] border-[#1DB954]/40'
-                            : 'bg-[#121212]/60 border-white/[0.06] opacity-75'
+                            ? 'bg-[var(--bg-primary)] border-[var(--accent)]/40'
+                            : 'bg-[var(--bg-primary)]/60 border-[var(--border-subtle)] opacity-75'
                         }`}
                       >
                         <div className="flex flex-col md:flex-row gap-4">
@@ -1010,7 +1012,7 @@ export const SearchPage: React.FC = () => {
                                 onChange={(e) =>
                                   updatePreviewItem(item.id, {selected: e.target.checked})
                                 }
-                                className="mt-1 h-4 w-4 accent-[#1DB954] cursor-pointer"
+                                className="mt-1 h-4 w-4 accent-[var(--accent)] cursor-pointer"
                                 aria-label={`Select ${item.title}`}
                               />
                             )}
@@ -1032,7 +1034,7 @@ export const SearchPage: React.FC = () => {
                                     ? `Stop previewing ${item.title}`
                                     : `Preview ${item.title}`
                                 }
-                                className="absolute bottom-1 right-1 flex h-7 w-7 items-center justify-center rounded-full bg-black/75 text-white hover:bg-[#1DB954] hover:text-black transition-colors"
+                                className="absolute bottom-1 right-1 flex h-7 w-7 items-center justify-center rounded-full bg-black/75 text-white hover:bg-[var(--accent)] hover:text-[var(--accent-contrast)] transition-colors"
                               >
                                 {previewLoadingId === item.id ? (
                                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1047,8 +1049,8 @@ export const SearchPage: React.FC = () => {
 
                           <div className="flex-1 space-y-3 min-w-0">
                             {item.duplicateTrack && (
-                              <div className="flex items-center gap-2 rounded bg-amber-500/15 border border-amber-500/30 px-3 py-1.5 text-xs text-amber-200">
-                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <div className="flex items-center gap-2 rounded bg-[var(--warn-bg)] border border-[var(--warn-border)] px-3 py-1.5 text-xs text-[var(--warn-text)]">
+                                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                                 <span className="truncate">
                                   Already in library:{' '}
                                   <strong>
@@ -1060,7 +1062,7 @@ export const SearchPage: React.FC = () => {
 
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                               <div>
-                                <label className="block text-[11px] font-medium text-[#B3B3B3] mb-1">
+                                <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
                                   Title
                                 </label>
                                 <input
@@ -1069,11 +1071,11 @@ export const SearchPage: React.FC = () => {
                                   onChange={(e) =>
                                     updatePreviewItem(item.id, {title: e.target.value})
                                   }
-                                  className="w-full rounded bg-[#181818] border border-white/10 px-2.5 py-1.5 text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                                  className="w-full rounded bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2.5 py-1.5 text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] font-medium text-[#B3B3B3] mb-1">
+                                <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
                                   Artist
                                 </label>
                                 <input
@@ -1082,11 +1084,11 @@ export const SearchPage: React.FC = () => {
                                   onChange={(e) =>
                                     updatePreviewItem(item.id, {artist: e.target.value})
                                   }
-                                  className="w-full rounded bg-[#181818] border border-white/10 px-2.5 py-1.5 text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                                  className="w-full rounded bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2.5 py-1.5 text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] font-medium text-[#B3B3B3] mb-1">
+                                <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
                                   Album
                                 </label>
                                 <input
@@ -1095,11 +1097,11 @@ export const SearchPage: React.FC = () => {
                                   onChange={(e) =>
                                     updatePreviewItem(item.id, {album: e.target.value})
                                   }
-                                  className="w-full rounded bg-[#181818] border border-white/10 px-2.5 py-1.5 text-sm text-white focus:border-[#1DB954] focus:outline-none"
+                                  className="w-full rounded bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2.5 py-1.5 text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[11px] font-medium text-[#B3B3B3] mb-1">
+                                <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
                                   Format & Length
                                 </label>
                                 <div className="flex items-center gap-2">
@@ -1110,12 +1112,12 @@ export const SearchPage: React.FC = () => {
                                         format: e.target.value === 'opus' ? 'opus' : 'm4a',
                                       })
                                     }
-                                    className="flex-1 rounded bg-[#181818] border border-white/10 px-2.5 py-1.5 text-sm font-mono text-white focus:border-[#1DB954] focus:outline-none"
+                                    className="flex-1 rounded bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2.5 py-1.5 text-sm font-mono text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
                                   >
                                     <option value="m4a">m4a (AAC)</option>
                                     <option value="opus">opus</option>
                                   </select>
-                                  <span className="font-mono text-xs tabular-nums text-[#6A6A6A]">
+                                  <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
                                     {formatDuration(item.duration)}
                                   </span>
                                 </div>
@@ -1133,10 +1135,10 @@ export const SearchPage: React.FC = () => {
               {jobs.length > 0 && (
                 <div className="space-y-3 pt-2">
                   <div className="flex items-center justify-between">
-                    <h3 className="font-display text-xs font-bold uppercase tracking-wider text-[#B3B3B3]">
+                    <h3 className="font-display text-xs font-bold uppercase tracking-wider text-[var(--text-secondary)]">
                       Download Progress
                     </h3>
-                    <span className="font-mono text-xs tabular-nums text-[#6A6A6A]">
+                    <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
                       {jobs.length} {jobs.length === 1 ? 'job' : 'jobs'}
                     </span>
                   </div>
@@ -1151,7 +1153,7 @@ export const SearchPage: React.FC = () => {
                       return (
                         <div
                           key={job.id}
-                          className="rounded-lg bg-[#181818] border border-white/[0.06] p-3.5 space-y-2.5"
+                          className="rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-3.5 space-y-2.5"
                         >
                           <div className="flex items-center gap-3">
                             <AlbumArt
@@ -1162,14 +1164,14 @@ export const SearchPage: React.FC = () => {
                             />
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2">
-                                <p className="text-sm font-semibold text-white truncate">
+                                <p className="text-sm font-semibold text-[var(--text-primary)] truncate">
                                   {job.title}
                                 </p>
-                                <span className="font-mono text-[11px] text-[#6A6A6A] shrink-0">
+                                <span className="font-mono text-[11px] text-[var(--text-muted)] shrink-0">
                                   .{job.format}
                                 </span>
                               </div>
-                              <p className="text-xs text-[#B3B3B3] truncate">
+                              <p className="text-xs text-[var(--text-secondary)] truncate">
                                 {job.artist} · {job.album}
                               </p>
                             </div>
@@ -1178,18 +1180,18 @@ export const SearchPage: React.FC = () => {
                               <span
                                 className={`inline-flex items-center gap-1 text-xs font-semibold ${
                                   isComplete
-                                    ? 'text-[#1DB954]'
+                                    ? 'text-[var(--accent)]'
                                     : isError
-                                      ? 'text-red-400'
+                                      ? 'text-[var(--danger-text)]'
                                       : isActive
-                                        ? 'text-white'
-                                        : 'text-[#B3B3B3]'
+                                        ? 'text-[var(--text-primary)]'
+                                        : 'text-[var(--text-secondary)]'
                                 }`}
                               >
                                 {isComplete && <CheckCircle2 className="w-4 h-4" />}
                                 {isError && <XCircle className="w-4 h-4" />}
                                 {isActive && (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1DB954]" />
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
                                 )}
                                 <span className="hidden sm:inline">{job.stage}</span>
                               </span>
@@ -1201,7 +1203,7 @@ export const SearchPage: React.FC = () => {
                                     stopPreview();
                                     void playTrackById(job.track_id!);
                                   }}
-                                  className="inline-flex items-center gap-1 rounded-full bg-[#1DB954] px-3 py-1.5 text-xs font-bold text-black hover:bg-[#1ED760] transition-colors"
+                                  className="inline-flex items-center gap-1 rounded-full bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors"
                                 >
                                   <Play className="w-3.5 h-3.5 fill-current" />
                                   <span>Play</span>
@@ -1214,7 +1216,7 @@ export const SearchPage: React.FC = () => {
                                   onClick={() =>
                                     setExpandedErrorId(expandedErrorId === job.id ? null : job.id)
                                   }
-                                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-red-300 hover:bg-white/5"
+                                  className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--danger-text)] hover:bg-[var(--surface-overlay)]"
                                 >
                                   <span>Log</span>
                                   {expandedErrorId === job.id ? (
@@ -1228,7 +1230,7 @@ export const SearchPage: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={() => void handleDeleteJob(job.id)}
-                                className="p-1.5 rounded text-[#6A6A6A] hover:text-red-400 transition-colors"
+                                className="p-1.5 rounded text-[var(--text-muted)] hover:text-[var(--danger-text)] transition-colors"
                                 aria-label="Remove job"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -1237,24 +1239,24 @@ export const SearchPage: React.FC = () => {
                           </div>
 
                           <div className="space-y-1">
-                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#282828]">
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--slider-track)]">
                               <div
                                 className={`h-full transition-[width] duration-200 ${
-                                  isError ? 'bg-red-500' : 'bg-[#1DB954]'
+                                  isError ? 'bg-red-500' : 'bg-[var(--accent)]'
                                 }`}
                                 style={{
                                   width: `${Math.max(isComplete ? 100 : job.progress, isActive ? 4 : 0)}%`,
                                 }}
                               />
                             </div>
-                            <div className="flex items-center justify-between text-[11px] text-[#8A8A8A] font-mono tabular-nums">
+                            <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] font-mono tabular-nums">
                               <span className="truncate">{job.stage}</span>
                               <span>{Math.round(isComplete ? 100 : job.progress)}%</span>
                             </div>
                           </div>
 
                           {isError && job.error_log && expandedErrorId === job.id && (
-                            <pre className="rounded bg-[#0A0A0A] border border-red-500/20 p-3 text-[11px] font-mono text-red-200/90 overflow-x-auto whitespace-pre-wrap break-all">
+                            <pre className="rounded bg-[var(--bg-primary)] border border-[var(--danger-border)] p-3 text-[11px] font-mono text-[var(--danger-text)] overflow-x-auto whitespace-pre-wrap break-all">
                               {job.error_log}
                             </pre>
                           )}

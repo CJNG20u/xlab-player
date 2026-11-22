@@ -233,13 +233,13 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   return (
     <div className="relative">
       {toast && (
-        <div className="fixed bottom-28 md:bottom-24 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[#1DB954] px-4 py-2 text-sm font-semibold text-black shadow-xl">
+        <div className="fixed bottom-28 md:bottom-24 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl">
           {toast}
         </div>
       )}
 
       {/* Desktop Column Header */}
-      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-4 px-4 py-2 border-b border-white/10 text-xs font-medium text-[#B3B3B3]">
+      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-4 px-4 py-2 border-b border-[var(--border-subtle)] text-xs font-medium text-[var(--text-secondary)]">
         <span className="text-center">{selectionMode ? '' : '#'}</span>
         <span>Title</span>
         <span>Album</span>
@@ -250,7 +250,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
       </div>
 
       {/* Rows */}
-      <div className="divide-y divide-white/[0.03] md:divide-y-0 mt-1">
+      <div className="divide-y divide-[var(--border-subtle)] md:divide-y-0 mt-1">
         {tracks.map((track, idx) => {
           const isActive = currentTrack?.id === track.id;
           const isMenuOpen = menuTrackId === track.id;
@@ -263,10 +263,10 @@ export const TrackTable: React.FC<TrackTableProps> = ({
               key={`${track.id}-${idx}`}
               className={`group relative grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-3 md:gap-4 rounded-md px-3 md:px-4 py-2.5 transition-colors select-none ${
                 isSelected
-                  ? 'bg-[#1DB954]/12 ring-1 ring-[#1DB954]/30'
+                  ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/40'
                   : isActive
-                    ? 'bg-[#282828]/80'
-                    : 'hover:bg-[#282828]'
+                    ? 'bg-[var(--bg-elevated)]/85'
+                    : 'hover:bg-[var(--bg-hover)]'
               } ${selectionMode ? 'cursor-pointer' : ''}`}
               onTouchStart={(e) => handleTouchStart(e, track.id)}
               onTouchMove={handleTouchMove}
@@ -296,8 +296,8 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     }}
                     className={`flex h-5 w-5 items-center justify-center rounded border transition-colors ${
                       isSelected
-                        ? 'bg-[#1DB954] border-[#1DB954] text-black'
-                        : 'border-white/35 bg-transparent hover:border-white'
+                        ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
+                        : 'border-[var(--border-strong)] bg-transparent hover:border-[var(--text-primary)]'
                     }`}
                     aria-label={isSelected ? `Deselect ${track.title}` : `Select ${track.title}`}
                     aria-pressed={isSelected}
@@ -311,17 +311,17 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       if (isActive) togglePlay();
                       else playTrack(track, tracks);
                     }}
-                    className="flex h-8 w-8 items-center justify-center text-[#B3B3B3] hover:text-white"
+                    className="flex h-8 w-8 items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     aria-label={isActive && isPlaying ? 'Pause' : `Play ${track.title}`}
                   >
                     <span
                       className={`font-mono text-sm tabular-nums group-hover:hidden ${
-                        isActive ? 'text-[#1DB954] font-semibold' : ''
+                        isActive ? 'text-[var(--accent)] font-semibold' : ''
                       }`}
                     >
                       {idx + 1}
                     </span>
-                    <span className="hidden group-hover:flex items-center justify-center text-white">
+                    <span className="hidden group-hover:flex items-center justify-center text-[var(--text-primary)]">
                       {isActive && isPlaying ? (
                         <Pause className="w-4 h-4 fill-current" />
                       ) : (
@@ -343,8 +343,8 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     }}
                     className={`md:hidden flex h-6 w-6 shrink-0 items-center justify-center rounded border transition-colors ${
                       isSelected
-                        ? 'bg-[#1DB954] border-[#1DB954] text-black'
-                        : 'border-white/35 bg-transparent'
+                        ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
+                        : 'border-[var(--border-strong)] bg-transparent'
                     }`}
                     aria-label={isSelected ? `Deselect ${track.title}` : `Select ${track.title}`}
                     aria-pressed={isSelected}
@@ -397,12 +397,12 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       playTrack(track, tracks);
                     }}
                     className={`block max-w-full truncate text-left text-sm font-medium ${
-                      isActive ? 'text-[#1DB954]' : 'text-white'
+                      isActive ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
                     }`}
                   >
                     {track.title}
                   </button>
-                  <div className="flex items-center gap-1.5 text-xs text-[#B3B3B3] truncate">
+                  <div className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)] truncate">
                     {onArtistClick && !selectionMode ? (
                       <button
                         type="button"
@@ -410,22 +410,22 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                           e.stopPropagation();
                           onArtistClick(track.artist);
                         }}
-                        className="truncate hover:text-white hover:underline"
+                        className="truncate hover:text-[var(--text-primary)] hover:underline"
                       >
                         {track.artist}
                       </button>
                     ) : (
                       <span className="truncate">{track.artist}</span>
                     )}
-                    <span className="md:hidden text-[#6A6A6A]">·</span>
-                    <span className="md:hidden truncate text-[#6A6A6A]">{track.album}</span>
+                    <span className="md:hidden text-[var(--text-muted)]">·</span>
+                    <span className="md:hidden truncate text-[var(--text-muted)]">{track.album}</span>
                   </div>
                 </div>
               </div>
 
               {/* Album (Desktop) */}
               <div className="hidden md:block min-w-0">
-                <p className="truncate text-sm text-[#B3B3B3]">{track.album}</p>
+                <p className="truncate text-sm text-[var(--text-secondary)]">{track.album}</p>
               </div>
 
               {/* Offline Cache + Like + Duration */}
@@ -440,10 +440,10 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     }}
                     className={`flex h-9 w-9 md:h-8 md:w-8 items-center justify-center rounded-full transition-colors disabled:opacity-40 ${
                       isDownloadingOffline
-                        ? 'text-[#1DB954]'
+                        ? 'text-[var(--accent)]'
                         : isCached
-                          ? 'text-[#1DB954] hover:text-[#1ED760]'
-                          : 'text-[#6A6A6A] md:opacity-0 md:group-hover:opacity-100 hover:text-white'
+                          ? 'text-[var(--accent)] hover:text-[var(--accent-hover)]'
+                          : 'text-[var(--text-muted)] md:opacity-0 md:group-hover:opacity-100 hover:text-[var(--text-primary)]'
                     }`}
                     title={
                       isDownloadingOffline
@@ -480,15 +480,15 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     }}
                     className={`flex h-9 w-9 md:h-8 md:w-8 items-center justify-center rounded-full transition-colors ${
                       track.liked
-                        ? 'text-[#1DB954]'
-                        : 'text-[#6A6A6A] md:opacity-0 md:group-hover:opacity-100 hover:text-white'
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--text-muted)] md:opacity-0 md:group-hover:opacity-100 hover:text-[var(--text-primary)]'
                     }`}
                     aria-label={track.liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
                   >
                     <Heart className={`w-4 h-4 ${track.liked ? 'fill-current' : ''}`} />
                   </button>
                 )}
-                <span className="hidden md:inline font-mono text-xs tabular-nums text-[#B3B3B3] w-11 text-right">
+                <span className="hidden md:inline font-mono text-xs tabular-nums text-[var(--text-secondary)] w-11 text-right">
                   {formatDuration(track.duration)}
                 </span>
 
@@ -501,7 +501,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       setShowPlaylistSubmenu(false);
                       setMenuTrackId(isMenuOpen ? null : track.id);
                     }}
-                    className="md:hidden flex h-9 w-9 items-center justify-center rounded-full text-[#B3B3B3] hover:text-white"
+                    className="md:hidden flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     aria-label="Track options"
                   >
                     <MoreHorizontal className="w-5 h-5" />
@@ -519,7 +519,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       setShowPlaylistSubmenu(false);
                       setMenuTrackId(isMenuOpen ? null : track.id);
                     }}
-                    className="flex h-8 w-8 items-center justify-center rounded-full text-[#B3B3B3] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-white transition-opacity"
+                    className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-[var(--text-primary)] transition-opacity"
                     aria-label="Track options"
                   >
                     <MoreHorizontal className="w-4 h-4" />
@@ -532,7 +532,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                 <div
                   ref={menuRef}
                   onClick={(e) => e.stopPropagation()}
-                  className="absolute right-4 top-12 z-40 w-56 rounded-lg bg-[#282828] border border-white/10 p-1.5 shadow-2xl"
+                  className="absolute right-4 top-12 z-40 w-56 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-strong)] p-1.5 shadow-2xl"
                 >
                   <button
                     type="button"
@@ -541,9 +541,9 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       setMenuTrackId(null);
                       flashToast('Playing next');
                     }}
-                    className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                   >
-                    <Play className="w-4 h-4 text-[#B3B3B3]" />
+                    <Play className="w-4 h-4 text-[var(--text-secondary)]" />
                     Play Next
                   </button>
                   <button
@@ -553,9 +553,9 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       setMenuTrackId(null);
                       flashToast('Added to queue');
                     }}
-                    className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                   >
-                    <ListPlus className="w-4 h-4 text-[#B3B3B3]" />
+                    <ListPlus className="w-4 h-4 text-[var(--text-secondary)]" />
                     Add to Queue
                   </button>
 
@@ -566,14 +566,14 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       setMenuTrackId(null);
                       void handleToggleOfflineTrack(track);
                     }}
-                    className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10 disabled:opacity-40"
+                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-40"
                   >
                     {isDownloadingOffline ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
+                      <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
                     ) : isCached ? (
-                      <CheckCircle2 className="w-4 h-4 text-[#1DB954]" />
+                      <CheckCircle2 className="w-4 h-4 text-[var(--accent)]" />
                     ) : (
-                      <ArrowDownCircle className="w-4 h-4 text-[#B3B3B3]" />
+                      <ArrowDownCircle className="w-4 h-4 text-[var(--text-secondary)]" />
                     )}
                     {isDownloadingOffline
                       ? 'Downloading Offline...'
@@ -584,33 +584,33 @@ export const TrackTable: React.FC<TrackTableProps> = ({
 
                   {!offline && (
                     <>
-                      <div className="my-1 border-t border-white/10" />
+                      <div className="my-1 border-t border-[var(--border-subtle)]" />
 
                       <button
                         type="button"
                         onClick={() => setShowPlaylistSubmenu((s) => !s)}
-                        className="flex w-full items-center justify-between rounded px-3 py-2 text-left text-sm text-white hover:bg-white/10"
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                       >
                         <span className="flex items-center gap-2.5">
-                          <Plus className="w-4 h-4 text-[#B3B3B3]" />
+                          <Plus className="w-4 h-4 text-[var(--text-secondary)]" />
                           Add to Playlist
                         </span>
-                        <span className="text-xs text-[#B3B3B3]">
+                        <span className="text-xs text-[var(--text-secondary)]">
                           {showPlaylistSubmenu ? '▾' : '▸'}
                         </span>
                       </button>
 
                       {showPlaylistSubmenu && (
-                        <div className="mt-1 max-h-40 overflow-y-auto rounded bg-[#181818] p-1 space-y-0.5">
+                        <div className="mt-1 max-h-40 overflow-y-auto rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-1 space-y-0.5">
                           {playlists.length === 0 ? (
-                            <p className="px-2.5 py-1.5 text-xs text-[#6A6A6A]">No playlists yet</p>
+                            <p className="px-2.5 py-1.5 text-xs text-[var(--text-muted)]">No playlists yet</p>
                           ) : (
                             playlists.map((pl) => (
                               <button
                                 key={pl.id}
                                 type="button"
                                 onClick={() => void handleAddToPlaylist(pl.id, track.id, pl.name)}
-                                className="block w-full truncate rounded px-2.5 py-1.5 text-left text-xs text-[#B3B3B3] hover:bg-[#282828] hover:text-white"
+                                className="block w-full truncate rounded px-2.5 py-1.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
                               >
                                 {pl.name}
                               </button>
@@ -623,7 +623,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                         <button
                           type="button"
                           onClick={() => void handleRemoveFromPlaylist(track.id)}
-                          className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-amber-300 hover:bg-white/10"
+                          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--warn-text)] hover:bg-[var(--bg-hover)]"
                         >
                           <Trash2 className="w-4 h-4" />
                           Remove from Playlist
@@ -634,7 +634,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
 
                   {canDeleteTracks && (
                     <>
-                      <div className="my-1 border-t border-white/10" />
+                      <div className="my-1 border-t border-[var(--border-subtle)]" />
                       <button
                         type="button"
                         onClick={() => {
@@ -642,7 +642,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                           setDeleteError(null);
                           setPendingDeleteTrack(track);
                         }}
-                        className="flex w-full items-center gap-2.5 rounded px-3 py-2 text-left text-sm text-red-400 hover:bg-white/10"
+                        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--danger-text)] hover:bg-[var(--bg-hover)]"
                       >
                         <Trash2 className="w-4 h-4" />
                         Delete Permanently

@@ -74,26 +74,26 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-xs">
       <div
-        className="w-full max-w-md rounded-xl bg-[#181818] border border-white/10 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        className="w-full max-w-md rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="batch-add-playlist-title"
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-subtle)]">
           <div>
-            <h2 id="batch-add-playlist-title" className="font-display text-lg font-bold text-white">
+            <h2 id="batch-add-playlist-title" className="font-display text-lg font-bold text-[var(--text-primary)]">
               Add to Playlist
             </h2>
-            <p className="text-xs text-[#B3B3B3] font-mono tabular-nums mt-0.5">
+            <p className="text-xs text-[var(--text-secondary)] font-mono tabular-nums mt-0.5">
               {trackIds.length} {trackIds.length === 1 ? 'track' : 'tracks'} selected
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
             aria-label="Close modal"
           >
             <X className="w-5 h-5" />
@@ -101,8 +101,8 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         </div>
 
         {/* Create new playlist inline */}
-        <form onSubmit={handleCreateAndAdd} className="p-4 border-b border-white/10 bg-[#141414]">
-          <label htmlFor="new-batch-playlist" className="block text-xs font-semibold text-[#B3B3B3] mb-2">
+        <form onSubmit={handleCreateAndAdd} className="p-4 border-b border-[var(--border-subtle)] bg-[var(--bg-primary)]/50">
+          <label htmlFor="new-batch-playlist" className="block text-xs font-semibold text-[var(--text-secondary)] mb-2">
             Create New Playlist with Selection
           </label>
           <div className="flex items-center gap-2">
@@ -113,12 +113,12 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="New playlist name..."
-              className="flex-1 rounded-md bg-[#121212] border border-white/10 px-3 py-2 text-sm text-white placeholder-[#6A6A6A] focus:border-[#1DB954] focus:outline-none"
+              className="flex-1 rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
             />
             <button
               type="submit"
               disabled={busyId !== null || !newName.trim()}
-              className="inline-flex items-center gap-1.5 rounded-full bg-[#1DB954] px-4 py-2 text-xs font-bold text-black hover:bg-[#1ED760] disabled:opacity-40 whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-4 py-2 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-40 whitespace-nowrap"
             >
               {busyId === 'new' ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -133,7 +133,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         {/* Existing playlists */}
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
           {playlists.length === 0 ? (
-            <div className="py-8 text-center text-sm text-[#6A6A6A]">
+            <div className="py-8 text-center text-sm text-[var(--text-muted)]">
               <ListMusic className="w-7 h-7 mx-auto mb-2 opacity-60" />
               No existing playlists yet. Create one above.
             </div>
@@ -144,7 +144,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 type="button"
                 disabled={busyId !== null}
                 onClick={() => void handlePickExisting(pl)}
-                className="flex w-full items-center gap-3 rounded-lg p-2.5 text-left hover:bg-[#282828] disabled:opacity-50 transition-colors"
+                className="flex w-full items-center gap-3 rounded-lg p-2.5 text-left hover:bg-[var(--bg-hover)] disabled:opacity-50 transition-colors"
               >
                 <PlaylistMosaic
                   covers={pl.covers || []}
@@ -153,19 +153,19 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <p className="text-sm font-semibold text-white truncate">{pl.name}</p>
+                    <p className="text-sm font-semibold text-[var(--text-primary)] truncate">{pl.name}</p>
                     {pl.source === 'm3u' && (
-                      <span className="font-mono text-[10px] font-semibold text-[#1DB954] border border-[#1DB954]/35 rounded px-1 py-0.5 leading-none shrink-0">
+                      <span className="font-mono text-[10px] font-semibold text-[var(--accent)] border border-[var(--accent)]/35 rounded px-1 py-0.5 leading-none shrink-0">
                         M3U
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-[#B3B3B3] font-mono tabular-nums">
+                  <p className="text-xs text-[var(--text-secondary)] font-mono tabular-nums">
                     {pl.track_count} {pl.track_count === 1 ? 'track' : 'tracks'}
                   </p>
                 </div>
                 {busyId === pl.id && (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#1DB954] shrink-0" />
+                  <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)] shrink-0" />
                 )}
               </button>
             ))
@@ -173,7 +173,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         </div>
 
         {error && (
-          <div className="px-5 py-3 border-t border-white/10 text-xs text-red-400 bg-red-500/10">
+          <div className="px-5 py-3 border-t border-[var(--border-subtle)] text-xs text-[var(--danger-text)] bg-[var(--danger-bg)]">
             {error}
           </div>
         )}

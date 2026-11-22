@@ -43,14 +43,14 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs">
-      <div className="w-full max-w-md rounded-xl bg-[#181818] border border-white/10 p-6 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-xs">
+      <div className="w-full max-w-md rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 shadow-2xl">
         <div className="flex items-center justify-between mb-5">
-          <h2 className="font-display text-xl font-bold text-white">Create Playlist</h2>
+          <h2 className="font-display text-xl font-bold text-[var(--text-primary)]">Create Playlist</h2>
           <button
             type="button"
             onClick={onClose}
-            className="flex h-9 w-9 items-center justify-center rounded-full text-[#B3B3B3] hover:bg-[#282828] hover:text-white transition-colors"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
             aria-label="Close modal"
           >
             <X className="w-5 h-5" />
@@ -59,7 +59,7 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label htmlFor="playlist-name" className="block text-sm font-medium text-[#B3B3B3] mb-1.5">
+            <label htmlFor="playlist-name" className="block text-sm font-medium text-[var(--text-secondary)] mb-1.5">
               Playlist Name
             </label>
             <input
@@ -71,12 +71,12 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Late Night Synth"
-              className="w-full rounded-md bg-[#282828] px-3.5 py-2.5 text-sm text-white placeholder-[#6A6A6A] border border-transparent focus:border-[#1DB954] focus:outline-none"
+              className="w-full rounded-md bg-[var(--bg-input)] px-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none"
             />
           </div>
 
           <div>
-            <label htmlFor="playlist-desc" className="block text-sm font-medium text-[#B3B3B3] mb-1.5">
+            <label htmlFor="playlist-desc" className="block text-sm font-medium text-[var(--text-secondary)] mb-1.5">
               Description (optional)
             </label>
             <textarea
@@ -86,24 +86,24 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Add an optional description for this collection"
-              className="w-full rounded-md bg-[#282828] px-3.5 py-2.5 text-sm text-white placeholder-[#6A6A6A] border border-transparent focus:border-[#1DB954] focus:outline-none resize-none"
+              className="w-full rounded-md bg-[var(--bg-input)] px-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none resize-none"
             />
           </div>
 
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-[var(--danger-text)]">{error}</p>}
 
           <div className="flex items-center justify-end gap-3 pt-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm font-medium text-[#B3B3B3] hover:text-white transition-colors"
+              className="px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={submitting || !name.trim()}
-              className="rounded-full bg-[#1DB954] px-6 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760] disabled:opacity-50 transition-colors"
+              className="rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors"
             >
               {submitting ? 'Creating...' : 'Create'}
             </button>
