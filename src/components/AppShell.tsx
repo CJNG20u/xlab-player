@@ -27,6 +27,7 @@ import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
+import {DEFAULT_APP_THEME_COLOR, setDocumentThemeColor} from '../lib/themeColor';
 import type {Playlist} from '../types';
 import {getOfflinePlaylists, subscribeOfflineStore} from '../utils/offlineStore';
 import {AlbumArt} from './AlbumArt';
@@ -109,6 +110,13 @@ export const AppShell: React.FC = () => {
   const volPct = (isMuted ? 0 : volume) * 100;
   const isNowPlayingPage = location.pathname === '/now-playing';
   const stageTint = currentTrack?.dominant_color || '#1c3b29';
+
+  // Keep mobile status bar synced to the main app header background (#121212) whenever not in Now Playing
+  useEffect(() => {
+    if (!isNowPlayingPage) {
+      setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
+    }
+  }, [isNowPlayingPage]);
 
   const navItems = [
     {to: '/', label: 'Library', icon: Library, end: true},

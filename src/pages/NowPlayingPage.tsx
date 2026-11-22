@@ -21,6 +21,11 @@ import {AlbumArt} from '../components/AlbumArt';
 import {usePlayer} from '../context/PlayerContext';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration, getCoverUrl, parseLrc} from '../lib/api';
+import {
+  computeNowPlayingTopHex,
+  DEFAULT_APP_THEME_COLOR,
+  setDocumentThemeColor,
+} from '../lib/themeColor';
 import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineStore';
 
 export const NowPlayingPage: React.FC = () => {
@@ -64,6 +69,22 @@ export const NowPlayingPage: React.FC = () => {
 
   const trackId = currentTrack?.id ?? null;
   const coverFile = currentTrack?.cover_file ?? null;
+  const dominantTopHexColor = useMemo(
+    () =>
+      currentTrack
+        ? computeNowPlayingTopHex(currentTrack.dominant_color)
+        : DEFAULT_APP_THEME_COLOR,
+    [currentTrack]
+  );
+
+  // Dynamically sync mobile status bar (`meta[name="theme-color"]`) with the Now Playing top gradient color,
+  // resetting back to #121212 when Now Playing is minimized or closed.
+  useEffect(() => {
+    setDocumentThemeColor(dominantTopHexColor);
+    return () => {
+      setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
+    };
+  }, [dominantTopHexColor]);
 
   useEffect(() => {
     setOfflineCoverBackdrop(null);
@@ -127,7 +148,7 @@ export const NowPlayingPage: React.FC = () => {
 
   if (!currentTrack) {
     return (
-      <div className="flex h-full min-h-[70vh] flex-col items-center justify-center px-6 text-center">
+      <div className="flex h-full min-h-[70vh] flex-col items-center justify-center px-6 pt-safe text-center">
         <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-[#181818] mb-5">
           <Music2 className="w-9 h-9 text-[#6A6A6A]" />
         </div>
@@ -153,26 +174,26 @@ export const NowPlayingPage: React.FC = () => {
 
   return (
     <div
-      className="relative min-h-full w-full overflow-hidden flex flex-col"
+      className="relative min-h-full w-full overflow-hidden flex flex-col pt-safe"
       style={{
-        background: `linear-gradient(180deg, ${currentTrack.dominant_color} 0%, #121212 72%)`,
+        background: `linear-gradient(180deg, ${dominantTopHexColor} 0%, #121212 72%)`,
       }}
     >
       {/* Blurred album cover backdrop */}
       {coverUrl && (
         <div
-          className="pointer-events-none absolute inset-0 opacity-25 blur-3xl scale-110 bg-cover bg-center"
+          className="pointer-events-none absolute inset-0 opacity-20 blur-3xl scale-110 bg-cover bg-center"
           style={{backgroundImage: `url("${coverUrl}")`}}
           aria-hidden="true"
         />
       )}
       <div
-        className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/20 via-[#121212]/65 to-[#121212]"
+        className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-[#121212]/60 to-[#121212]"
         aria-hidden="true"
       />
 
-      {/* Top Bar with iOS safe-area-inset-top */}
-      <header className="relative z-10 pt-safe">
+      {/* Top Bar (safe-area-inset-top is handled by the full-screen container) */}
+      <header className="relative z-10">
         <div className="flex items-center justify-between px-5 sm:px-8 pt-4 pb-3">
           <button
             type="button"
