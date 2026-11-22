@@ -120,7 +120,6 @@ export const AppShell: React.FC = () => {
   // Keep mobile status bar synced to #121212 on standard views (Now Playing & Home sync dynamically)
   useEffect(() => {
     if (!isNowPlayingPage && !isHomePage) {
-      document.documentElement.style.removeProperty('--home-hero-top');
       setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
     }
   }, [isNowPlayingPage, isHomePage]);
@@ -249,47 +248,6 @@ export const AppShell: React.FC = () => {
 
         {/* Main Scrollable Viewport */}
         <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[#121212] relative">
-          {/* Mobile Top Bar with iOS notch / Dynamic Island safe-area-inset-top */}
-          {!isNowPlayingPage && (
-            <header
-              className={`md:hidden shrink-0 pt-safe backdrop-blur-md z-20 transition-colors duration-300 ${
-                isHomePage
-                  ? 'border-b border-white/[0.04]'
-                  : 'bg-[#121212]/95 border-b border-white/[0.06]'
-              }`}
-              style={
-                isHomePage
-                  ? {backgroundColor: 'var(--home-hero-top, #121212)'}
-                  : undefined
-              }
-            >
-              <div className="flex h-[52px] items-center justify-between px-4">
-                <button type="button" onClick={() => navigate('/')}>
-                  <BrandLogo size="sm" />
-                </button>
-                <div className="flex items-center gap-2">
-                  {isInstallable && !isInstalled && (
-                    <button
-                      type="button"
-                      onClick={() => void install()}
-                      className="rounded-full bg-[#1DB954] px-3 py-1.5 text-xs font-bold text-black whitespace-nowrap"
-                    >
-                      Install
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void logout()}
-                    className="flex h-9 w-9 items-center justify-center rounded-full text-[#B3B3B3] hover:text-white"
-                    aria-label="Sign out"
-                  >
-                    <LogOut className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            </header>
-          )}
-
           {/* Dynamic Subtle Top-to-Bottom Gradient Backdrop */}
           <main
             className="flex-1 overflow-y-auto relative"

@@ -8,6 +8,7 @@ import {
   HardDriveDownload,
   KeyRound,
   Loader2,
+  LogOut,
   RefreshCw,
   Save,
   Shield,
@@ -38,7 +39,7 @@ import {
 } from '../utils/offlineStore';
 
 export const SettingsPage: React.FC = () => {
-  const {user, isOfflineMode} = useAuth();
+  const {user, isOfflineMode, logout} = useAuth();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
   const {bumpLibraryRefresh} = usePlayer();
@@ -434,7 +435,10 @@ export const SettingsPage: React.FC = () => {
       : null;
 
   return (
-    <div className="px-4 sm:px-6 lg:px-8 pt-6 max-w-5xl mx-auto space-y-8">
+    <div
+      className="px-4 sm:px-6 lg:px-8 max-w-5xl mx-auto space-y-8"
+      style={{paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))'}}
+    >
       <div>
         <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
           Settings
@@ -1425,6 +1429,27 @@ export const SettingsPage: React.FC = () => {
           </form>
         </section>
       )}
+
+      {/* Account Session & Sign Out */}
+      <section className="rounded-xl bg-[#181818] border border-white/[0.08] p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="min-w-0">
+            <h2 className="font-display text-base font-bold text-white">Account</h2>
+            <p className="mt-0.5 text-xs text-[#B3B3B3] truncate">
+              Signed in as <span className="font-semibold text-white">{user?.username}</span>{' '}
+              <span className="capitalize text-[#8A8A8A]">({user?.role})</span>
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void logout()}
+            className="inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-full border border-red-500/35 bg-red-500/10 px-6 py-2.5 text-sm font-semibold text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </section>
 
       {/* Directory Browser Modal */}
       <DirectoryBrowserModal

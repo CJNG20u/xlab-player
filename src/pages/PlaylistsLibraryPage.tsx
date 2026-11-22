@@ -34,6 +34,7 @@ import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
+import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration, getCoverUrl} from '../lib/api';
 import {
   computeNowPlayingTopHex,
@@ -116,9 +117,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
   } = useOfflineLibrary();
   const {
     currentTrack,
+    queue,
     shuffle,
     toggleShuffle,
     playTrack,
+    nextTrack,
+    prevTrack,
     addManyToQueue,
     handleDeletedTracks,
     libraryRefreshVersion,
@@ -145,7 +149,6 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [searchOpen, setSearchOpen] = useState(false);
   const [heroSampledColor, setHeroSampledColor] = useState<string | null>(null);
   const [heroOfflineCoverUrl, setHeroOfflineCoverUrl] = useState<string | null>(null);
-  const heroSwipeStartXRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -603,15 +606,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const isHomeView = !playlistIdParam && activeTab !== 'playlists';
   const activeHomeTab: HomeViewTab = activeTab === 'playlists' ? 'all' : activeTab;
 
-  // Determine active hero track (prefer active/playing track if part of current view, else first covered track)
+  // Determine active hero track (prefer active/playing track so swipes immediately update cover & gradient)
   const heroTrack = useMemo(() => {
     if (!isHomeView) return null;
-    if (
-      currentTrack?.cover_file &&
-      (!artistFilter && !searchQuery
-        ? activeHomeTab === 'all' || filteredTracks.some((t) => t.id === currentTrack.id)
-        : filteredTracks.some((t) => t.id === currentTrack.id))
-    ) {
+    if (currentTrack) {
       return currentTrack;
     }
     return (
@@ -619,7 +617,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       tracks.find((t) => Boolean(t.cover_file)) ??
       null
     );
-  }, [activeHomeTab, artistFilter, currentTrack, filteredTracks, isHomeView, searchQuery, tracks]);
+  }, [currentTrack, filteredTracks, isHomeView, tracks]);
 
   // Next view for the right-edge peek card & horizontal swipe cycling
   const activePillIndex = homeFilterPills.findIndex((p) => p.id === activeHomeTab);
@@ -716,16 +714,41 @@ export const PlaylistsLibraryPage: React.FC = () => {
     );
   }, [heroAlbumColorKey, heroSampledColor, heroTrack, isHomeView, viewFallbackColor]);
 
-  // Dynamically sync mobile PWA top status bar & mobile header with the Home hero gradient top
+  // Dynamically sync mobile PWA top status bar with the top of the Home hero gradient
   useEffect(() => {
     if (!isHomeView) return;
-    document.documentElement.style.setProperty('--home-hero-top', heroTopHexColor);
     setDocumentThemeColor(heroTopHexColor);
     return () => {
-      document.documentElement.style.removeProperty('--home-hero-top');
       setDocumentThemeColor(DEFAULT_APP_THEME_COLOR);
     };
   }, [heroTopHexColor, isHomeView]);
+
+  // Smooth 1:1 horizontal swipe on the Home hero square cover to skip next/previous tracks
+  const handleHeroSwipeNext = useCallback(() => {
+    if (queue.length > 0 && currentTrack) {
+      nextTrack();
+    } else if (filteredTracks.length > 0) {
+      playTrack(filteredTracks[0], filteredTracks);
+    }
+  }, [currentTrack, filteredTracks, nextTrack, playTrack, queue.length]);
+
+  const handleHeroSwipePrev = useCallback(() => {
+    if (queue.length > 0 && currentTrack) {
+      prevTrack();
+    } else if (filteredTracks.length > 0) {
+      playTrack(filteredTracks[filteredTracks.length - 1], filteredTracks);
+    }
+  }, [currentTrack, filteredTracks, playTrack, prevTrack, queue.length]);
+
+  const heroCoverSwipe = useSwipeTrackGesture({
+    onSwipeNext: handleHeroSwipeNext,
+    onSwipePrev: handleHeroSwipePrev,
+    threshold: 75,
+    deadZone: 10,
+    velocityThreshold: 0.55,
+    rotationFactor: 0.03,
+    slideDistance: 280,
+  });
 
   const handleShufflePlay = useCallback(() => {
     if (filteredTracks.length === 0) {
@@ -753,8 +776,9 @@ export const PlaylistsLibraryPage: React.FC = () => {
       {playlistIdParam ? (
         // --- PLAYLIST DETAIL VIEW (/playlists/:id) ---
         <div
-          className="px-4 sm:px-6 lg:px-8 pt-6 max-w-7xl mx-auto pb-36 md:pb-12"
+          className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto pb-36 md:pb-12"
           style={{
+            paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))',
             paddingBottom: showFloatingBatchBar
               ? 'calc(11.5rem + env(safe-area-inset-bottom, 0px))'
               : 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
@@ -1041,10 +1065,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
               : 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
           }}
         >
-          {/* SPOTIFY-STYLE DYNAMIC GRADIENT HERO HEADER (Home View Only) */}
+          {/* SPOTIFY-STYLE DYNAMIC GRADIENT HERO HEADER (Home View Only — extends cleanly behind status bar) */}
           {isHomeView ? (
             <div
-              className="relative transition-colors duration-500"
+              className="relative pt-safe transition-colors duration-500"
               style={{
                 background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, #121212 100%)`,
               }}
@@ -1112,38 +1136,26 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Centered 220x220 Hero Cover Showcase + Right-Edge Peek Card */}
-                <div
-                  className="relative flex items-center justify-center pt-1 pb-2 overflow-hidden -mx-4 px-4 sm:mx-0 sm:px-0 select-none"
-                  style={{touchAction: 'pan-y'}}
-                  onPointerDown={(e) => {
-                    heroSwipeStartXRef.current = e.clientX;
-                  }}
-                  onPointerUp={(e) => {
-                    if (heroSwipeStartXRef.current === null) return;
-                    const dx = e.clientX - heroSwipeStartXRef.current;
-                    heroSwipeStartXRef.current = null;
-                    if (Math.abs(dx) >= 48) {
-                      cycleHomeView(dx < 0 ? 1 : -1);
-                    }
-                  }}
-                  onPointerCancel={() => {
-                    heroSwipeStartXRef.current = null;
-                  }}
-                >
+                {/* Centered 220x220 Hero Cover Showcase (1:1 Swipe Left/Right to Skip Track) + Right-Edge Peek Card */}
+                <div className="relative flex items-center justify-center pt-1 pb-2 overflow-hidden -mx-4 px-4 sm:mx-0 sm:px-0 select-none">
                   {/* Primary Centered 220x220 Rounded-Square Hero Cover */}
-                  <div className="relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.55)] ring-1 ring-white/10">
+                  <div
+                    {...heroCoverSwipe.handlers}
+                    style={heroCoverSwipe.style}
+                    aria-label="Swipe left for next track or right for previous track"
+                    className="relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.55)] ring-1 ring-white/10 select-none cursor-grab active:cursor-grabbing"
+                  >
                     {heroTrack?.cover_file ? (
                       <AlbumArt
                         coverFile={heroTrack.cover_file}
-                        alt={activeHomeTitle}
+                        alt={heroTrack.title || activeHomeTitle}
                         color={heroSampledColor || heroTrack.dominant_color}
-                        className="w-full h-full rounded-2xl pointer-events-none"
+                        className="w-full h-full rounded-2xl pointer-events-none select-none"
                         iconSize={64}
                       />
                     ) : (
                       <div
-                        className={`flex w-full h-full flex-col items-center justify-center bg-gradient-to-br ${HOME_VIEW_META[activeHomeTab].gradient}`}
+                        className={`flex w-full h-full flex-col items-center justify-center bg-gradient-to-br ${HOME_VIEW_META[activeHomeTab].gradient} pointer-events-none`}
                       >
                         {activeHomeTab === 'liked' ? (
                           <Heart className="w-16 h-16 text-white fill-white drop-shadow-lg" />
@@ -1365,7 +1377,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
             </div>
           ) : (
             /* PLAYLISTS TAB HEADER (/playlists) */
-            <div className="px-4 sm:px-6 lg:px-8 pt-5 pb-4 max-w-7xl mx-auto">
+            <div
+              className="px-4 sm:px-6 lg:px-8 pb-4 max-w-7xl mx-auto"
+              style={{paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))'}}
+            >
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white truncate">

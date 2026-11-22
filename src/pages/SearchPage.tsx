@@ -469,8 +469,11 @@ export const SearchPage: React.FC = () => {
 
   return (
     <div
-      className="px-4 sm:px-6 lg:px-8 pt-5 max-w-5xl mx-auto space-y-6 pb-36 md:pb-12"
-      style={{paddingBottom: 'calc(8.5rem + env(safe-area-inset-bottom, 0px))'}}
+      className="px-4 sm:px-6 lg:px-8 max-w-5xl mx-auto space-y-6 pb-36 md:pb-12"
+      style={{
+        paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))',
+        paddingBottom: 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
+      }}
     >
       {actionToast && (
         <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[#1DB954] px-4 py-2 text-sm font-semibold text-black shadow-xl max-w-[90vw] truncate">
