@@ -25,6 +25,7 @@ import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
+import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
 import type {Playlist} from '../types';
 import {getOfflinePlaylists, subscribeOfflineStore} from '../utils/offlineStore';
@@ -64,6 +65,16 @@ export const AppShell: React.FC = () => {
   const {isInstallable, isInstalled, install} = usePWAInstall();
   const navigate = useNavigate();
   const location = useLocation();
+
+  const miniPlayerSwipe = useSwipeTrackGesture({
+    onSwipeNext: nextTrack,
+    onSwipePrev: prevTrack,
+    threshold: 75,
+    deadZone: 10,
+    velocityThreshold: 0.55,
+    rotationFactor: 0,
+    slideDistance: 240,
+  });
 
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
@@ -491,22 +502,28 @@ export const AppShell: React.FC = () => {
       {/* Mobile Floating Mini-Player (64px) above safe-area-padded 60px Bottom Nav */}
       {!isNowPlayingPage && currentTrack && (
         <div
-          className="md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden"
+          {...miniPlayerSwipe.handlers}
+          className="md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden select-none"
           style={{
             background: `linear-gradient(90deg, ${stageTint} 0%, #1c1c1c 100%)`,
+            touchAction: 'pan-y',
           }}
         >
           <div className="flex h-full items-center gap-3 px-3">
             <button
               type="button"
-              onClick={() => navigate('/now-playing')}
-              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+              onClick={() => {
+                if (miniPlayerSwipe.shouldSuppressClick()) return;
+                navigate('/now-playing');
+              }}
+              style={miniPlayerSwipe.style}
+              className="flex min-w-0 flex-1 items-center gap-3 text-left select-none"
             >
               <AlbumArt
                 coverFile={currentTrack.cover_file}
                 alt={currentTrack.title}
                 color={currentTrack.dominant_color}
-                className="w-11 h-11 rounded"
+                className="w-11 h-11 rounded pointer-events-none"
                 iconSize={18}
               />
               <div className="min-w-0 flex-1">
@@ -517,6 +534,7 @@ export const AppShell: React.FC = () => {
 
             <button
               type="button"
+              data-no-swipe="true"
               onClick={() => void toggleLikeTrack(currentTrack.id)}
               className={`flex h-11 w-11 items-center justify-center ${
                 currentTrack.liked ? 'text-[#1DB954]' : 'text-white/80'
@@ -527,6 +545,7 @@ export const AppShell: React.FC = () => {
             </button>
             <button
               type="button"
+              data-no-swipe="true"
               onClick={togglePlay}
               className="flex h-11 w-11 items-center justify-center text-white"
               aria-label={isPlaying ? 'Pause' : 'Play'}

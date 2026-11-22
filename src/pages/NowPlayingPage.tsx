@@ -19,6 +19,7 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {AlbumArt} from '../components/AlbumArt';
 import {usePlayer} from '../context/PlayerContext';
+import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration, getCoverUrl, parseLrc} from '../lib/api';
 import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineStore';
 
@@ -50,6 +51,16 @@ export const NowPlayingPage: React.FC = () => {
   const [rawLyrics, setRawLyrics] = useState<string | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [offlineCoverBackdrop, setOfflineCoverBackdrop] = useState<string | null>(null);
+
+  const artworkSwipe = useSwipeTrackGesture({
+    onSwipeNext: nextTrack,
+    onSwipePrev: prevTrack,
+    threshold: 75,
+    deadZone: 10,
+    velocityThreshold: 0.55,
+    rotationFactor: 0.03,
+    slideDistance: 360,
+  });
 
   const trackId = currentTrack?.id ?? null;
   const coverFile = currentTrack?.cover_file ?? null;
@@ -210,13 +221,20 @@ export const NowPlayingPage: React.FC = () => {
       <div className="relative z-10 flex-1 flex flex-col lg:flex-row items-center justify-center gap-8 lg:gap-12 px-6 sm:px-10 py-6 pb-safe max-w-6xl mx-auto w-full">
         {/* Artwork + Info + Transport */}
         <div className="flex flex-col items-center w-full max-w-md">
-          <AlbumArt
-            coverFile={currentTrack.cover_file}
-            alt={currentTrack.title}
-            color={currentTrack.dominant_color}
-            className="w-full max-w-[340px] sm:max-w-[380px] aspect-square rounded-lg shadow-2xl"
-            iconSize={72}
-          />
+          <div
+            {...artworkSwipe.handlers}
+            style={artworkSwipe.style}
+            className="w-full max-w-[340px] sm:max-w-[380px] aspect-square select-none cursor-grab active:cursor-grabbing"
+            aria-label="Swipe left for next track or right for previous track"
+          >
+            <AlbumArt
+              coverFile={currentTrack.cover_file}
+              alt={currentTrack.title}
+              color={currentTrack.dominant_color}
+              className="w-full h-full rounded-lg shadow-2xl pointer-events-none select-none"
+              iconSize={72}
+            />
+          </div>
 
           {/* Track Metadata + Heart */}
           <div className="mt-7 flex w-full items-start justify-between gap-4">

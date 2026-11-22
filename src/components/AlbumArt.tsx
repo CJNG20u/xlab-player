@@ -79,9 +79,10 @@ export const AlbumArt: React.FC<AlbumArtProps> = ({
     <img
       src={src}
       alt={alt}
+      draggable={false}
       referrerPolicy="no-referrer"
       onError={handleImageError}
-      className={`${className} object-cover shrink-0 bg-[#282828]`}
+      className={`${className} object-cover shrink-0 bg-[#282828] select-none`}
       loading="lazy"
     />
   );
