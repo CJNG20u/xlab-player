@@ -4,18 +4,30 @@
 
 Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dlp search, inline audio preview, and automatic metadata tagging.
 
-## Features
+Features
+Local & NAS Audio Streaming: Streams .m4a, .opus, .flac, .mp3, .ogg, and .wav directly from your local drive or mounted NFS/SMB share with HTTP 206 byte-range seeking and instant library indexing.
 
-- **Local & NAS Audio Streaming**: Streams `.m4a`, `.opus`, `.flac`, `.mp3`, `.ogg`, and `.wav` directly from your local drive or mounted NFS/SMB share with HTTP 206 byte-range seeking and instant library indexing.
-- **YouTube & YouTube Music Search + Inline Audio Preview**: Search tracks or paste single/playlist URLs and preview audio inline before downloading.
-- **Automatic Cover Cropping & Tag Embedding**: Powered by `yt-dlp` and `ffmpeg` to extract audio, crop thumbnails to crisp 1:1 square artwork, embed ID3/MP4 tags, and organize tracks cleanly under `Artist/Album/Track`.
-- **Synced `.lrc` & Embedded Lyrics**: Reads sidecar `.lrc` files live alongside embedded audio lyrics.
-- **Playlists & `.m3u` / `.m3u8` Sync**: Create and manage playlists in-app, auto-import `.m3u`/`.m3u8` playlists from your music library, and export any playlist back to `<MUSIC_DIR>/Playlists/`.
-- **Installable PWA with MediaSession Controls**: Responsive desktop and mobile web app with offline shell caching and native lock-screen, Bluetooth, and CarPlay/Android Auto playback controls.
-- **Multi-User Roles & `cookies.txt` Support**: Separate `admin` and `listener` roles, per-user download permissions, direct local audio uploads, and Netscape-format `cookies.txt` management for resilient YouTube downloads.
-- **Offline PWA Caching (iOS & Android):** Save individual tracks or entire playlists locally using the browser Cache Storage API and IndexedDB for zero-network playback in Airplane Mode.
-- **Background & Lock-Screen Playback:** Persistent HTML5 audio engine integrated with the Media Session API (`navigator.mediaSession`) for uninterrupted lock-screen playback and hardware controls on iOS and Android.
-- **Zero-Cloud Architecture:** Runs completely locally with zero external AI or third-party cloud API dependencies.
+On-Demand YouTube & YouTube Music Streaming: Search tracks or paste single/playlist URLs and stream audio directly in the global Now Playing bar—with full track scrubbing, matching yt-dlp session headers, and 30-minute signed URL caching—without needing to download files to disk first.
+
+Unified Local & Online Queue: Seamlessly mix local NAS/drive tracks and live YouTube streams inside the same playback queue with Next/Previous skipping and continuous playback.
+
+Gesture-Driven Now Playing & Multi-Theme UI: Switch between custom Spotify and Apple Music visual themes, extract CORS-safe dominant album colors via /api/yt-thumb/:videoId, and skip tracks effortlessly with album-art swipe gestures.
+
+Automatic Cover Cropping & Tag Embedding: Powered by yt-dlp and ffmpeg to extract audio, crop thumbnails to crisp 1:1 square artwork, embed ID3/MP4 tags, and organize tracks cleanly under Artist/Album/Track.
+
+Synced .lrc & Embedded Lyrics: Reads sidecar .lrc files live alongside embedded audio lyrics.
+
+Playlists & .m3u / .m3u8 Sync: Create and manage playlists in-app, auto-import .m3u/.m3u8 playlists from your music library, and export any playlist back to <MUSIC_DIR>/Playlists/.
+
+Installable PWA with MediaSession Controls: Responsive desktop and mobile web app with offline shell caching and native lock-screen, Bluetooth, and CarPlay/Android Auto playback controls.
+
+Offline PWA Caching (iOS & Android): Save individual tracks or entire playlists locally using the browser Cache Storage API and IndexedDB for zero-network playback in Airplane Mode.
+
+Background & Lock-Screen Playback: Persistent HTML5 audio engine integrated with the Media Session API (navigator.mediaSession) for uninterrupted lock-screen playback and hardware controls on iOS and Android.
+
+Multi-User Roles & cookies.txt Support: Separate admin and listener roles, per-user download permissions, direct local audio uploads, and Netscape-format cookies.txt management for resilient YouTube downloads and streams.
+
+Zero-Cloud Architecture: Runs completely locally in Docker with persistent /music volume mapping and zero external AI or third-party cloud API dependencies.
 
 ---
 
