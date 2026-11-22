@@ -926,12 +926,22 @@ export async function resolveYouTubeAudioStreamUrl(
     const ytdlpPath = getYtdlpPath();
     const tempCookiePath = createTempCookiesCopy();
     try {
+      const configuredPlayerClient = getSetting('ytdlp_player_client', '').trim();
+      const hasCustomOverride =
+        configuredPlayerClient.length > 0 && configuredPlayerClient !== 'web,mweb,android_vr';
+      const rawStreamPlayerClient = hasCustomOverride ? configuredPlayerClient : 'tv,android_vr';
+      const streamPlayerClient = /^[A-Za-z0-9_,+-]+$/.test(rawStreamPlayerClient)
+        ? rawStreamPlayerClient
+        : 'tv,android_vr';
+
       const args = [
         ...buildResilienceArgs(tempCookiePath, {
           includeSleep: false,
           includePlayerClient: false,
           forceIpv4: true,
         }),
+        '--extractor-args',
+        `youtube:player_client=${streamPlayerClient}`,
         '-f',
         'bestaudio[ext=m4a]/bestaudio',
         '--dump-single-json',
