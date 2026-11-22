@@ -1,5 +1,7 @@
 import {
+  Check,
   ChevronDown,
+  Download,
   Heart,
   ListMusic,
   Loader2,
@@ -15,13 +17,22 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {AlbumArt} from '../components/AlbumArt';
+import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
+import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
-import {apiFetch, formatDuration, getCoverUrl, parseLrc} from '../lib/api';
+import {
+  apiFetch,
+  formatDuration,
+  getTrackCoverUrl,
+  getYouTubeThumbProxyUrl,
+  getYouTubeVideoId,
+  parseLrc,
+} from '../lib/api';
 import {
   computeLightTintedTopHex,
   computeNowPlayingTopHex,
@@ -34,6 +45,10 @@ import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineSto
 
 export const NowPlayingPage: React.FC = () => {
   const navigate = useNavigate();
+  const {user, isOfflineMode} = useAuth();
+  const isOnline = useOnlineStatus();
+  const offline = !isOnline || isOfflineMode;
+  const canDownload = Boolean(user?.can_download || user?.role === 'admin');
   const {isLight, baseThemeColor} = useTheme();
   const {
     currentTrack,
@@ -56,12 +71,20 @@ export const NowPlayingPage: React.FC = () => {
     toggleShuffle,
     cycleRepeat,
     toggleLikeTrack,
+    saveYouTubeTrackToLibrary,
+    getYouTubeSaveStatus,
   } = usePlayer();
 
   const [rawLyrics, setRawLyrics] = useState<string | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [offlineCoverBackdrop, setOfflineCoverBackdrop] = useState<string | null>(null);
   const [sampledDominantColor, setSampledDominantColor] = useState<string | null>(null);
+  const [actionToast, setActionToast] = useState<string | null>(null);
+
+  const flashToast = useCallback((msg: string) => {
+    setActionToast(msg);
+    setTimeout(() => setActionToast(null), 2800);
+  }, []);
 
   const artworkSwipe = useSwipeTrackGesture({
     onSwipeNext: nextTrack,
@@ -75,11 +98,18 @@ export const NowPlayingPage: React.FC = () => {
 
   const trackId = currentTrack?.id ?? null;
   const coverFile = currentTrack?.cover_file ?? null;
+  const ytVideoId = useMemo(
+    () => (currentTrack?.isYouTubeStream ? getYouTubeVideoId(currentTrack) : null),
+    [currentTrack]
+  );
   const albumColorKey = useMemo(
     () => (currentTrack ? getAlbumColorCacheKey(currentTrack) : null),
     [currentTrack]
   );
-  const resolvedCoverUrl = offlineCoverBackdrop || getCoverUrl(coverFile);
+  // Use same-origin YouTube thumbnail proxy for CORS-safe 32x32 offscreen dominant color sampling
+  const resolvedSampleCoverUrl =
+    offlineCoverBackdrop ||
+    (ytVideoId ? getYouTubeThumbProxyUrl(ytVideoId) : getTrackCoverUrl(currentTrack));
 
   // Sample dominant artwork color on a 32x32 offscreen canvas once per album/track and memoize in memory
   useEffect(() => {
@@ -97,10 +127,10 @@ export const NowPlayingPage: React.FC = () => {
     // Show track metadata color immediately while the 32x32 offscreen sample resolves
     setSampledDominantColor(currentTrack.dominant_color || null);
 
-    if (!resolvedCoverUrl) return;
+    if (!resolvedSampleCoverUrl) return;
     let cancelled = false;
     void extractDominantColorFromImage(
-      resolvedCoverUrl,
+      resolvedSampleCoverUrl,
       albumColorKey,
       currentTrack.id,
       currentTrack.dominant_color
@@ -113,7 +143,7 @@ export const NowPlayingPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [albumColorKey, currentTrack, resolvedCoverUrl]);
+  }, [albumColorKey, currentTrack, resolvedSampleCoverUrl]);
 
   const effectiveDominantColor = useMemo(() => {
     if (!currentTrack) return null;
@@ -153,8 +183,9 @@ export const NowPlayingPage: React.FC = () => {
   }, [coverFile]);
 
   useEffect(() => {
-    if (!trackId) {
+    if (!trackId || typeof trackId !== 'number' || currentTrack?.isYouTubeStream) {
       setRawLyrics(null);
+      setLyricsLoading(false);
       return;
     }
     let cancelled = false;
@@ -179,7 +210,7 @@ export const NowPlayingPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [trackId]);
+  }, [currentTrack?.isYouTubeStream, trackId]);
 
   const parsedLyrics = useMemo(() => {
     if (!rawLyrics) return null;
@@ -221,10 +252,17 @@ export const NowPlayingPage: React.FC = () => {
     );
   }
 
-  const coverUrl = offlineCoverBackdrop || getCoverUrl(currentTrack.cover_file);
+  const coverUrl = offlineCoverBackdrop || getTrackCoverUrl(currentTrack);
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const remaining = Math.max(0, (duration || 0) - currentTime);
   const volPct = (isMuted ? 0 : volume) * 100;
+  const isYouTubeTrack = Boolean(currentTrack.isYouTubeStream);
+  const ytSaveStatus = isYouTubeTrack ? getYouTubeSaveStatus(currentTrack.id) : 'idle';
+
+  const handleSaveToLibrary = async () => {
+    const res = await saveYouTubeTrackToLibrary(currentTrack);
+    flashToast(res.message);
+  };
 
   return (
     <div
@@ -235,6 +273,12 @@ export const NowPlayingPage: React.FC = () => {
           : `linear-gradient(180deg, ${dominantTopHexColor} 0%, var(--bg-primary) 72%)`,
       }}
     >
+      {actionToast && (
+        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
+          {actionToast}
+        </div>
+      )}
+
       {/* Blurred album cover backdrop */}
       {coverUrl && (
         <div
@@ -272,7 +316,9 @@ export const NowPlayingPage: React.FC = () => {
           </button>
 
           <div className="text-center min-w-0 px-3">
-            <p className="text-xs font-medium text-[var(--text-secondary)]">Playing from Library</p>
+            <p className="text-xs font-medium text-[var(--text-secondary)]">
+              {isYouTubeTrack ? 'Streaming from YouTube' : 'Playing from Library'}
+            </p>
             <p className="text-xs font-semibold text-[var(--text-primary)] truncate max-w-[200px] sm:max-w-xs">
               {currentTrack.album}
             </p>
@@ -323,6 +369,7 @@ export const NowPlayingPage: React.FC = () => {
           >
             <AlbumArt
               coverFile={currentTrack.cover_file}
+              externalUrl={currentTrack.coverUrl}
               alt={currentTrack.title}
               color={currentTrack.dominant_color}
               className={`w-full h-full rounded-2xl pointer-events-none select-none ${
@@ -334,43 +381,82 @@ export const NowPlayingPage: React.FC = () => {
             />
           </div>
 
-          {/* Track Metadata + Heart */}
+          {/* Track Metadata + Heart or Save to Library */}
           <div className="mt-7 flex w-full items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
               <h1 className="font-display text-2xl sm:text-3xl font-extrabold text-[var(--text-primary)] truncate">
                 {currentTrack.title}
               </h1>
               <div className="mt-1 flex items-center gap-2 text-sm text-[var(--text-secondary)] truncate">
-                <button
-                  type="button"
-                  onClick={() =>
-                    navigate(`/?artist=${encodeURIComponent(currentTrack.artist)}`)
-                  }
-                  className="font-medium text-[var(--text-primary)] opacity-90 hover:text-[var(--accent)] hover:underline truncate"
-                >
-                  {currentTrack.artist}
-                </button>
+                {isYouTubeTrack ? (
+                  <span className="font-medium text-[var(--text-primary)] opacity-90 truncate">
+                    {currentTrack.artist}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(`/?artist=${encodeURIComponent(currentTrack.artist)}`)
+                    }
+                    className="font-medium text-[var(--text-primary)] opacity-90 hover:text-[var(--accent)] hover:underline truncate"
+                  >
+                    {currentTrack.artist}
+                  </button>
+                )}
                 <span aria-hidden="true">·</span>
                 <span className="truncate">{currentTrack.album}</span>
               </div>
-              <p className="mt-1 font-mono text-xs text-[var(--text-muted)] tabular-nums">
-                {currentTrack.format.toUpperCase()}
-                {currentTrack.bitrate ? ` · ${currentTrack.bitrate} kbps` : ''}
-              </p>
+              <div className="mt-1.5 flex items-center gap-2">
+                <p className="font-mono text-xs text-[var(--text-muted)] tabular-nums">
+                  {currentTrack.format.toUpperCase()}
+                  {currentTrack.bitrate ? ` · ${currentTrack.bitrate} kbps` : ''}
+                </p>
+                {isYouTubeTrack && (
+                  <span className="inline-flex items-center rounded border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-[var(--text-secondary)] leading-none">
+                    YouTube
+                  </span>
+                )}
+              </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => void toggleLikeTrack(currentTrack.id)}
-              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors ${
-                currentTrack.liked
-                  ? 'text-[var(--accent)]'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-              }`}
-              aria-label={currentTrack.liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
-            >
-              <Heart className={`w-6 h-6 ${currentTrack.liked ? 'fill-current' : ''}`} />
-            </button>
+            {isYouTubeTrack ? (
+              canDownload && !offline ? (
+                <button
+                  type="button"
+                  disabled={ytSaveStatus === 'saving'}
+                  onClick={() => void handleSaveToLibrary()}
+                  className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-xs font-semibold transition-colors ${
+                    ytSaveStatus === 'saved'
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                      : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
+                  }`}
+                  title={ytSaveStatus === 'saved' ? 'Queued for library download' : 'Save to Library'}
+                  aria-label="Save to Library"
+                >
+                  {ytSaveStatus === 'saving' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : ytSaveStatus === 'saved' ? (
+                    <Check className="w-4 h-4 stroke-[2.5]" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  <span>{ytSaveStatus === 'saved' ? 'Saved' : 'Save'}</span>
+                </button>
+              ) : null
+            ) : (
+              <button
+                type="button"
+                onClick={() => void toggleLikeTrack(currentTrack.id)}
+                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors ${
+                  currentTrack.liked
+                    ? 'text-[var(--accent)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+                aria-label={currentTrack.liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
+              >
+                <Heart className={`w-6 h-6 ${currentTrack.liked ? 'fill-current' : ''}`} />
+              </button>
+            )}
           </div>
 
           {/* Interactive Progress Scrubber */}

@@ -6,8 +6,10 @@ export interface User {
   created_at: string;
 }
 
+export type TrackId = number | string;
+
 export interface Track {
-  id: number;
+  id: TrackId;
   rel_path: string;
   title: string;
   artist: string;
@@ -22,6 +24,10 @@ export interface Track {
   dominant_color: string;
   added_at: string;
   liked: boolean;
+  coverUrl?: string;
+  streamUrl?: string;
+  isYouTubeStream?: boolean;
+  youtubeUrl?: string;
 }
 
 export interface Playlist {

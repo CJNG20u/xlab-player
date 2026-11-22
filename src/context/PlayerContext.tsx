@@ -1,6 +1,13 @@
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
-import {apiFetch, getCoverUrl, getStoredToken, getStreamUrl} from '../lib/api';
-import type {RepeatMode, Track} from '../types';
+import {
+  apiFetch,
+  getStoredToken,
+  getStreamUrl,
+  getTrackCoverUrl,
+  getTrackStreamUrl,
+  getYouTubeVideoId,
+} from '../lib/api';
+import type {RepeatMode, Track, TrackId} from '../types';
 import {
   getCachedTrackIds,
   getOfflineAudioBlob,
@@ -40,12 +47,17 @@ interface PlayerContextValue {
   reorderQueue: (fromIndex: number, toIndex: number) => void;
   clearUpcomingQueue: () => void;
   handleDeletedTracks: (deletedIds: number[]) => void;
-  toggleLikeTrack: (trackId: number) => Promise<boolean | null>;
+  toggleLikeTrack: (trackId: TrackId) => Promise<boolean | null>;
   setQueueOpen: (open: boolean) => void;
   setLyricsOpen: (open: boolean) => void;
-  syncTrackLikeState: (trackId: number, liked: boolean) => void;
+  syncTrackLikeState: (trackId: TrackId, liked: boolean) => void;
   libraryRefreshVersion: number;
   bumpLibraryRefresh: () => void;
+  saveYouTubeTrackToLibrary: (
+    track: Track,
+    format?: 'm4a' | 'opus'
+  ) => Promise<{ok: boolean; message: string}>;
+  getYouTubeSaveStatus: (trackId: TrackId) => 'idle' | 'saving' | 'saved';
 }
 
 const PlayerContext = createContext<PlayerContextValue | null>(null);
@@ -109,29 +121,35 @@ function unlockPersistentAudioElement(
 
 function buildTrackArtwork(track: Track): MediaImage[] {
   const origin = window.location.origin;
-  const coverUrl = getCoverUrl(track.cover_file);
-  const lowerCover = (track.cover_file || '').toLowerCase();
+  const coverUrl = getTrackCoverUrl(track);
 
-  // Always supply absolute URLs with explicit 192x192 & 512x512 sizes
+  // Always supply absolute URLs with explicit 96x96, 192x192 & 512x512 sizes
   // (iOS Safari, Android Chrome, and CarPlay ignore SVG or relative artwork URLs)
-  if (
-    coverUrl &&
-    (lowerCover.endsWith('.png') ||
-      lowerCover.endsWith('.jpg') ||
-      lowerCover.endsWith('.jpeg') ||
-      lowerCover.endsWith('.webp'))
-  ) {
-    const absCover = new URL(coverUrl, origin).href;
-    const mimeType = lowerCover.endsWith('.png')
-      ? 'image/png'
-      : lowerCover.endsWith('.webp')
-        ? 'image/webp'
-        : 'image/jpeg';
-    return [
-      {src: absCover, sizes: '96x96', type: mimeType},
-      {src: absCover, sizes: '192x192', type: mimeType},
-      {src: absCover, sizes: '512x512', type: mimeType},
-    ];
+  if (coverUrl) {
+    try {
+      const absCover = new URL(coverUrl, origin).href;
+      const cleanPath = absCover.split(/[?#]/)[0].toLowerCase();
+      const mimeType = cleanPath.endsWith('.png')
+        ? 'image/png'
+        : cleanPath.endsWith('.webp')
+          ? 'image/webp'
+          : 'image/jpeg';
+      if (
+        track.isYouTubeStream ||
+        cleanPath.endsWith('.png') ||
+        cleanPath.endsWith('.jpg') ||
+        cleanPath.endsWith('.jpeg') ||
+        cleanPath.endsWith('.webp')
+      ) {
+        return [
+          {src: absCover, sizes: '96x96', type: mimeType},
+          {src: absCover, sizes: '192x192', type: mimeType},
+          {src: absCover, sizes: '512x512', type: mimeType},
+        ];
+      }
+    } catch {
+      // Fall through to app icons
+    }
   }
 
   return [
@@ -142,7 +160,7 @@ function buildTrackArtwork(track: Track): MediaImage[] {
 }
 
 function getTrackMetadataKey(track: Track): string {
-  return `${track.id}|${track.title}|${track.artist}|${track.album}|${track.cover_file || ''}`;
+  return `${track.id}|${track.title}|${track.artist}|${track.album}|${track.cover_file || ''}|${track.coverUrl || ''}`;
 }
 
 export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
@@ -176,6 +194,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [libraryRefreshVersion, setLibraryRefreshVersion] = useState(0);
   const [offlineStoreVersion, setOfflineStoreVersion] = useState(0);
+  const [youtubeSaveStates, setYoutubeSaveStates] = useState<
+    Record<string, 'saving' | 'saved'>
+  >({});
 
   const currentTrack =
     currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
@@ -251,16 +272,21 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   useEffect(() => {
     let cancelled = false;
     const keepIds = new Set<number>();
+    const addIfLocal = (t: Track | undefined) => {
+      if (t && !t.isYouTubeStream && typeof t.id === 'number') {
+        keepIds.add(t.id);
+      }
+    };
 
     if (currentIndex >= 0 && currentIndex < queue.length) {
-      keepIds.add(queue[currentIndex].id);
+      addIfLocal(queue[currentIndex]);
       if (currentIndex + 1 < queue.length) {
-        keepIds.add(queue[currentIndex + 1].id);
+        addIfLocal(queue[currentIndex + 1]);
       } else if (repeat === 'all' && queue.length > 0) {
-        keepIds.add(queue[0].id);
+        addIfLocal(queue[0]);
       }
       if (currentIndex - 1 >= 0) {
-        keepIds.add(queue[currentIndex - 1].id);
+        addIfLocal(queue[currentIndex - 1]);
       }
     }
 
@@ -335,6 +361,19 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     if (!nextItem) return;
 
+    // Warm the next track's cover image in the browser HTTP cache for instant swipe visuals
+    const nextCoverUrl = getTrackCoverUrl(nextItem);
+    if (nextCoverUrl && typeof Image !== 'undefined') {
+      const preloadImg = new Image();
+      preloadImg.decoding = 'async';
+      preloadImg.src = nextCoverUrl;
+    }
+
+    // Skip full-blob audio prefetching for streamed YouTube tracks (handled by server URL cache)
+    if (nextItem.isYouTubeStream || typeof nextItem.id !== 'number') {
+      return;
+    }
+
     const nextId = nextItem.id;
     if (
       cachedTrackIdsRef.current.has(nextId) ||
@@ -344,14 +383,6 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       prefetchInFlightIdRef.current === nextId
     ) {
       return;
-    }
-
-    // Warm the next track's cover image in the browser HTTP cache for instant swipe visuals
-    const nextCoverUrl = getCoverUrl(nextItem.cover_file);
-    if (nextCoverUrl && typeof Image !== 'undefined') {
-      const preloadImg = new Image();
-      preloadImg.decoding = 'async';
-      preloadImg.src = nextCoverUrl;
     }
 
     // Abort any obsolete prefetch targeting a different track
@@ -641,12 +672,17 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         }
         invokePlay();
       } else {
+        const localTrackId =
+          !track.isYouTubeStream && typeof track.id === 'number' ? track.id : null;
         const prewarmedBlobUrl =
-          prewarmedObjectUrlsRef.current.get(track.id) ??
-          prefetchedObjectUrlsRef.current.get(track.id);
+          localTrackId !== null
+            ? (prewarmedObjectUrlsRef.current.get(localTrackId) ??
+              prefetchedObjectUrlsRef.current.get(localTrackId))
+            : undefined;
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         const shouldUseOfflineCache =
-          Boolean(prewarmedBlobUrl) || cachedTrackIdsRef.current.has(track.id) || isOffline;
+          localTrackId !== null &&
+          (Boolean(prewarmedBlobUrl) || cachedTrackIdsRef.current.has(localTrackId) || isOffline);
 
         beginTrackTransition();
         audio.dataset.trackId = String(track.id);
@@ -655,20 +691,20 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           // Synchronous ObjectURL assignment from pre-warmed offline cache or next-track prefetch
           audio.src = prewarmedBlobUrl;
           invokePlay();
-        } else if (shouldUseOfflineCache) {
+        } else if (shouldUseOfflineCache && localTrackId !== null) {
           // Synchronously unlock persistent <audio> inside the user's very first play click gesture
           // before awaiting Cache Storage so iOS Safari retains background audio permission.
           unlockPersistentAudioElement(audio, true);
 
           // Load blob directly from Cache Storage (`xlabplayer-audio-v1`) -> ObjectURL
           setIsBuffering(true);
-          void getOfflineAudioBlob(track.id).then((blob) => {
+          void getOfflineAudioBlob(localTrackId).then((blob) => {
             if (loadRequestIdRef.current !== reqId) return;
             if (blob) {
-              let blobUrl = prewarmedObjectUrlsRef.current.get(track.id);
+              let blobUrl = prewarmedObjectUrlsRef.current.get(localTrackId);
               if (!blobUrl) {
                 blobUrl = URL.createObjectURL(blob);
-                prewarmedObjectUrlsRef.current.set(track.id, blobUrl);
+                prewarmedObjectUrlsRef.current.set(localTrackId, blobUrl);
               }
               beginTrackTransition();
               audio.src = blobUrl;
@@ -679,7 +715,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
             // Not present in Cache Storage: fall back to network only if online
             if (typeof navigator === 'undefined' || navigator.onLine) {
               beginTrackTransition();
-              audio.src = getStreamUrl(track.id);
+              audio.src = getTrackStreamUrl(track);
               invokePlay();
             } else {
               endTrackTransition();
@@ -691,7 +727,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
             }
           });
         } else {
-          audio.src = getStreamUrl(track.id);
+          if (track.isYouTubeStream) {
+            setIsBuffering(true);
+          }
+          audio.src = getTrackStreamUrl(track);
           invokePlay();
         }
       }
@@ -747,7 +786,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           if (!track) return;
           const resumePos = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
           beginTrackTransition();
-          audio.src = getStreamUrl(track.id);
+          audio.src = getTrackStreamUrl(track);
           if (resumePos > 0) {
             const restorePosition = () => {
               audio.removeEventListener('loadedmetadata', restorePosition);
@@ -1088,7 +1127,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       const deletedSet = new Set(deletedIds);
       const {currentTrack: activeTrack, currentIndex: currIdx, queue: prevQueue} = stateRef.current;
 
-      const activeWasDeleted = Boolean(activeTrack && deletedSet.has(activeTrack.id));
+      const activeWasDeleted = Boolean(
+        activeTrack && typeof activeTrack.id === 'number' && deletedSet.has(activeTrack.id)
+      );
       if (activeWasDeleted && audioRef.current) {
         endTrackTransition();
         clearRecoveryTimer();
@@ -1129,7 +1170,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         void removeOfflineTrack(id);
       }
 
-      const nextQueue = prevQueue.filter((t) => !deletedSet.has(t.id));
+      const nextQueue = prevQueue.filter(
+        (t) => !(typeof t.id === 'number' && deletedSet.has(t.id))
+      );
       setQueue(nextQueue);
 
       if (activeWasDeleted || nextQueue.length === 0) {
@@ -1137,7 +1180,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       } else if (currIdx >= 0) {
         let removedBefore = 0;
         for (let i = 0; i < currIdx && i < prevQueue.length; i++) {
-          if (deletedSet.has(prevQueue[i].id)) removedBefore++;
+          const itemId = prevQueue[i].id;
+          if (typeof itemId === 'number' && deletedSet.has(itemId)) removedBefore++;
         }
         setCurrentIndex(Math.max(0, currIdx - removedBefore));
       }
@@ -1206,12 +1250,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     });
   }, []);
 
-  const syncTrackLikeState = useCallback((trackId: number, liked: boolean) => {
+  const syncTrackLikeState = useCallback((trackId: TrackId, liked: boolean) => {
+    if (typeof trackId !== 'number') return;
     setQueue((prev) => prev.map((t) => (t.id === trackId ? {...t, liked} : t)));
   }, []);
 
   const toggleLikeTrack = useCallback(
-    async (trackId: number) => {
+    async (trackId: TrackId) => {
+      if (typeof trackId !== 'number') return null;
       try {
         const res = await apiFetch<{liked: boolean}>(`/api/tracks/${trackId}/like`, {
           method: 'POST',
@@ -1224,6 +1270,63 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
     },
     [syncTrackLikeState, bumpLibraryRefresh]
+  );
+
+  const getYouTubeSaveStatus = useCallback(
+    (trackId: TrackId): 'idle' | 'saving' | 'saved' => {
+      return youtubeSaveStates[String(trackId)] || 'idle';
+    },
+    [youtubeSaveStates]
+  );
+
+  const saveYouTubeTrackToLibrary = useCallback(
+    async (
+      track: Track,
+      format: 'm4a' | 'opus' = 'm4a'
+    ): Promise<{ok: boolean; message: string}> => {
+      const key = String(track.id);
+      if (youtubeSaveStates[key] === 'saving') {
+        return {ok: false, message: 'Already saving to library'};
+      }
+      const videoId = getYouTubeVideoId(track);
+      const url =
+        track.youtubeUrl || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : '');
+      if (!url) {
+        return {ok: false, message: 'Missing YouTube URL for this track'};
+      }
+
+      setYoutubeSaveStates((prev) => ({...prev, [key]: 'saving'}));
+      try {
+        await apiFetch('/api/download/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            items: [
+              {
+                url,
+                title: track.title || 'Untitled Track',
+                artist: track.artist || 'Unknown Artist',
+                album: 'Singles',
+                format,
+                thumbnail_url: track.coverUrl || '',
+              },
+            ],
+          }),
+        });
+        setYoutubeSaveStates((prev) => ({...prev, [key]: 'saved'}));
+        return {ok: true, message: `Saving "${track.title}" to library (.${format})`};
+      } catch (err) {
+        setYoutubeSaveStates((prev) => {
+          const next = {...prev};
+          delete next[key];
+          return next;
+        });
+        return {
+          ok: false,
+          message: err instanceof Error ? err.message : 'Could not queue download',
+        };
+      }
+    },
+    [youtubeSaveStates]
   );
 
   const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
@@ -1690,6 +1793,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         syncTrackLikeState,
         libraryRefreshVersion,
         bumpLibraryRefresh,
+        saveYouTubeTrackToLibrary,
+        getYouTubeSaveStatus,
       }}
     >
       {children}

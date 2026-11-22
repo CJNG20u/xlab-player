@@ -183,10 +183,12 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   };
 
   const handleToggleOfflineTrack = async (track: Track) => {
-    if (downloadingTrackIds.has(track.id)) return;
-    if (cachedTrackIds.has(track.id)) {
+    if (typeof track.id !== 'number') return;
+    const numericId = track.id;
+    if (downloadingTrackIds.has(numericId)) return;
+    if (cachedTrackIds.has(numericId)) {
       try {
-        await removeTrack(track.id);
+        await removeTrack(numericId);
         flashToast('Removed from offline storage');
       } catch (err) {
         flashToast(err instanceof Error ? err.message : 'Could not remove offline copy');
@@ -210,14 +212,14 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   };
 
   const handleConfirmPermanentDelete = async () => {
-    if (!pendingDeleteTrack) return;
+    if (!pendingDeleteTrack || typeof pendingDeleteTrack.id !== 'number') return;
+    const deletedId = pendingDeleteTrack.id;
     setDeletingTrack(true);
     setDeleteError(null);
     try {
-      await apiFetch(`/api/tracks/${pendingDeleteTrack.id}`, {
+      await apiFetch(`/api/tracks/${deletedId}`, {
         method: 'DELETE',
       });
-      const deletedId = pendingDeleteTrack.id;
       const deletedTitle = pendingDeleteTrack.title;
       handleDeletedTracks([deletedId]);
       onTrackDeleted?.(deletedId);
@@ -252,11 +254,14 @@ export const TrackTable: React.FC<TrackTableProps> = ({
       {/* Rows */}
       <div className="divide-y divide-[var(--border-subtle)] md:divide-y-0 mt-1">
         {tracks.map((track, idx) => {
+          const numericId = typeof track.id === 'number' ? track.id : null;
           const isActive = currentTrack?.id === track.id;
-          const isMenuOpen = menuTrackId === track.id;
-          const isSelected = Boolean(selectionMode && selectedIds?.has(track.id));
-          const isCached = cachedTrackIds.has(track.id);
-          const isDownloadingOffline = downloadingTrackIds.has(track.id);
+          const isMenuOpen = numericId !== null && menuTrackId === numericId;
+          const isSelected = Boolean(
+            selectionMode && numericId !== null && selectedIds?.has(numericId)
+          );
+          const isCached = numericId !== null && cachedTrackIds.has(numericId);
+          const isDownloadingOffline = numericId !== null && downloadingTrackIds.has(numericId);
 
           return (
             <div
@@ -268,7 +273,9 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     ? 'bg-[var(--bg-elevated)]/85'
                     : 'hover:bg-[var(--bg-hover)]'
               } ${selectionMode ? 'cursor-pointer' : ''}`}
-              onTouchStart={(e) => handleTouchStart(e, track.id)}
+              onTouchStart={(e) => {
+                if (numericId !== null) handleTouchStart(e, numericId);
+              }}
               onTouchMove={handleTouchMove}
               onTouchEnd={clearLongPress}
               onTouchCancel={clearLongPress}
@@ -277,8 +284,8 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                   didLongPressRef.current = false;
                   return;
                 }
-                if (selectionMode) {
-                  onToggleSelect?.(track.id);
+                if (selectionMode && numericId !== null) {
+                  onToggleSelect?.(numericId);
                 }
               }}
               onDoubleClick={() => {
@@ -292,7 +299,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onToggleSelect?.(track.id);
+                      if (numericId !== null) onToggleSelect?.(numericId);
                     }}
                     className={`flex h-5 w-5 items-center justify-center rounded border transition-colors ${
                       isSelected
@@ -339,7 +346,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onToggleSelect?.(track.id);
+                      if (numericId !== null) onToggleSelect?.(numericId);
                     }}
                     className={`md:hidden flex h-6 w-6 shrink-0 items-center justify-center rounded border transition-colors ${
                       isSelected
@@ -363,7 +370,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     }
                     if (selectionMode) {
                       e.stopPropagation();
-                      onToggleSelect?.(track.id);
+                      if (numericId !== null) onToggleSelect?.(numericId);
                       return;
                     }
                     if (isActive) togglePlay();
@@ -374,6 +381,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                 >
                   <AlbumArt
                     coverFile={track.cover_file}
+                    externalUrl={track.coverUrl}
                     alt={track.title}
                     color={track.dominant_color}
                     className="w-11 h-11 md:w-10 md:h-10 rounded"
@@ -391,7 +399,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       }
                       if (selectionMode) {
                         e.stopPropagation();
-                        onToggleSelect?.(track.id);
+                        if (numericId !== null) onToggleSelect?.(numericId);
                         return;
                       }
                       playTrack(track, tracks);
@@ -475,8 +483,9 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     type="button"
                     onClick={async (e) => {
                       e.stopPropagation();
-                      const res = await toggleLikeTrack(track.id);
-                      if (res !== null) onLikeToggled?.(track.id, res);
+                      if (numericId === null) return;
+                      const res = await toggleLikeTrack(numericId);
+                      if (res !== null) onLikeToggled?.(numericId, res);
                     }}
                     className={`flex h-9 w-9 md:h-8 md:w-8 items-center justify-center rounded-full transition-colors ${
                       track.liked
@@ -499,7 +508,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowPlaylistSubmenu(false);
-                      setMenuTrackId(isMenuOpen ? null : track.id);
+                      setMenuTrackId(isMenuOpen ? null : numericId);
                     }}
                     className="md:hidden flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     aria-label="Track options"
@@ -517,7 +526,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowPlaylistSubmenu(false);
-                      setMenuTrackId(isMenuOpen ? null : track.id);
+                      setMenuTrackId(isMenuOpen ? null : numericId);
                     }}
                     className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-[var(--text-primary)] transition-opacity"
                     aria-label="Track options"
@@ -609,7 +618,11 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                               <button
                                 key={pl.id}
                                 type="button"
-                                onClick={() => void handleAddToPlaylist(pl.id, track.id, pl.name)}
+                                onClick={() => {
+                                  if (numericId !== null) {
+                                    void handleAddToPlaylist(pl.id, numericId, pl.name);
+                                  }
+                                }}
                                 className="block w-full truncate rounded px-2.5 py-1.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
                               >
                                 {pl.name}
@@ -619,10 +632,10 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                         </div>
                       )}
 
-                      {playlistId && (
+                      {playlistId && numericId !== null && (
                         <button
                           type="button"
-                          onClick={() => void handleRemoveFromPlaylist(track.id)}
+                          onClick={() => void handleRemoveFromPlaylist(numericId)}
                           className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--warn-text)] hover:bg-[var(--bg-hover)]"
                         >
                           <Trash2 className="w-4 h-4" />

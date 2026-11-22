@@ -59,15 +59,23 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
               <div className="flex items-center gap-3 rounded-lg bg-[var(--bg-elevated)] p-2.5">
                 <AlbumArt
                   coverFile={currentTrack.cover_file}
+                  externalUrl={currentTrack.coverUrl}
                   alt={currentTrack.title}
                   color={currentTrack.dominant_color}
                   className="w-11 h-11 rounded"
                   iconSize={18}
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-[var(--accent)] truncate">
-                    {currentTrack.title}
-                  </p>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <p className="text-sm font-semibold text-[var(--accent)] truncate">
+                      {currentTrack.title}
+                    </p>
+                    {currentTrack.isYouTubeStream && (
+                      <span className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--bg-secondary)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] leading-none">
+                        YouTube
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-[var(--text-secondary)] truncate">{currentTrack.artist}</p>
                 </div>
                 <span className="font-mono text-xs tabular-nums text-[var(--text-secondary)]">
@@ -124,13 +132,21 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                     >
                       <AlbumArt
                         coverFile={track.cover_file}
+                        externalUrl={track.coverUrl}
                         alt={track.title}
                         color={track.dominant_color}
                         className="w-10 h-10 rounded"
                         iconSize={16}
                       />
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-[var(--text-primary)] truncate">{track.title}</p>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <p className="text-sm font-medium text-[var(--text-primary)] truncate">{track.title}</p>
+                          {track.isYouTubeStream && (
+                            <span className="shrink-0 rounded border border-[var(--border-subtle)] bg-[var(--bg-primary)] px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-muted)] leading-none">
+                              YT
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-[var(--text-secondary)] truncate">{track.artist}</p>
                       </div>
                     </button>

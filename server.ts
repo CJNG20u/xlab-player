@@ -4,6 +4,15 @@ import express from 'express';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
+import {Readable} from 'stream';
+import type {ReadableStream as NodeReadableStream} from 'stream/web';
+import {type AuthRequest, requireAuth} from './server/auth.ts';
+import {
+  invalidateYouTubeAudioStreamCache,
+  isAllowedYouTubeMediaUrl,
+  isValidYouTubeVideoId,
+  resolveYouTubeAudioStreamUrl,
+} from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
 import {downloadRouter} from './server/routes/downloadRoutes.ts';
@@ -111,6 +120,176 @@ async function startServer() {
   app.use('/api', libraryRouter);
   app.use('/api/download', downloadRouter);
   app.use('/api/admin', adminRouter);
+
+  // Authenticated YouTube audio stream proxy with 30-min URL cache and HTTP Range forwarding
+  const handleYouTubeStream = async (
+    req: AuthRequest,
+    res: express.Response,
+    isHead: boolean
+  ): Promise<void> => {
+    const videoId = String(req.params.videoId || '').trim();
+    if (!isValidYouTubeVideoId(videoId)) {
+      res.status(400).json({error: 'Invalid YouTube video ID'});
+      return;
+    }
+
+    const abortController = new AbortController();
+    const onClientClose = () => {
+      if (!res.writableEnded && !abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    res.on('close', onClientClose);
+
+    const rawRange = typeof req.headers.range === 'string' ? req.headers.range.trim() : '';
+    const safeRange = /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rawRange) ? rawRange : '';
+
+    const fetchUpstream = async (streamUrl: string): Promise<globalThis.Response> => {
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        Accept: '*/*',
+      };
+      if (safeRange) {
+        headers.Range = safeRange;
+      }
+      return fetch(streamUrl, {
+        method: isHead ? 'HEAD' : 'GET',
+        headers,
+        signal: abortController.signal,
+        redirect: 'follow',
+      });
+    };
+
+    try {
+      let resolved = await resolveYouTubeAudioStreamUrl(videoId);
+      let upstream = await fetchUpstream(resolved.url);
+
+      // If a cached signed YouTube URL expired early, refresh once transparently
+      if (resolved.fromCache && (upstream.status === 403 || upstream.status === 410)) {
+        try {
+          await upstream.body?.cancel();
+        } catch {
+          // ignore
+        }
+        invalidateYouTubeAudioStreamCache(videoId);
+        resolved = await resolveYouTubeAudioStreamUrl(videoId, {forceRefresh: true});
+        upstream = await fetchUpstream(resolved.url);
+      }
+
+      // Re-verify final upstream host after any redirects
+      if (upstream.url && !isAllowedYouTubeMediaUrl(upstream.url)) {
+        try {
+          await upstream.body?.cancel();
+        } catch {
+          // ignore
+        }
+        res.status(502).json({error: 'Unexpected upstream media host'});
+        return;
+      }
+
+      if (!upstream.ok && upstream.status !== 206 && upstream.status !== 416) {
+        try {
+          await upstream.body?.cancel();
+        } catch {
+          // ignore
+        }
+        res.status(upstream.status === 404 ? 404 : 502).json({
+          error: `Upstream YouTube stream returned HTTP ${upstream.status}`,
+        });
+        return;
+      }
+
+      const contentType = upstream.headers.get('content-type') || 'audio/mp4';
+      const contentRange = upstream.headers.get('content-range');
+      const contentLength = upstream.headers.get('content-length');
+      const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
+
+      res.status(upstream.status);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Accept-Ranges', acceptRanges);
+      res.setHeader('Vary', 'Range');
+      res.setHeader('Cache-Control', 'private, max-age=1800');
+      if (contentRange) {
+        res.setHeader('Content-Range', contentRange);
+      }
+      if (contentLength) {
+        res.setHeader('Content-Length', contentLength);
+      }
+
+      if (isHead || !upstream.body) {
+        res.end();
+        return;
+      }
+
+      const nodeStream = Readable.fromWeb(upstream.body as unknown as NodeReadableStream<Uint8Array>);
+      nodeStream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(502).end();
+        } else if (!res.destroyed) {
+          res.destroy();
+        }
+      });
+      res.on('close', () => {
+        if (!nodeStream.destroyed) {
+          nodeStream.destroy();
+        }
+      });
+      nodeStream.pipe(res);
+    } catch (err) {
+      if (abortController.signal.aborted) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      const msg = err instanceof Error ? err.message : 'Failed to stream YouTube audio';
+      if (!res.headersSent) {
+        res.status(502).json({error: msg});
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    }
+  };
+
+  app.get('/api/yt-stream/:videoId', requireAuth, (req: AuthRequest, res) => {
+    void handleYouTubeStream(req, res, false);
+  });
+
+  app.head('/api/yt-stream/:videoId', requireAuth, (req: AuthRequest, res) => {
+    void handleYouTubeStream(req, res, true);
+  });
+
+  // Same-origin thumbnail proxy for CORS-safe dominant color extraction on YouTube streams
+  app.get('/api/yt-thumb/:videoId', requireAuth, async (req: AuthRequest, res) => {
+    const videoId = String(req.params.videoId || '').trim();
+    if (!isValidYouTubeVideoId(videoId)) {
+      res.status(400).end();
+      return;
+    }
+
+    try {
+      const thumbUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+      const upstream = await fetch(thumbUrl, {
+        headers: {Accept: 'image/*'},
+        redirect: 'follow',
+      });
+      if (!upstream.ok || !upstream.body) {
+        res.status(404).end();
+        return;
+      }
+      if (upstream.url && !isAllowedYouTubeMediaUrl(upstream.url)) {
+        await upstream.body.cancel().catch(() => {});
+        res.status(502).end();
+        return;
+      }
+      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.status(200).send(buf);
+    } catch {
+      if (!res.headersSent) res.status(502).end();
+    }
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ok: true, app: 'xlabplayer'});

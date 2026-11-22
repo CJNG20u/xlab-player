@@ -33,6 +33,52 @@ interface EditablePreviewItem extends MetadataPreviewItem {
   format: 'm4a' | 'opus';
 }
 
+function extractYouTubeVideoIdFromItem(item: MetadataPreviewItem): string {
+  const candidate = (item.id || '').trim();
+  if (/^[A-Za-z0-9_-]{6,20}$/.test(candidate)) {
+    return candidate;
+  }
+  if (item.url) {
+    try {
+      const parsed = new URL(item.url);
+      const v = parsed.searchParams.get('v');
+      if (v && /^[A-Za-z0-9_-]{6,20}$/.test(v)) return v;
+      if (parsed.hostname === 'youtu.be') {
+        const seg = parsed.pathname.replace(/^\//, '').split('/')[0];
+        if (/^[A-Za-z0-9_-]{6,20}$/.test(seg)) return seg;
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  return candidate;
+}
+
+function metadataItemToYouTubeTrack(item: MetadataPreviewItem): Track {
+  const videoId = extractYouTubeVideoIdFromItem(item);
+  return {
+    id: `yt-${videoId}`,
+    rel_path: '',
+    title: item.title,
+    artist: item.channel || item.artist || 'YouTube',
+    album: 'YouTube Stream',
+    track_number: null,
+    year: null,
+    duration: item.duration || 0,
+    format: 'm4a',
+    bitrate: 0,
+    size_bytes: 0,
+    cover_file: null,
+    dominant_color: '#181818',
+    added_at: '',
+    liked: false,
+    coverUrl: item.thumbnail_url || undefined,
+    streamUrl: `/api/yt-stream/${encodeURIComponent(videoId)}`,
+    isYouTubeStream: true,
+    youtubeUrl: item.url || `https://www.youtube.com/watch?v=${videoId}`,
+  };
+}
+
 export const SearchPage: React.FC = () => {
   const {user, isOfflineMode} = useAuth();
   const {
@@ -42,6 +88,7 @@ export const SearchPage: React.FC = () => {
     bumpLibraryRefresh,
     libraryRefreshVersion,
     isPlaying,
+    isBuffering,
     togglePlay,
   } = usePlayer();
   const {cachedTrackIds} = useOfflineLibrary();
@@ -62,9 +109,6 @@ export const SearchPage: React.FC = () => {
   const [activeSearchResultId, setActiveSearchResultId] = useState<string | null>(null);
   const [quickQueueingId, setQuickQueueingId] = useState<string | null>(null);
   const [quickQueuedIds, setQuickQueuedIds] = useState<Set<string>>(new Set());
-  const [previewingId, setPreviewingId] = useState<string | null>(null);
-  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
-  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Single-track OR Playlist Metadata Editor state
   const [previewItems, setPreviewItems] = useState<EditablePreviewItem[]>([]);
@@ -92,25 +136,6 @@ export const SearchPage: React.FC = () => {
   const flashToast = useCallback((msg: string) => {
     setActionToast(msg);
     setTimeout(() => setActionToast(null), 2800);
-  }, []);
-
-  const stopPreview = useCallback(() => {
-    if (previewAudioRef.current) {
-      previewAudioRef.current.pause();
-      previewAudioRef.current.removeAttribute('src');
-      previewAudioRef.current.load();
-    }
-    setPreviewingId(null);
-    setPreviewLoadingId(null);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (previewAudioRef.current) {
-        previewAudioRef.current.pause();
-        previewAudioRef.current.removeAttribute('src');
-      }
-    };
   }, []);
 
   // Load local /music library (or cached offline tracks when offline) for instant live filtering
@@ -239,57 +264,31 @@ export const SearchPage: React.FC = () => {
     };
   }, [bumpLibraryRefresh, canDownload, offline]);
 
-  const handleTogglePreview = useCallback(
-    (e: React.MouseEvent, item: MetadataPreviewItem) => {
+  const handlePlayYouTubeItem = useCallback(
+    (e: React.MouseEvent, item: MetadataPreviewItem, sourceList: MetadataPreviewItem[]) => {
       e.stopPropagation();
-      if (previewingId === item.id || previewLoadingId === item.id) {
-        stopPreview();
+      const clickedTrack = metadataItemToYouTubeTrack(item);
+      if (currentTrack?.id === clickedTrack.id) {
+        togglePlay();
         return;
       }
-      if (isPlaying) {
-        togglePlay();
-      }
-      if (!previewAudioRef.current) {
-        previewAudioRef.current = new Audio();
-      }
-      const audio = previewAudioRef.current;
-      audio.pause();
-      setPreviewLoadingId(item.id);
-      setPreviewingId(null);
-
-      audio.onplaying = () => {
-        setPreviewLoadingId(null);
-        setPreviewingId(item.id);
-      };
-      audio.onended = () => {
-        setPreviewingId(null);
-        setPreviewLoadingId(null);
-      };
-      audio.onerror = () => {
-        setPreviewingId(null);
-        setPreviewLoadingId(null);
-        flashToast('Preview unavailable for this track');
-      };
-
-      audio.src = getSSEUrl(`/api/download/preview-audio?url=${encodeURIComponent(item.url)}`);
-      void audio.play().catch(() => {
-        setPreviewLoadingId(null);
-        setPreviewingId(null);
-      });
+      const listToQueue = sourceList.length > 0 ? sourceList : [item];
+      const ytQueue = listToQueue.map(metadataItemToYouTubeTrack);
+      const matched = ytQueue.find((t) => t.id === clickedTrack.id) || clickedTrack;
+      playTrack(matched, ytQueue);
     },
-    [flashToast, isPlaying, previewLoadingId, previewingId, stopPreview, togglePlay]
+    [currentTrack?.id, playTrack, togglePlay]
   );
 
   const handlePlayLocalTrack = useCallback(
     (track: Track) => {
-      stopPreview();
       if (currentTrack?.id === track.id) {
         togglePlay();
       } else {
         playTrack(track, localMatches.length > 0 ? localMatches : [track]);
       }
     },
-    [currentTrack?.id, localMatches, playTrack, stopPreview, togglePlay]
+    [currentTrack?.id, localMatches, playTrack, togglePlay]
   );
 
   const handleFetchMetadata = async (e: React.FormEvent) => {
@@ -300,7 +299,6 @@ export const SearchPage: React.FC = () => {
       return;
     }
 
-    stopPreview();
     setFetchingMeta(true);
     setMetaError(null);
     setPreviewItems([]);
@@ -630,7 +628,8 @@ export const SearchPage: React.FC = () => {
             <div className="space-y-1.5">
               {localMatches.slice(0, 25).map((track) => {
                 const isCurrent = currentTrack?.id === track.id;
-                const isCachedOffline = cachedTrackIds.has(track.id);
+                const isCachedOffline =
+                  typeof track.id === 'number' && cachedTrackIds.has(track.id);
 
                 return (
                   <button
@@ -716,7 +715,6 @@ export const SearchPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  stopPreview();
                   setSearchResults([]);
                   setLastSearchTerm(null);
                   setActiveSearchResultId(null);
@@ -748,7 +746,7 @@ export const SearchPage: React.FC = () => {
                       : 'Find tracks in your library or on YouTube'}
                   </p>
                   <p className="text-xs text-[var(--text-muted)]">
-                    Preview audio inline and download directly into{' '}
+                    Stream full tracks right in the player or save directly into{' '}
                     <code className="font-mono text-[var(--text-secondary)]">{destinationLabel}</code> as{' '}
                     <code className="font-mono text-[var(--text-secondary)]">.{defaultFormat}</code>.
                   </p>
@@ -780,6 +778,10 @@ export const SearchPage: React.FC = () => {
 
                   <div className="space-y-2">
                     {searchResults.map((item) => {
+                      const ytTrackId = `yt-${extractYouTubeVideoIdFromItem(item)}`;
+                      const isCurrentStream = currentTrack?.id === ytTrackId;
+                      const isStreamPlaying = isCurrentStream && isPlaying && !isBuffering;
+                      const isStreamBuffering = isCurrentStream && isBuffering;
                       const isSelected = activeSearchResultId === item.id;
                       const isQuickQueueing = quickQueueingId === item.id;
                       const matchingJob = jobByUrl.get(item.url);
@@ -809,7 +811,7 @@ export const SearchPage: React.FC = () => {
                             }
                           }}
                           className={`group rounded-lg p-2.5 border transition-colors cursor-pointer space-y-2 ${
-                            isSelected
+                            isCurrentStream || isSelected
                               ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
                               : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
                           }`}
@@ -826,7 +828,9 @@ export const SearchPage: React.FC = () => {
                               <div className="flex items-center gap-2">
                                 <p
                                   className={`text-sm font-semibold truncate ${
-                                    isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
+                                    isCurrentStream || isSelected
+                                      ? 'text-[var(--accent)]'
+                                      : 'text-[var(--text-primary)]'
                                   }`}
                                 >
                                   {item.title}
@@ -849,26 +853,26 @@ export const SearchPage: React.FC = () => {
 
                               <button
                                 type="button"
-                                onClick={(e) => handleTogglePreview(e, item)}
+                                onClick={(e) => handlePlayYouTubeItem(e, item, searchResults)}
                                 title={
-                                  previewingId === item.id
-                                    ? 'Stop preview'
-                                    : 'Preview audio before downloading'
+                                  isStreamPlaying
+                                    ? 'Pause track'
+                                    : 'Play in player'
                                 }
                                 aria-label={
-                                  previewingId === item.id
-                                    ? `Stop previewing ${item.title}`
-                                    : `Preview ${item.title}`
+                                  isStreamPlaying
+                                    ? `Pause ${item.title}`
+                                    : `Play ${item.title}`
                                 }
                                 className={`flex h-9 w-9 items-center justify-center rounded-full border transition-all ${
-                                  previewingId === item.id || previewLoadingId === item.id
+                                  isCurrentStream
                                     ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
                                     : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
                                 }`}
                               >
-                                {previewLoadingId === item.id ? (
+                                {isStreamBuffering ? (
                                   <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : previewingId === item.id ? (
+                                ) : isStreamPlaying ? (
                                   <Pause className="w-4 h-4 fill-current" />
                                 ) : (
                                   <Play className="w-4 h-4 fill-current ml-0.5" />
@@ -880,7 +884,6 @@ export const SearchPage: React.FC = () => {
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    stopPreview();
                                     void playTrackById(matchingJob.track_id!);
                                   }}
                                   title="Play downloaded track"
@@ -1023,27 +1026,37 @@ export const SearchPage: React.FC = () => {
                                 className="w-16 h-16 sm:w-20 sm:h-20 rounded-md"
                                 iconSize={24}
                               />
-                              <button
-                                type="button"
-                                onClick={(e) => handleTogglePreview(e, item)}
-                                title={
-                                  previewingId === item.id ? 'Stop preview' : 'Preview audio'
-                                }
-                                aria-label={
-                                  previewingId === item.id
-                                    ? `Stop previewing ${item.title}`
-                                    : `Preview ${item.title}`
-                                }
-                                className="absolute bottom-1 right-1 flex h-7 w-7 items-center justify-center rounded-full bg-black/75 text-white hover:bg-[var(--accent)] hover:text-[var(--accent-contrast)] transition-colors"
-                              >
-                                {previewLoadingId === item.id ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                ) : previewingId === item.id ? (
-                                  <Pause className="w-3.5 h-3.5 fill-current" />
-                                ) : (
-                                  <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                                )}
-                              </button>
+                              {(() => {
+                                const ytId = `yt-${extractYouTubeVideoIdFromItem(item)}`;
+                                const isActiveItem = currentTrack?.id === ytId;
+                                const isItemPlaying = isActiveItem && isPlaying && !isBuffering;
+                                const isItemBuffering = isActiveItem && isBuffering;
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handlePlayYouTubeItem(e, item, previewItems)}
+                                    title={isItemPlaying ? 'Pause track' : 'Play in player'}
+                                    aria-label={
+                                      isItemPlaying
+                                        ? `Pause ${item.title}`
+                                        : `Play ${item.title}`
+                                    }
+                                    className={`absolute bottom-1 right-1 flex h-7 w-7 items-center justify-center rounded-full transition-colors ${
+                                      isActiveItem
+                                        ? 'bg-[var(--accent)] text-[var(--accent-contrast)]'
+                                        : 'bg-black/75 text-white hover:bg-[var(--accent)] hover:text-[var(--accent-contrast)]'
+                                    }`}
+                                  >
+                                    {isItemBuffering ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : isItemPlaying ? (
+                                      <Pause className="w-3.5 h-3.5 fill-current" />
+                                    ) : (
+                                      <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                                    )}
+                                  </button>
+                                );
+                              })()}
                             </div>
                           </div>
 
@@ -1200,7 +1213,6 @@ export const SearchPage: React.FC = () => {
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    stopPreview();
                                     void playTrackById(job.track_id!);
                                   }}
                                   className="inline-flex items-center gap-1 rounded-full bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors"

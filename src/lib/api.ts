@@ -1,4 +1,4 @@
-import type {LrcLine} from '../types';
+import type {LrcLine, Track} from '../types';
 
 const TOKEN_STORAGE_KEY = 'xlabplayer_token';
 
@@ -70,9 +70,64 @@ export function getStreamUrl(trackId: number): string {
     : `/api/stream/${trackId}`;
 }
 
+export function getTrackStreamUrl(
+  track: Pick<Track, 'id' | 'streamUrl' | 'isYouTubeStream'>
+): string {
+  const token = getStoredToken();
+  if (track.streamUrl) {
+    const sep = track.streamUrl.includes('?') ? '&' : '?';
+    return token
+      ? `${track.streamUrl}${sep}token=${encodeURIComponent(token)}`
+      : track.streamUrl;
+  }
+  return getStreamUrl(Number(track.id));
+}
+
 export function getCoverUrl(coverFile: string | null | undefined): string | null {
   if (!coverFile) return null;
   return `/api/covers/${encodeURIComponent(coverFile)}`;
+}
+
+export function getTrackCoverUrl(
+  track: Pick<Track, 'cover_file' | 'coverUrl'> | null | undefined
+): string | null {
+  if (!track) return null;
+  if (track.cover_file) return getCoverUrl(track.cover_file);
+  return track.coverUrl || null;
+}
+
+export function getYouTubeVideoId(
+  track: Pick<Track, 'id' | 'youtubeUrl' | 'streamUrl'> | null | undefined
+): string | null {
+  if (!track) return null;
+  if (typeof track.id === 'string' && track.id.startsWith('yt-')) {
+    const id = track.id.slice(3);
+    if (/^[A-Za-z0-9_-]{6,20}$/.test(id)) return id;
+  }
+  if (track.streamUrl) {
+    const match = /\/api\/yt-stream\/([A-Za-z0-9_-]{6,20})/.exec(track.streamUrl);
+    if (match) return match[1];
+  }
+  if (track.youtubeUrl) {
+    try {
+      const parsed = new URL(track.youtubeUrl);
+      const v = parsed.searchParams.get('v');
+      if (v && /^[A-Za-z0-9_-]{6,20}$/.test(v)) return v;
+      if (parsed.hostname === 'youtu.be') {
+        const seg = parsed.pathname.replace(/^\//, '').split('/')[0];
+        if (/^[A-Za-z0-9_-]{6,20}$/.test(seg)) return seg;
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  return null;
+}
+
+export function getYouTubeThumbProxyUrl(videoId: string): string {
+  const token = getStoredToken();
+  const base = `/api/yt-thumb/${encodeURIComponent(videoId)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
 export function getSSEUrl(path: string): string {

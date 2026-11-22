@@ -98,13 +98,17 @@ function rgbToHex(r: number, g: number, b: number): string {
  * Computes a stable album-level cache key for memoizing extracted artwork colors.
  */
 export function getAlbumColorCacheKey(track: {
-  id: number;
+  id: number | string;
   album?: string | null;
   artist?: string | null;
   cover_file?: string | null;
+  coverUrl?: string | null;
 }): string {
   if (track.cover_file) {
     return `cover:${track.cover_file}`;
+  }
+  if (track.coverUrl) {
+    return `ext-cover:${track.coverUrl}`;
   }
   const album = (track.album || '').trim().toLowerCase();
   const artist = (track.artist || '').trim().toLowerCase();
@@ -119,7 +123,7 @@ export function getAlbumColorCacheKey(track: {
  */
 export function getCachedDominantColor(
   albumKey: string | null | undefined,
-  trackId?: number | null
+  trackId?: number | string | null
 ): string | null {
   if (albumKey) {
     const byAlbum = dominantColorCache.get(albumKey);
@@ -135,7 +139,7 @@ export function getCachedDominantColor(
 function storeCachedDominantColor(
   hexColor: string,
   albumKey: string | null | undefined,
-  trackId?: number | null
+  trackId?: number | string | null
 ): void {
   if (albumKey) {
     dominantColorCache.set(albumKey, hexColor);
@@ -234,7 +238,7 @@ function sampleDominantHexFromImageElement(
 export function extractDominantColorFromImage(
   imageUrl: string | null | undefined,
   albumKey: string,
-  trackId?: number | null,
+  trackId?: number | string | null,
   fallbackColor?: string | null
 ): Promise<string> {
   const fallbackHex = normalizeHexColor(fallbackColor, DEFAULT_NOW_PLAYING_ACCENT);

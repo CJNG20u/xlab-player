@@ -1,8 +1,10 @@
 import {
+  Check,
   Download,
   Heart,
   Home,
   ListMusic,
+  Loader2,
   LogOut,
   Maximize2,
   Mic2,
@@ -62,10 +64,18 @@ export const AppShell: React.FC = () => {
     cycleRepeat,
     toggleLikeTrack,
     libraryRefreshVersion,
+    saveYouTubeTrackToLibrary,
+    getYouTubeSaveStatus,
   } = usePlayer();
 
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
+  const canDownload = Boolean(user?.can_download || user?.role === 'admin');
+  const [shellToast, setShellToast] = useState<string | null>(null);
+  const flashShellToast = useCallback((msg: string) => {
+    setShellToast(msg);
+    setTimeout(() => setShellToast(null), 2800);
+  }, []);
   const {isInstallable, isInstalled, install} = usePWAInstall();
   const navigate = useNavigate();
   const location = useLocation();
@@ -118,6 +128,15 @@ export const AppShell: React.FC = () => {
     location.pathname === '/search' ||
     location.pathname.startsWith('/playlists');
   const stageTint = currentTrack?.dominant_color || (isAppleStyle ? '#4a1822' : '#1c3b29');
+  const isCurrentYouTube = Boolean(currentTrack?.isYouTubeStream);
+  const currentYtSaveStatus =
+    currentTrack && isCurrentYouTube ? getYouTubeSaveStatus(currentTrack.id) : 'idle';
+
+  const handleSaveCurrentYouTube = useCallback(async () => {
+    if (!currentTrack || !currentTrack.isYouTubeStream) return;
+    const res = await saveYouTubeTrackToLibrary(currentTrack);
+    flashShellToast(res.message);
+  }, [currentTrack, flashShellToast, saveYouTubeTrackToLibrary]);
 
   // Keep mobile status bar synced to the active theme's base color on standard views
   useEffect(() => {
@@ -317,6 +336,7 @@ export const AppShell: React.FC = () => {
               >
                 <AlbumArt
                   coverFile={currentTrack.cover_file}
+                  externalUrl={currentTrack.coverUrl}
                   alt={currentTrack.title}
                   color={currentTrack.dominant_color}
                   className="w-14 h-14 rounded-md shadow-md"
@@ -331,28 +351,70 @@ export const AppShell: React.FC = () => {
                 >
                   {currentTrack.title}
                 </button>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {isCurrentYouTube ? (
+                    <span className="truncate text-xs text-[var(--text-secondary)]">
+                      {currentTrack.artist}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        navigate(`/?artist=${encodeURIComponent(currentTrack.artist)}`)
+                      }
+                      className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left"
+                    >
+                      {currentTrack.artist}
+                    </button>
+                  )}
+                  {isCurrentYouTube && (
+                    <span className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] leading-none">
+                      YouTube
+                    </span>
+                  )}
+                </div>
+              </div>
+              {isCurrentYouTube ? (
+                canDownload && !offline ? (
+                  <button
+                    type="button"
+                    disabled={currentYtSaveStatus === 'saving'}
+                    onClick={() => void handleSaveCurrentYouTube()}
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                      currentYtSaveStatus === 'saved'
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
+                    }`}
+                    title={
+                      currentYtSaveStatus === 'saved'
+                        ? 'Queued for library download'
+                        : 'Save to Library'
+                    }
+                    aria-label="Save to Library"
+                  >
+                    {currentYtSaveStatus === 'saving' ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : currentYtSaveStatus === 'saved' ? (
+                      <Check className="w-4 h-4 stroke-[2.5]" />
+                    ) : (
+                      <Plus className="w-4 h-4 stroke-[2.5]" />
+                    )}
+                  </button>
+                ) : null
+              ) : (
                 <button
                   type="button"
-                  onClick={() =>
-                    navigate(`/?artist=${encodeURIComponent(currentTrack.artist)}`)
-                  }
-                  className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left"
+                  onClick={() => void toggleLikeTrack(currentTrack.id)}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                    currentTrack.liked
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                  aria-label={currentTrack.liked ? 'Unlike track' : 'Like track'}
                 >
-                  {currentTrack.artist}
+                  <Heart className={`w-4 h-4 ${currentTrack.liked ? 'fill-current' : ''}`} />
                 </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => void toggleLikeTrack(currentTrack.id)}
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
-                  currentTrack.liked
-                    ? 'text-[var(--accent)]'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                }`}
-                aria-label={currentTrack.liked ? 'Unlike track' : 'Like track'}
-              >
-                <Heart className={`w-4 h-4 ${currentTrack.liked ? 'fill-current' : ''}`} />
-              </button>
+              )}
             </>
           ) : (
             <div className="flex items-center gap-3 text-[var(--text-muted)]">
@@ -549,6 +611,7 @@ export const AppShell: React.FC = () => {
             >
               <AlbumArt
                 coverFile={currentTrack.cover_file}
+                externalUrl={currentTrack.coverUrl}
                 alt={currentTrack.title}
                 color={currentTrack.dominant_color}
                 className="w-11 h-11 rounded-md pointer-events-none shadow-sm"
@@ -562,31 +625,76 @@ export const AppShell: React.FC = () => {
                 >
                   {currentTrack.title}
                 </p>
-                <p
-                  className={`text-xs truncate ${
-                    theme === 'apple-light' ? 'text-[#6E6E73]' : 'text-white/75'
-                  }`}
-                >
-                  {currentTrack.artist}
-                </p>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <p
+                    className={`text-xs truncate ${
+                      theme === 'apple-light' ? 'text-[#6E6E73]' : 'text-white/75'
+                    }`}
+                  >
+                    {currentTrack.artist}
+                  </p>
+                  {isCurrentYouTube && (
+                    <span
+                      className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
+                        theme === 'apple-light'
+                          ? 'bg-black/[0.07] text-[#6E6E73]'
+                          : 'bg-white/15 text-white/85'
+                      }`}
+                    >
+                      YT
+                    </span>
+                  )}
+                </div>
               </div>
             </button>
 
-            <button
-              type="button"
-              data-no-swipe="true"
-              onClick={() => void toggleLikeTrack(currentTrack.id)}
-              className={`flex h-11 w-11 items-center justify-center ${
-                currentTrack.liked
-                  ? 'text-[var(--accent)]'
-                  : theme === 'apple-light'
-                    ? 'text-[#6E6E73]'
-                    : 'text-white/80'
-              }`}
-              aria-label="Like track"
-            >
-              <Heart className={`w-5 h-5 ${currentTrack.liked ? 'fill-current' : ''}`} />
-            </button>
+            {isCurrentYouTube ? (
+              canDownload && !offline ? (
+                <button
+                  type="button"
+                  data-no-swipe="true"
+                  disabled={currentYtSaveStatus === 'saving'}
+                  onClick={() => void handleSaveCurrentYouTube()}
+                  className={`flex h-11 w-11 items-center justify-center ${
+                    currentYtSaveStatus === 'saved'
+                      ? 'text-[var(--accent)]'
+                      : theme === 'apple-light'
+                        ? 'text-[#6E6E73]'
+                        : 'text-white/85'
+                  }`}
+                  title={
+                    currentYtSaveStatus === 'saved'
+                      ? 'Queued for library download'
+                      : 'Save to Library'
+                  }
+                  aria-label="Save to Library"
+                >
+                  {currentYtSaveStatus === 'saving' ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : currentYtSaveStatus === 'saved' ? (
+                    <Check className="w-5 h-5 stroke-[2.5]" />
+                  ) : (
+                    <Plus className="w-5 h-5 stroke-[2.5]" />
+                  )}
+                </button>
+              ) : null
+            ) : (
+              <button
+                type="button"
+                data-no-swipe="true"
+                onClick={() => void toggleLikeTrack(currentTrack.id)}
+                className={`flex h-11 w-11 items-center justify-center ${
+                  currentTrack.liked
+                    ? 'text-[var(--accent)]'
+                    : theme === 'apple-light'
+                      ? 'text-[#6E6E73]'
+                      : 'text-white/80'
+                }`}
+                aria-label="Like track"
+              >
+                <Heart className={`w-5 h-5 ${currentTrack.liked ? 'fill-current' : ''}`} />
+              </button>
+            )}
             <button
               type="button"
               data-no-swipe="true"
@@ -644,6 +752,12 @@ export const AppShell: React.FC = () => {
             })}
           </div>
         </nav>
+      )}
+
+      {shellToast && (
+        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
+          {shellToast}
+        </div>
       )}
 
       {/* Offline Mode Indicator */}

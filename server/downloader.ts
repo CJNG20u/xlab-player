@@ -790,3 +790,151 @@ export function spawnAudioPreviewStream(videoUrl: string) {
   ffProc.on('error', cleanup);
   return {stream: ffProc.stdout, cleanup};
 }
+
+const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{6,20}$/;
+const YT_STREAM_CACHE_TTL_MS = 30 * 60 * 1000;
+const YT_STREAM_CACHE_MAX_ENTRIES = 500;
+const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
+  '.googlevideo.com',
+  '.youtube.com',
+  '.ytimg.com',
+  '.googleusercontent.com',
+];
+
+const ytStreamUrlCache = new Map<string, {url: string; expiresAt: number}>();
+const ytStreamInFlight = new Map<string, Promise<string>>();
+
+export function isValidYouTubeVideoId(videoId: string): boolean {
+  return YOUTUBE_VIDEO_ID_RE.test(videoId);
+}
+
+export function isAllowedYouTubeMediaUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password) return false;
+  const host = parsed.hostname.toLowerCase();
+  if (!host || host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) {
+    return false;
+  }
+  // Reject raw IPv4 / IPv6 literals to prevent loopback or private network SSRF
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) {
+    return false;
+  }
+  return (
+    host === 'googlevideo.com' ||
+    ALLOWED_YT_MEDIA_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))
+  );
+}
+
+function pruneExpiredYtStreamCache(now: number): void {
+  for (const [key, entry] of ytStreamUrlCache.entries()) {
+    if (entry.expiresAt <= now) {
+      ytStreamUrlCache.delete(key);
+    }
+  }
+  if (ytStreamUrlCache.size > YT_STREAM_CACHE_MAX_ENTRIES) {
+    const excess = ytStreamUrlCache.size - YT_STREAM_CACHE_MAX_ENTRIES;
+    let removed = 0;
+    for (const key of ytStreamUrlCache.keys()) {
+      ytStreamUrlCache.delete(key);
+      removed += 1;
+      if (removed >= excess) break;
+    }
+  }
+}
+
+export function invalidateYouTubeAudioStreamCache(videoId: string): void {
+  ytStreamUrlCache.delete(videoId);
+}
+
+export async function resolveYouTubeAudioStreamUrl(
+  videoId: string,
+  options: {forceRefresh?: boolean} = {}
+): Promise<{url: string; fromCache: boolean}> {
+  if (!isValidYouTubeVideoId(videoId)) {
+    throw new Error('Invalid YouTube video ID');
+  }
+
+  const now = Date.now();
+  if (!options.forceRefresh) {
+    const cached = ytStreamUrlCache.get(videoId);
+    if (cached && cached.expiresAt > now) {
+      return {url: cached.url, fromCache: true};
+    }
+    if (cached) {
+      ytStreamUrlCache.delete(videoId);
+    }
+
+    const existingPromise = ytStreamInFlight.get(videoId);
+    if (existingPromise) {
+      const url = await existingPromise;
+      return {url, fromCache: false};
+    }
+  }
+
+  const resolvePromise = (async (): Promise<string> => {
+    const ytdlpPath = getYtdlpPath();
+    const tempCookiePath = createTempCookiesCopy();
+    try {
+      const args = [
+        ...buildResilienceArgs(tempCookiePath, {includeSleep: false}),
+        '-f',
+        'bestaudio[ext=m4a]/bestaudio',
+        '-g',
+        '--no-playlist',
+        '--no-warnings',
+        '--',
+        `https://www.youtube.com/watch?v=${videoId}`,
+      ];
+
+      const {stdout} = await execFileAsync(ytdlpPath, args, {
+        timeout: 30000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+
+      const directUrl = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => /^https:\/\//i.test(line));
+
+      if (!directUrl || !isAllowedYouTubeMediaUrl(directUrl)) {
+        throw new Error('Could not resolve a valid YouTube audio stream URL');
+      }
+
+      const resolvedAt = Date.now();
+      pruneExpiredYtStreamCache(resolvedAt);
+      ytStreamUrlCache.set(videoId, {
+        url: directUrl,
+        expiresAt: resolvedAt + YT_STREAM_CACHE_TTL_MS,
+      });
+      return directUrl;
+    } finally {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        try {
+          fs.unlinkSync(tempCookiePath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  })();
+
+  if (!options.forceRefresh) {
+    ytStreamInFlight.set(videoId, resolvePromise);
+  }
+
+  try {
+    const url = await resolvePromise;
+    return {url, fromCache: false};
+  } finally {
+    if (ytStreamInFlight.get(videoId) === resolvePromise) {
+      ytStreamInFlight.delete(videoId);
+    }
+  }
+}
+

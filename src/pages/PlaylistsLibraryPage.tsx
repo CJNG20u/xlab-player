@@ -36,7 +36,13 @@ import {useTheme} from '../context/ThemeContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
-import {apiFetch, formatDuration, getCoverUrl} from '../lib/api';
+import {
+  apiFetch,
+  formatDuration,
+  getTrackCoverUrl,
+  getYouTubeThumbProxyUrl,
+  getYouTubeVideoId,
+} from '../lib/api';
 import {
   computeLightTintedTopHex,
   computeNowPlayingTopHex,
@@ -352,12 +358,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
   );
 
   const selectedTracks = useMemo(
-    () => filteredTracks.filter((t) => selectedIds.has(t.id)),
+    () =>
+      filteredTracks.filter(
+        (t) => typeof t.id === 'number' && selectedIds.has(t.id)
+      ),
     [filteredTracks, selectedIds]
   );
 
   const selectedIdArray = useMemo(
-    () => selectedTracks.map((t) => t.id),
+    () => selectedTracks.map((t) => t.id).filter((id): id is number => typeof id === 'number'),
     [selectedTracks]
   );
 
@@ -387,7 +396,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
     if (allVisibleSelected) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(filteredTracks.map((t) => t.id)));
+      setSelectedIds(
+        new Set(
+          filteredTracks.map((t) => t.id).filter((id): id is number => typeof id === 'number')
+        )
+      );
     }
   }, [allVisibleSelected, filteredTracks]);
 
@@ -427,12 +440,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
   const playlistAllTracksCached = useMemo(() => {
     if (!activePlaylist || tracks.length === 0) return false;
-    return tracks.every((t) => cachedTrackIds.has(t.id));
+    return tracks.every((t) => typeof t.id === 'number' && cachedTrackIds.has(t.id));
   }, [activePlaylist, tracks, cachedTrackIds]);
 
   const playlistCachedCount = useMemo(() => {
     if (!activePlaylist || tracks.length === 0) return 0;
-    return tracks.filter((t) => cachedTrackIds.has(t.id)).length;
+    return tracks.filter((t) => typeof t.id === 'number' && cachedTrackIds.has(t.id)).length;
   }, [activePlaylist, tracks, cachedTrackIds]);
 
   const handleDownloadPlaylistOffline = async () => {
@@ -447,7 +460,9 @@ export const PlaylistsLibraryPage: React.FC = () => {
     // If every track in the playlist is already cached, remove offline copies for this playlist
     if (playlistAllTracksCached) {
       for (const t of tracks) {
-        await removeTrack(t.id);
+        if (typeof t.id === 'number') {
+          await removeTrack(t.id);
+        }
       }
       flashToast(`Removed "${activePlaylist.name}" from offline storage`);
       return;
@@ -464,11 +479,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
     const controller = new AbortController();
     playlistDownloadAbortRef.current = controller;
-    const allTrackIds = tracks.map((t) => t.id);
+    const allTrackIds = tracks
+      .map((t) => t.id)
+      .filter((id): id is number => typeof id === 'number');
 
     await saveOfflinePlaylistMetadata(activePlaylist, allTrackIds);
 
-    let completed = tracks.filter((t) => cachedTrackIds.has(t.id)).length;
+    let completed = tracks.filter(
+      (t) => typeof t.id === 'number' && cachedTrackIds.has(t.id)
+    ).length;
     setPlaylistDownloadProgress({
       playlistId: activePlaylist.id,
       completed,
@@ -479,7 +498,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     try {
       for (const track of tracks) {
         if (controller.signal.aborted) break;
-        if (cachedTrackIds.has(track.id)) continue;
+        if (typeof track.id !== 'number' || cachedTrackIds.has(track.id)) continue;
         try {
           await downloadTrack(track, {
             playlist: activePlaylist,
@@ -569,7 +588,9 @@ export const PlaylistsLibraryPage: React.FC = () => {
       const removedIds = res.deletedIds || selectedIdArray;
       const removedSet = new Set(removedIds);
       handleDeletedTracks(removedIds);
-      setTracks((prev) => prev.filter((t) => !removedSet.has(t.id)));
+      setTracks((prev) =>
+        prev.filter((t) => !(typeof t.id === 'number' && removedSet.has(t.id)))
+      );
       setBatchDeleteOpen(false);
       exitSelectionMode();
       bumpLibraryRefresh();
@@ -669,7 +690,13 @@ export const PlaylistsLibraryPage: React.FC = () => {
     () => (heroTrack ? getAlbumColorCacheKey(heroTrack) : null),
     [heroTrack]
   );
-  const heroCoverUrl = heroOfflineCoverUrl || getCoverUrl(heroCoverFile);
+  const heroYtVideoId = useMemo(
+    () => (heroTrack?.isYouTubeStream ? getYouTubeVideoId(heroTrack) : null),
+    [heroTrack]
+  );
+  const heroCoverUrl =
+    heroOfflineCoverUrl ||
+    (heroYtVideoId ? getYouTubeThumbProxyUrl(heroYtVideoId) : getTrackCoverUrl(heroTrack));
   const viewFallbackColor = HOME_VIEW_META[activeHomeTab].fallbackColor;
 
   // Sample hero cover dominant color on our reusable 32x32 offscreen canvas (memoized in memory)
@@ -1171,9 +1198,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         : 'shadow-[0_20px_50px_rgba(0,0,0,0.55)]'
                     }`}
                   >
-                    {heroTrack?.cover_file ? (
+                    {heroTrack?.cover_file || heroTrack?.coverUrl ? (
                       <AlbumArt
                         coverFile={heroTrack.cover_file}
+                        externalUrl={heroTrack.coverUrl}
                         alt={heroTrack.title || activeHomeTitle}
                         color={heroSampledColor || heroTrack.dominant_color}
                         className="w-full h-full rounded-2xl pointer-events-none select-none"

@@ -61,14 +61,16 @@ export function useOfflineLibrary() {
         signal?: AbortSignal;
       }
     ): Promise<boolean> => {
-      if (activeDownloads.has(track.id)) return false;
-      activeDownloads.add(track.id);
+      if (typeof track.id !== 'number') return false;
+      const trackId = track.id;
+      if (activeDownloads.has(trackId)) return false;
+      activeDownloads.add(trackId);
       notifyDownloadState();
       try {
         await downloadTrackOffline(track, options);
         return true;
       } finally {
-        activeDownloads.delete(track.id);
+        activeDownloads.delete(trackId);
         notifyDownloadState();
       }
     },

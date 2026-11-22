@@ -230,7 +230,11 @@ export async function downloadTrackOffline(
     );
   }
 
-  const streamUrl = getStreamUrl(track.id);
+  if (typeof track.id !== 'number') {
+    throw new Error('Save YouTube tracks to your library before caching offline.');
+  }
+  const trackId = track.id;
+  const streamUrl = getStreamUrl(trackId);
   const headers = new Headers();
   const token = getStoredToken();
   if (token) {
@@ -287,15 +291,15 @@ export async function downloadTrackOffline(
     headers: {
       'Content-Type': audioMimeType,
       'Content-Length': String(audioBlob.size),
-      'X-Xlab-Track-Id': String(track.id),
+      'X-Xlab-Track-Id': String(trackId),
     },
   });
-  await cache.put(getAudioCacheKey(track.id), cacheResponse);
+  await cache.put(getAudioCacheKey(trackId), cacheResponse);
 
   // Cache cover art blob & lyrics in IndexedDB in parallel
   const [, lyrics] = await Promise.all([
     cacheCoverArtBlob(track.cover_file),
-    fetchLyricsBestEffort(track.id),
+    fetchLyricsBestEffort(trackId),
   ]);
 
   const record: OfflineTrackRecord = {
@@ -352,7 +356,7 @@ export async function removeOfflineTrack(trackId: number): Promise<void> {
   )) as OfflinePlaylistRecord[];
 
   const remainingTracks = allTracks.filter((t) => t.id !== trackId);
-  const remainingTrackIds = new Set(remainingTracks.map((t) => t.id));
+  const remainingTrackIds = new Set<number | string>(remainingTracks.map((t) => t.id));
   const coverStillReferenced = Boolean(
     targetTrack?.cover_file &&
       remainingTracks.some((t) => t.cover_file === targetTrack.cover_file)
@@ -461,7 +465,7 @@ export async function getOfflinePlaylistTracks(
     ]);
     if (!playlist) return null;
 
-    const byId = new Map(allTracks.map((t) => [t.id, t]));
+    const byId = new Map<number | string, OfflineTrackRecord>(allTracks.map((t) => [t.id, t]));
     const orderedTracks: OfflineTrackRecord[] = [];
     for (const id of playlist.trackIds || []) {
       const found = byId.get(id);
@@ -564,7 +568,7 @@ export async function getOfflineStorageUsage(): Promise<OfflineStorageUsage> {
     audioBytes = tracks.reduce((sum, t) => sum + (t.cachedBytes || t.size_bytes || 0), 0);
     coverBytes = covers.reduce((sum, c) => sum + (c.sizeBytes || c.blob?.size || 0), 0);
 
-    const trackIdSet = new Set(tracks.map((t) => t.id));
+    const trackIdSet = new Set<number | string>(tracks.map((t) => t.id));
     playlistCount = playlists.filter((p) =>
       (p.trackIds || []).some((id) => trackIdSet.has(id))
     ).length;
