@@ -11,6 +11,7 @@ import {
   Plus,
   Repeat,
   Repeat1,
+  Search,
   Settings,
   Shuffle,
   SkipBack,
@@ -109,6 +110,7 @@ export const AppShell: React.FC = () => {
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const volPct = (isMuted ? 0 : volume) * 100;
   const isNowPlayingPage = location.pathname === '/now-playing';
+  const isSearchPage = location.pathname === '/search';
   const stageTint = currentTrack?.dominant_color || '#1c3b29';
 
   // Keep mobile status bar synced to the main app header background (#121212) whenever not in Now Playing
@@ -121,9 +123,7 @@ export const AppShell: React.FC = () => {
   const navItems = [
     {to: '/', label: 'Library', icon: Library, end: true},
     {to: '/playlists', label: 'Playlists', icon: ListMusic, end: false},
-    ...(user?.can_download || user?.role === 'admin'
-      ? [{to: '/download', label: 'Downloader', icon: Download, end: false}]
-      : []),
+    {to: '/search', label: 'Search', icon: Search, end: false},
     {to: '/settings', label: 'Settings', icon: Settings, end: false},
   ];
 
@@ -283,7 +283,11 @@ export const AppShell: React.FC = () => {
                 : `linear-gradient(180deg, ${stageTint}55 0%, #121212 280px, #121212 100%)`,
             }}
           >
-            <div className={isNowPlayingPage ? 'h-full' : 'pb-mobile-stage md:pb-8'}>
+            <div
+              className={
+                isNowPlayingPage ? 'h-full' : isSearchPage ? '' : 'pb-mobile-stage md:pb-8'
+              }
+            >
               <Outlet />
             </div>
           </main>

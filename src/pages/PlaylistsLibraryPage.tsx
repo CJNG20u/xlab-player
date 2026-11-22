@@ -1197,18 +1197,18 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     ? 'Tap the download button next to any track, or open a playlist and tap Download Playlist Offline to listen without an internet connection.'
                     : activeTab === 'liked'
                       ? 'Tap the heart icon next to any track to save it to your Liked Songs.'
-                      : 'Upload audio files, download tracks with yt-dlp, or configure and scan your NAS mount path in Settings.'}
+                      : 'Search and download tracks with yt-dlp, or configure and scan your NAS mount path in Settings.'}
               </p>
               {!searchQuery && !artistFilter && activeTab !== 'liked' && activeTab !== 'offline' && !offline && (
                 <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
                   {(user?.can_download || user?.role === 'admin') && (
                     <button
                       type="button"
-                      onClick={() => navigate('/download')}
+                      onClick={() => navigate('/search')}
                       className="inline-flex items-center gap-2 rounded-full bg-[#1DB954] px-5 py-2.5 text-sm font-bold text-black hover:bg-[#1ED760]"
                     >
-                      <Download className="w-4 h-4" />
-                      Open Downloader & Uploader
+                      <Search className="w-4 h-4" />
+                      Search YouTube & Download
                     </button>
                   )}
                   {user?.role === 'admin' && (

@@ -5,9 +5,9 @@ import {AppShell} from './components/AppShell';
 import {AuthProvider, useAuth} from './context/AuthContext';
 import {PlayerProvider} from './context/PlayerContext';
 import {AuthPage} from './pages/AuthPage';
-import {DownloaderPage} from './pages/DownloaderPage';
 import {NowPlayingPage} from './pages/NowPlayingPage';
 import {PlaylistsLibraryPage} from './pages/PlaylistsLibraryPage';
+import {SearchPage} from './pages/SearchPage';
 import {SettingsPage} from './pages/SettingsPage';
 
 const AuthenticatedRoutes: React.FC = () => {
@@ -34,16 +34,8 @@ const AuthenticatedRoutes: React.FC = () => {
           <Route path="/playlists" element={<PlaylistsLibraryPage />} />
           <Route path="/playlists/:id" element={<PlaylistsLibraryPage />} />
           <Route path="/now-playing" element={<NowPlayingPage />} />
-          <Route
-            path="/download"
-            element={
-              user.can_download || user.role === 'admin' ? (
-                <DownloaderPage />
-              ) : (
-                <Navigate to="/" replace />
-              )
-            }
-          />
+          <Route path="/search" element={<SearchPage />} />
+          <Route path="/download" element={<Navigate to="/search" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
