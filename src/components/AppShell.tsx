@@ -1,5 +1,6 @@
 import {
   Check,
+  Compass,
   Download,
   Heart,
   Home,
@@ -13,7 +14,6 @@ import {
   Plus,
   Repeat,
   Repeat1,
-  Search,
   Settings,
   Shuffle,
   SkipBack,
@@ -125,6 +125,7 @@ export const AppShell: React.FC = () => {
   const isHomePage = location.pathname === '/';
   const hasOwnBottomClearance =
     isHomePage ||
+    location.pathname === '/discover' ||
     location.pathname === '/search' ||
     location.pathname.startsWith('/playlists');
   const stageTint = currentTrack?.dominant_color || (isAppleStyle ? '#4a1822' : '#1c3b29');
@@ -148,7 +149,7 @@ export const AppShell: React.FC = () => {
   const navItems = [
     {to: '/', label: 'Home', icon: Home, end: true},
     {to: '/playlists', label: 'Playlists', icon: ListMusic, end: false},
-    {to: '/search', label: 'Search', icon: Search, end: false},
+    {to: '/discover', label: 'Discover', icon: Compass, end: false},
     {to: '/settings', label: 'Settings', icon: Settings, end: false},
   ];
 

@@ -1006,3 +1006,651 @@ export async function resolveYouTubeAudioStreamUrl(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Personalized Discover Feed (SQLite seed artists + fast yt-dlp flat search)
+// ---------------------------------------------------------------------------
+
+export interface DiscoverNewReleaseItem {
+  videoId: string;
+  url: string;
+  title: string;
+  artist: string;
+  releaseLabel: string;
+  duration: number;
+  thumbnailUrl: string;
+  fallbackThumbnailUrl: string;
+  isNew: boolean;
+  seedArtist: string | null;
+}
+
+export interface DiscoverArtistItem {
+  id: string;
+  name: string;
+  subtitle: string;
+  seedArtist: string | null;
+  videoId: string;
+  thumbnailUrl: string;
+  fallbackThumbnailUrl: string;
+}
+
+export interface DiscoverAlbumItem {
+  videoId: string;
+  url: string;
+  title: string;
+  artist: string;
+  subtitle: string;
+  duration: number;
+  thumbnailUrl: string;
+  fallbackThumbnailUrl: string;
+  seedArtist: string | null;
+}
+
+export interface DiscoverFeedResponse {
+  seeds: string[];
+  basedOnLibrary: boolean;
+  cached: boolean;
+  generatedAt: string;
+  newReleases: DiscoverNewReleaseItem[];
+  artistsToDiscover: DiscoverArtistItem[];
+  albumsForYou: DiscoverAlbumItem[];
+}
+
+const DISCOVER_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const DISCOVER_CACHE_MAX_ENTRIES = 50;
+
+const discoverFeedCache = new Map<
+  string,
+  {data: Omit<DiscoverFeedResponse, 'cached'>; expiresAt: number}
+>();
+const discoverInFlight = new Map<string, Promise<Omit<DiscoverFeedResponse, 'cached'>>>();
+
+const IGNORED_ARTIST_NAMES = new Set([
+  '',
+  'unknown',
+  'unknown artist',
+  'unknown channel',
+  'various',
+  'various artists',
+  'va',
+  'v.a.',
+  'youtube',
+  'none',
+  'n/a',
+  'null',
+  'soundtrack',
+  'original soundtrack',
+  'ost',
+  'compilation',
+  'music',
+  'official',
+  'topic',
+  'audio',
+  'tracks',
+  'playlist',
+  'mix',
+]);
+
+const GENERIC_CHANNEL_PATTERN =
+  /\b(records|recordings|music|vevo|radio|playlist|playlists|mix|mixes|lyrics|lyric|vibes|hits|tv|hd|channel|official\s*audio|sounds|nation|club|sessions|archive|fm|beats|lo-?fi|compilation|top\s*\d+|best\s*of|trending|charts)\b/i;
+
+function sanitizeDiscoverSearchTerm(raw: string): string {
+  return raw
+    .replace(/[\r\n\t\0]/g, ' ')
+    .replace(/^[-]+/, '')
+    .replace(/["'`$\\;<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
+}
+
+function normalizeArtistKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function cleanArtistLabel(raw: string): string {
+  return raw
+    .replace(/\s*-\s*Topic$/i, '')
+    .replace(/\s*VEVO$/i, '')
+    .replace(/\s*\(Official\)$/i, '')
+    .replace(/\s+Official$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanTrackTitle(rawTitle: string, artist: string): string {
+  let title = rawTitle
+    .replace(/\s*[\[(](?:official\s+)?(?:music\s+)?(?:video|audio|lyric\s+video|lyrics|visualizer|hd|4k|hq)[\])]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (artist) {
+    const escaped = artist.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const prefixRe = new RegExp(`^${escaped}\\s*[-–—:|]\\s*`, 'i');
+    const stripped = title.replace(prefixRe, '').trim();
+    if (stripped.length >= 2) {
+      title = stripped;
+    }
+  }
+  return title || rawTitle.trim() || 'Untitled';
+}
+
+function formatReleaseLabel(entry: Record<string, unknown>, fallback: string): string {
+  const uploadDate = typeof entry.upload_date === 'string' ? entry.upload_date.trim() : '';
+  if (/^\d{8}$/.test(uploadDate)) {
+    const year = uploadDate.slice(0, 4);
+    const monthIdx = Number(uploadDate.slice(4, 6)) - 1;
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    if (monthIdx >= 0 && monthIdx < 12) {
+      return `Single · ${months[monthIdx]} ${year}`;
+    }
+    return `Single · ${year}`;
+  }
+  const releaseYear = Number(entry.release_year);
+  if (Number.isFinite(releaseYear) && releaseYear >= 1950 && releaseYear <= 2100) {
+    return `Single · ${releaseYear}`;
+  }
+  return fallback;
+}
+
+function sanitizeHttpsThumbUrl(raw: string): string {
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'https:') {
+      return parsed.toString();
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function isValidCandidateArtist(name: string): boolean {
+  const cleaned = cleanArtistLabel(name);
+  if (cleaned.length < 2 || cleaned.length > 42) return false;
+  const lower = cleaned.toLowerCase();
+  if (IGNORED_ARTIST_NAMES.has(lower)) return false;
+  if (/^https?:\/\//i.test(cleaned)) return false;
+  return true;
+}
+
+export function pickDiscoverSeedArtists(userId: number, maxSeeds = 3): string[] {
+  const scores = new Map<string, {display: string; score: number}>();
+
+  const addScore = (rawArtist: string | null | undefined, weight: number) => {
+    if (!rawArtist) return;
+    // Split multi-artist tags lightly to keep the primary artist crisp
+    const primary = rawArtist.split(/\s*(?:,|&|feat\.?|ft\.?|x|\/|;)\s*/i)[0]?.trim() || rawArtist.trim();
+    const cleaned = cleanArtistLabel(primary);
+    if (!isValidCandidateArtist(cleaned)) return;
+    const sanitized = sanitizeDiscoverSearchTerm(cleaned);
+    if (!sanitized) return;
+    const key = normalizeArtistKey(sanitized);
+    if (!key) return;
+    const existing = scores.get(key);
+    if (existing) {
+      existing.score += weight;
+    } else {
+      scores.set(key, {display: sanitized, score: weight});
+    }
+  };
+
+  // 1. User's liked tracks (strongest personal signal)
+  const likedRows = db
+    .prepare(
+      `SELECT t.artist, COUNT(*) as cnt
+       FROM liked_tracks lt
+       JOIN tracks t ON t.id = lt.track_id
+       WHERE lt.user_id = ?
+       GROUP BY t.artist
+       ORDER BY MAX(lt.liked_at) DESC, cnt DESC
+       LIMIT 20`
+    )
+    .all(userId) as Array<{artist: string; cnt: number}>;
+  for (const row of likedRows) {
+    addScore(row.artist, 5 * Math.min(row.cnt, 6));
+  }
+
+  // 2. User's playlist tracks
+  const playlistRows = db
+    .prepare(
+      `SELECT t.artist, COUNT(*) as cnt
+       FROM playlist_tracks pt
+       JOIN playlists p ON p.id = pt.playlist_id
+       JOIN tracks t ON t.id = pt.track_id
+       WHERE p.user_id = ?
+       GROUP BY t.artist
+       ORDER BY MAX(pt.added_at) DESC, cnt DESC
+       LIMIT 20`
+    )
+    .all(userId) as Array<{artist: string; cnt: number}>;
+  for (const row of playlistRows) {
+    addScore(row.artist, 3 * Math.min(row.cnt, 6));
+  }
+
+  // 3. User's recent download history
+  const downloadRows = db
+    .prepare(
+      `SELECT artist, COUNT(*) as cnt
+       FROM download_jobs
+       WHERE user_id = ? AND status = 'completed' AND TRIM(artist) != ''
+       GROUP BY artist
+       ORDER BY MAX(created_at) DESC
+       LIMIT 15`
+    )
+    .all(userId) as Array<{artist: string; cnt: number}>;
+  for (const row of downloadRows) {
+    addScore(row.artist, 2.5 * Math.min(row.cnt, 5));
+  }
+
+  // 4. Local library tracks (most populated & recently added artists)
+  const libraryRows = db
+    .prepare(
+      `SELECT artist, COUNT(*) as cnt
+       FROM tracks
+       WHERE TRIM(artist) != ''
+       GROUP BY artist
+       ORDER BY cnt DESC, MAX(added_at) DESC
+       LIMIT 30`
+    )
+    .all() as Array<{artist: string; cnt: number}>;
+  for (const row of libraryRows) {
+    addScore(row.artist, Math.min(row.cnt, 10));
+  }
+
+  return Array.from(scores.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxSeeds)
+    .map((entry) => entry.display);
+}
+
+async function runFlatYtSearch(
+  searchSpec: string,
+  tempCookiePath: string | null
+): Promise<Array<Record<string, unknown>>> {
+  const ytdlpPath = getYtdlpPath();
+  const args = [
+    '--flat-playlist',
+    '--dump-single-json',
+    '--no-warnings',
+    '--js-runtimes',
+    'node',
+    '--force-ipv4',
+  ];
+  if (tempCookiePath) {
+    args.push('--cookies', tempCookiePath);
+  }
+  if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+    args.push('--remote-components', 'ejs:github');
+  }
+  args.push('--', searchSpec);
+
+  const {stdout} = await execFileAsync(ytdlpPath, args, {
+    timeout: 25000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+
+  const trimmed = stdout.trim();
+  const jsonStart = trimmed.indexOf('{');
+  if (jsonStart === -1) return [];
+
+  const parsed = JSON.parse(trimmed.slice(jsonStart)) as Record<string, unknown>;
+  if (Array.isArray(parsed.entries)) {
+    return parsed.entries.filter(
+      (e): e is Record<string, unknown> => Boolean(e && typeof e === 'object')
+    );
+  }
+  return [parsed];
+}
+
+function interleaveBuckets<T>(buckets: T[][], limit: number): T[] {
+  const out: T[] = [];
+  let idx = 0;
+  while (out.length < limit) {
+    let added = false;
+    for (const bucket of buckets) {
+      if (idx < bucket.length && out.length < limit) {
+        out.push(bucket[idx]);
+        added = true;
+      }
+    }
+    if (!added) break;
+    idx += 1;
+  }
+  return out;
+}
+
+function pruneDiscoverCache(now: number): void {
+  for (const [key, entry] of discoverFeedCache.entries()) {
+    if (entry.expiresAt <= now) {
+      discoverFeedCache.delete(key);
+    }
+  }
+  if (discoverFeedCache.size > DISCOVER_CACHE_MAX_ENTRIES) {
+    const excess = discoverFeedCache.size - DISCOVER_CACHE_MAX_ENTRIES;
+    let removed = 0;
+    for (const key of discoverFeedCache.keys()) {
+      discoverFeedCache.delete(key);
+      removed += 1;
+      if (removed >= excess) break;
+    }
+  }
+}
+
+async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  concurrency: number
+): Promise<Array<PromiseSettledResult<T>>> {
+  const results: Array<PromiseSettledResult<T>> = new Array(tasks.length);
+  let nextIdx = 0;
+  const worker = async () => {
+    while (nextIdx < tasks.length) {
+      const current = nextIdx++;
+      try {
+        const value = await tasks[current]();
+        results[current] = {status: 'fulfilled', value};
+      } catch (reason) {
+        results[current] = {status: 'rejected', reason};
+      }
+    }
+  };
+  await Promise.all(Array.from({length: Math.min(concurrency, tasks.length)}, () => worker()));
+  return results;
+}
+
+export async function getDiscoverFeed(
+  userId: number,
+  options: {forceRefresh?: boolean} = {}
+): Promise<DiscoverFeedResponse> {
+  const seeds = pickDiscoverSeedArtists(userId, 3);
+  const basedOnLibrary = seeds.length > 0;
+  const cacheKey = basedOnLibrary
+    ? seeds
+        .map((s) => normalizeArtistKey(s))
+        .sort()
+        .join('|')
+    : '__trending__';
+
+  const now = Date.now();
+  if (!options.forceRefresh) {
+    const cached = discoverFeedCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return {...cached.data, cached: true};
+    }
+    if (cached) {
+      discoverFeedCache.delete(cacheKey);
+    }
+    const existing = discoverInFlight.get(cacheKey);
+    if (existing) {
+      const data = await existing;
+      return {...data, cached: false};
+    }
+  }
+
+  const buildPromise = (async (): Promise<Omit<DiscoverFeedResponse, 'cached'>> => {
+    const tempCookiePath = createTempCookiesCopy();
+    try {
+      const seedKeys = new Set(seeds.map((s) => normalizeArtistKey(s)));
+      const effectiveSeeds = basedOnLibrary ? seeds : [''];
+
+      type TaskKind = 'new' | 'artists' | 'albums';
+      const taskSpecs: Array<{kind: TaskKind; seed: string; query: string}> = [];
+
+      if (basedOnLibrary) {
+        for (const seed of effectiveSeeds) {
+          const safeSeed = sanitizeDiscoverSearchTerm(seed);
+          if (!safeSeed) continue;
+          taskSpecs.push({
+            kind: 'new',
+            seed,
+            query: `ytsearch6:${safeSeed} new single official audio`,
+          });
+          taskSpecs.push({
+            kind: 'artists',
+            seed,
+            query: `ytsearch10:songs like ${safeSeed} official audio`,
+          });
+          taskSpecs.push({
+            kind: 'albums',
+            seed,
+            query: `ytsearch6:${safeSeed} full album EP mix`,
+          });
+        }
+      } else {
+        taskSpecs.push({
+          kind: 'new',
+          seed: '',
+          query: 'ytsearch12:new music releases official audio 2026',
+        });
+        taskSpecs.push({
+          kind: 'artists',
+          seed: '',
+          query: 'ytsearch12:trending music artists official audio',
+        });
+        taskSpecs.push({
+          kind: 'albums',
+          seed: '',
+          query: 'ytsearch10:best new full album music mix',
+        });
+      }
+
+      const settled = await runWithConcurrency(
+        taskSpecs.map((spec) => () => runFlatYtSearch(spec.query, tempCookiePath)),
+        4
+      );
+
+      // Detect missing yt-dlp binary cleanly
+      let enoentError = false;
+      let anySuccess = false;
+      for (const res of settled) {
+        if (res.status === 'fulfilled') {
+          anySuccess = true;
+        } else {
+          const msg = res.reason instanceof Error ? res.reason.message : String(res.reason);
+          if (msg.includes('ENOENT')) enoentError = true;
+        }
+      }
+      if (!anySuccess && enoentError) {
+        throw new Error(
+          `yt-dlp binary ("${getYtdlpPath()}") is not installed on this server.`
+        );
+      }
+
+      const newReleaseBuckets: DiscoverNewReleaseItem[][] = [];
+      const artistBuckets: DiscoverArtistItem[][] = [];
+      const albumBuckets: DiscoverAlbumItem[][] = [];
+
+      settled.forEach((result, i) => {
+        if (result.status !== 'fulfilled') return;
+        const spec = taskSpecs[i];
+        const entries = result.value;
+
+        if (spec.kind === 'new') {
+          const bucket: DiscoverNewReleaseItem[] = [];
+          for (const entry of entries) {
+            const videoId = typeof entry.id === 'string' ? entry.id.trim() : '';
+            if (!isValidYouTubeVideoId(videoId)) continue;
+            const duration = Number(entry.duration) || 0;
+            // Filter out ultra-short clips (<45s) or multi-hour streams (>15m) when duration is known
+            if (duration > 0 && (duration < 45 || duration > 900)) continue;
+
+            const normalized = normalizeMetadataEntry(
+              entry,
+              `https://www.youtube.com/watch?v=${videoId}`,
+              'New Release'
+            );
+            const artist = cleanArtistLabel(normalized.artist || spec.seed || normalized.channel || 'Artist');
+            const title = cleanTrackTitle(normalized.title, artist);
+            bucket.push({
+              videoId,
+              url: `https://www.youtube.com/watch?v=${videoId}`,
+              title,
+              artist,
+              releaseLabel: formatReleaseLabel(entry, spec.seed ? 'New single' : 'New release'),
+              duration,
+              thumbnailUrl: `/api/yt-thumb/${videoId}`,
+              fallbackThumbnailUrl: sanitizeHttpsThumbUrl(normalized.thumbnail_url),
+              isNew: true,
+              seedArtist: spec.seed || null,
+            });
+          }
+          newReleaseBuckets.push(bucket);
+        } else if (spec.kind === 'artists') {
+          const bucket: DiscoverArtistItem[] = [];
+          for (const entry of entries) {
+            const videoId = typeof entry.id === 'string' ? entry.id.trim() : '';
+            if (!isValidYouTubeVideoId(videoId)) continue;
+            const rawTitle = String(entry.title || '').trim();
+            const rawChannel = cleanArtistLabel(
+              String(entry.channel || entry.uploader || entry.creator || '')
+            );
+
+            // Prefer parsed "Artist - Song" if channel looks like a generic music/playlist channel
+            let candidateName = rawChannel;
+            const sepMatch = rawTitle.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+            if (
+              (!candidateName || GENERIC_CHANNEL_PATTERN.test(candidateName)) &&
+              sepMatch &&
+              sepMatch[1]
+            ) {
+              candidateName = cleanArtistLabel(sepMatch[1]);
+            }
+
+            // Strip featured artists so avatar cards show a crisp solo/primary artist name
+            candidateName = cleanArtistLabel(
+              candidateName.split(/\s*(?:feat\.?|ft\.?|&|,|\|)\s*/i)[0] || candidateName
+            );
+
+            if (!isValidCandidateArtist(candidateName)) continue;
+            if (GENERIC_CHANNEL_PATTERN.test(candidateName)) continue;
+
+            const candidateKey = normalizeArtistKey(candidateName);
+            if (!candidateKey) continue;
+            // Exclude seed artists themselves so the shelf recommends genuinely new artists
+            let matchesSeed = false;
+            for (const sk of seedKeys) {
+              if (candidateKey === sk || candidateKey.includes(sk) || sk.includes(candidateKey)) {
+                matchesSeed = true;
+                break;
+              }
+            }
+            if (matchesSeed) continue;
+
+            bucket.push({
+              id: `${candidateKey.replace(/\s+/g, '-')}-${videoId}`,
+              name: candidateName,
+              subtitle: spec.seed ? `Similar to ${spec.seed}` : 'Trending artist',
+              seedArtist: spec.seed || null,
+              videoId,
+              thumbnailUrl: `/api/yt-thumb/${videoId}`,
+              fallbackThumbnailUrl: sanitizeHttpsThumbUrl(extractThumbnailUrl(entry)),
+            });
+          }
+          artistBuckets.push(bucket);
+        } else if (spec.kind === 'albums') {
+          const bucket: DiscoverAlbumItem[] = [];
+          for (const entry of entries) {
+            const videoId = typeof entry.id === 'string' ? entry.id.trim() : '';
+            if (!isValidYouTubeVideoId(videoId)) continue;
+            const duration = Number(entry.duration) || 0;
+            const normalized = normalizeMetadataEntry(
+              entry,
+              `https://www.youtube.com/watch?v=${videoId}`,
+              'Album'
+            );
+            const artist = cleanArtistLabel(normalized.artist || spec.seed || normalized.channel || 'Artist');
+            const title = cleanTrackTitle(normalized.title, artist);
+            bucket.push({
+              videoId,
+              url: `https://www.youtube.com/watch?v=${videoId}`,
+              title,
+              artist,
+              subtitle: spec.seed ? `Similar to ${spec.seed}` : 'Recommended album',
+              duration,
+              thumbnailUrl: `/api/yt-thumb/${videoId}`,
+              fallbackThumbnailUrl: sanitizeHttpsThumbUrl(normalized.thumbnail_url),
+              seedArtist: spec.seed || null,
+            });
+          }
+          albumBuckets.push(bucket);
+        }
+      });
+
+      // Deduplicate & interleave each shelf
+      const seenNewIds = new Set<string>();
+      const seenNewTitles = new Set<string>();
+      const newReleases = interleaveBuckets(newReleaseBuckets, 24)
+        .filter((item) => {
+          const titleKey = `${normalizeArtistKey(item.artist)}::${normalizeArtistKey(item.title)}`;
+          if (seenNewIds.has(item.videoId) || seenNewTitles.has(titleKey)) return false;
+          seenNewIds.add(item.videoId);
+          seenNewTitles.add(titleKey);
+          return true;
+        })
+        .slice(0, 12);
+
+      const seenArtists = new Set<string>();
+      const artistsToDiscover = interleaveBuckets(artistBuckets, 24)
+        .filter((item) => {
+          const key = normalizeArtistKey(item.name);
+          if (!key || seenArtists.has(key)) return false;
+          seenArtists.add(key);
+          return true;
+        })
+        .slice(0, 12);
+
+      const seenAlbumIds = new Set<string>();
+      const albumsForYou = interleaveBuckets(albumBuckets, 24)
+        .filter((item) => {
+          if (seenAlbumIds.has(item.videoId) || seenNewIds.has(item.videoId)) return false;
+          seenAlbumIds.add(item.videoId);
+          return true;
+        })
+        .slice(0, 12);
+
+      const payload: Omit<DiscoverFeedResponse, 'cached'> = {
+        seeds,
+        basedOnLibrary,
+        generatedAt: new Date().toISOString(),
+        newReleases,
+        artistsToDiscover,
+        albumsForYou,
+      };
+
+      const completedAt = Date.now();
+      pruneDiscoverCache(completedAt);
+      discoverFeedCache.set(cacheKey, {
+        data: payload,
+        expiresAt: completedAt + DISCOVER_CACHE_TTL_MS,
+      });
+
+      return payload;
+    } finally {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        try {
+          fs.unlinkSync(tempCookiePath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  })();
+
+  if (!options.forceRefresh) {
+    discoverInFlight.set(cacheKey, buildPromise);
+  }
+
+  try {
+    const data = await buildPromise;
+    return {...data, cached: false};
+  } finally {
+    if (discoverInFlight.get(cacheKey) === buildPromise) {
+      discoverInFlight.delete(cacheKey);
+    }
+  }
+}
+
+

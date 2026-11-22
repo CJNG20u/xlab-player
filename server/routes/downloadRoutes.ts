@@ -2,12 +2,13 @@ import {Router} from 'express';
 import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
-import {type AuthRequest, requireDownloadPermission} from '../auth.ts';
+import {type AuthRequest, requireAuth, requireDownloadPermission} from '../auth.ts';
 import {db, getMusicDir} from '../db.ts';
 import {
   downloadEvents,
   enqueueDownloadJob,
   fetchMetadataPreview,
+  getDiscoverFeed,
   getDownloadJobs,
   sanitizeNasSegment,
   spawnAudioPreviewStream,
@@ -16,6 +17,21 @@ import {
 import {AUDIO_EXTENSIONS, indexSingleFile} from '../scanner.ts';
 
 export const downloadRouter = Router();
+export const discoverRouter = Router();
+
+discoverRouter.get('/discover', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
+    const forceRefresh = refreshParam === '1' || refreshParam === 'true';
+    const feed = await getDiscoverFeed(req.user!.id, {forceRefresh});
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.json(feed);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load Discover recommendations';
+    console.error('[discover]', msg);
+    res.status(502).json({error: msg});
+  }
+});
 
 const uploadStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -58,7 +74,7 @@ const audioUpload = multer({
 
 downloadRouter.get("/preview-audio", requireDownloadPermission, (req, res) => { const videoUrl = String(req.query.url || "").trim(); console.log("[preview-audio] request:", videoUrl); if (!/^https?:\/\//i.test(videoUrl)) { res.status(400).json({error: "Invalid preview URL"}); return; } const {stream, cleanup} = spawnAudioPreviewStream(videoUrl); let sent = false; stream.on("data", (chunk) => { if (!sent) { sent = true; res.setHeader("Content-Type", "audio/mpeg"); res.setHeader("Cache-Control", "no-store"); } if (!res.writableEnded) res.write(chunk); }); stream.on("end", () => { cleanup(); if (!sent) { res.status(502).json({error: "Failed to stream audio preview"}); return; } if (!res.writableEnded) res.end(); }); stream.on("error", () => { cleanup(); if (!res.writableEnded) res.end(); }); req.on("close", () => cleanup()); });
 
-downloadRouter.post('/metadata', requireDownloadPermission, async (req, res) => {
+downloadRouter.post('/metadata', requireAuth, async (req, res) => {
   try {
     const query = String(req.body?.query || '');
     const preview = await fetchMetadataPreview(query);

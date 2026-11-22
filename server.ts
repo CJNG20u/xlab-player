@@ -15,7 +15,7 @@ import {
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
-import {downloadRouter} from './server/routes/downloadRoutes.ts';
+import {discoverRouter, downloadRouter} from './server/routes/downloadRoutes.ts';
 import {libraryRouter} from './server/routes/libraryRoutes.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -118,6 +118,7 @@ async function startServer() {
   // API routes
   app.use('/api/auth', authRouter);
   app.use('/api', libraryRouter);
+  app.use('/api', discoverRouter);
   app.use('/api/download', downloadRouter);
   app.use('/api/admin', adminRouter);
 
@@ -264,7 +265,7 @@ async function startServer() {
     void handleYouTubeStream(req, res, true);
   });
 
-  // Same-origin thumbnail proxy for CORS-safe dominant color extraction on YouTube streams
+  // Same-origin thumbnail proxy for CORS-safe dominant color extraction & crisp artwork on YouTube streams
   app.get('/api/yt-thumb/:videoId', requireAuth, async (req: AuthRequest, res) => {
     const videoId = String(req.params.videoId || '').trim();
     if (!isValidYouTubeVideoId(videoId)) {
@@ -272,26 +273,32 @@ async function startServer() {
       return;
     }
 
+    // Prefer 16:9 thumbnails (maxresdefault, mqdefault) to avoid 4:3 black letterbox bars on square/circular covers
+    const candidateVariants = ['maxresdefault.jpg', 'mqdefault.jpg', 'hqdefault.jpg'];
     try {
-      const thumbUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-      const upstream = await fetch(thumbUrl, {
-        headers: {Accept: 'image/*'},
-        redirect: 'follow',
-      });
-      if (!upstream.ok || !upstream.body) {
-        res.status(404).end();
+      for (const variant of candidateVariants) {
+        const thumbUrl = `https://i.ytimg.com/vi/${videoId}/${variant}`;
+        const upstream = await fetch(thumbUrl, {
+          headers: {Accept: 'image/*'},
+          redirect: 'follow',
+        });
+        if (!upstream.ok || !upstream.body) {
+          await upstream.body?.cancel().catch(() => {});
+          continue;
+        }
+        if (upstream.url && !isAllowedYouTubeMediaUrl(upstream.url)) {
+          await upstream.body.cancel().catch(() => {});
+          res.status(502).end();
+          return;
+        }
+        res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        res.status(200).send(buf);
         return;
       }
-      if (upstream.url && !isAllowedYouTubeMediaUrl(upstream.url)) {
-        await upstream.body.cancel().catch(() => {});
-        res.status(502).end();
-        return;
-      }
-      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-      const buf = Buffer.from(await upstream.arrayBuffer());
-      res.status(200).send(buf);
+      res.status(404).end();
     } catch {
       if (!res.headersSent) res.status(502).end();
     }

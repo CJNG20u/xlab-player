@@ -1641,11 +1641,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       {(user?.can_download || user?.role === 'admin') && (
                         <button
                           type="button"
-                          onClick={() => navigate('/search')}
+                          onClick={() => navigate('/discover')}
                           className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                         >
                           <Search className="w-4 h-4" />
-                          Search YouTube & Download
+                          Discover Music & Download
                         </button>
                       )}
                       {user?.role === 'admin' && (

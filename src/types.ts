@@ -135,3 +135,49 @@ export interface LrcLine {
   time: number | null;
   text: string;
 }
+
+export interface DiscoverNewReleaseItem {
+  videoId: string;
+  url: string;
+  title: string;
+  artist: string;
+  releaseLabel: string;
+  duration: number;
+  thumbnailUrl: string;
+  fallbackThumbnailUrl: string;
+  isNew: boolean;
+  seedArtist: string | null;
+}
+
+export interface DiscoverArtistItem {
+  id: string;
+  name: string;
+  subtitle: string;
+  seedArtist: string | null;
+  videoId: string;
+  thumbnailUrl: string;
+  fallbackThumbnailUrl: string;
+}
+
+export interface DiscoverAlbumItem {
+  videoId: string;
+  url: string;
+  title: string;
+  artist: string;
+  subtitle: string;
+  duration: number;
+  thumbnailUrl: string;
+  fallbackThumbnailUrl: string;
+  seedArtist: string | null;
+}
+
+export interface DiscoverFeedResponse {
+  seeds: string[];
+  basedOnLibrary: boolean;
+  cached: boolean;
+  generatedAt: string;
+  newReleases: DiscoverNewReleaseItem[];
+  artistsToDiscover: DiscoverArtistItem[];
+  albumsForYou: DiscoverAlbumItem[];
+}
+
