@@ -48,7 +48,7 @@ import {
 import {
   getTransitionDiagnostics,
   subscribeTransitionDiagnostics,
-  type TransitionDiagnosticEntry,
+  type PlaybackDiagnosticEntry,
 } from '../lib/playbackDiagnostics';
 import {useScrollReady} from '../lib/scrollHistory';
 import type {AppSettings, MountHealth, ScanProgress, SystemStatus, User} from '../types';
@@ -69,7 +69,7 @@ export const SettingsPage: React.FC = () => {
   const {isInstallable, isInstalled, isIOS, install} = usePWAInstall();
   const isAdmin = user?.role === 'admin' && !offline;
 
-  const [transitionLog, setTransitionLog] = useState<TransitionDiagnosticEntry[]>(() =>
+  const [transitionLog, setTransitionLog] = useState<PlaybackDiagnosticEntry[]>(() =>
     getTransitionDiagnostics()
   );
   const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
@@ -1966,7 +1966,7 @@ export const SettingsPage: React.FC = () => {
               Playback diagnostics
             </h2>
             <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
-              Last {transitionLog.length} of 30 track transitions (read-only)
+              Last {transitionLog.length} of 30 playback events (read-only)
             </p>
           </div>
           <button
@@ -1990,14 +1990,18 @@ export const SettingsPage: React.FC = () => {
         </div>
 
         {transitionLog.length === 0 ? (
-          <p className="text-xs text-[var(--text-muted)]">No track transitions recorded yet.</p>
+          <p className="text-xs text-[var(--text-muted)]">No playback events recorded yet.</p>
         ) : (
           <pre className="max-h-60 overflow-auto rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)] select-text whitespace-pre-wrap break-all">
             {transitionLog
-              .map(
-                (item) =>
-                  `${item.timestamp}  ${item.from ?? '-'} -> ${item.to ?? '-'}  vis=${item.visibilityAtEnded}  prewarmed: ${item.prewarmed}  ms=${item.msToPlaying ?? '-'}${item.error ? `  err=${item.error}` : ''}`
-              )
+              .map((item) => {
+                if (item.type === 'transition') {
+                  return `${item.timestamp}  [transition] ${item.from ?? '-'} -> ${item.to ?? '-'}  vis=${item.visibilityAtEnded}  prewarmed: ${item.prewarmed}  ms=${item.msToPlaying ?? '-'}  rs=${item.readyState ?? '-'} ns=${item.networkState ?? '-'}  lock=${item.hasWebLock}  as=${item.audioSessionState ?? '-'}  plat=${item.platform}${item.error ? `  err=${item.error}` : ''}`;
+                }
+                const hiddenFor =
+                  item.type === 'visible' ? `  hiddenFor=${item.secondsSinceHidden ?? '-'}s` : '';
+                return `${item.timestamp}  [${item.type}] track=${item.track ?? '-'}  paused=${item.paused}  t=${item.currentTime}s  remQ=${item.remainingQueue}${hiddenFor}  lock=${item.hasWebLock}  as=${item.audioSessionState ?? '-'}  plat=${item.platform}`;
+              })
               .join('\n')}
           </pre>
         )}

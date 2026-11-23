@@ -29,6 +29,7 @@ import {
 } from '../lib/listeningLearning';
 import {playbackClock} from '../lib/playbackClock';
 import {
+  recordLifecycleDiagnostic,
   recordTransitionDiagnostic,
   updateTransitionDiagnostic,
 } from '../lib/playbackDiagnostics';
@@ -140,11 +141,36 @@ const SILENT_WAV_DATA_URI =
 // Next-track preload thresholds & memory caps for mobile devices
 const PREFETCH_PROGRESS_THRESHOLD = 0.5;
 const PREFETCH_REMAINING_SECONDS = 15;
+const STREAM_PREFETCH_PROGRESS_THRESHOLD = 0.25;
+const STREAM_PREFETCH_REMAINING_SECONDS = 90;
+const EARLY_REFILL_REMAINING_SECONDS = 60;
+const EARLY_REFILL_RATE_LIMIT_MS = 10_000;
+const PREMATURE_END_THRESHOLD_SECONDS = 8;
+const MAX_PREMATURE_END_RETRIES = 2;
+const MAX_RESUME_PLAY_ATTEMPTS = 3;
 const MAX_FULL_PREFETCH_BYTES = 25 * 1024 * 1024; // 25 MB full blob prefetch cap
 const PARTIAL_PREFETCH_BYTES = 2 * 1024 * 1024; // 2 MB Range warm-up for large FLAC files
 const MAX_STREAM_PREWARM_BYTES = 40 * 1024 * 1024; // 40 MB cap for streamed track Blob prewarm
 const SLOW_TRANSITION_TIMEOUT_MS = 6000;
 const MAX_SLOW_TRANSITION_RETRIES = 2;
+
+interface NavigatorAudioSession {
+  type?: string;
+  state?: string;
+}
+
+function ensurePlaybackAudioSession(): void {
+  try {
+    if (typeof navigator === 'undefined') return;
+    const audioSession = (navigator as Navigator & {audioSession?: NavigatorAudioSession})
+      .audioSession;
+    if (audioSession && audioSession.type !== 'playback') {
+      audioSession.type = 'playback';
+    }
+  } catch {
+    // Ignore on browsers without navigator.audioSession support
+  }
+}
 
 type PrewarmTrackKey = number | string;
 
@@ -189,6 +215,7 @@ function unlockPersistentAudioElement(
 ): void {
   if (!audio || persistentAudioUnlocked) return;
   persistentAudioUnlocked = true;
+  ensurePlaybackAudioSession();
 
   if (primeWithSilentAudio && !audio.getAttribute('src')) {
     try {
@@ -441,8 +468,28 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
   // Synchronous state refs so native audio / MediaSession callbacks never read stale state
-  const stateRef = useRef({queue, currentIndex, shuffle, repeat, currentTrack, isPlaying, duration});
-  stateRef.current = {queue, currentIndex, shuffle, repeat, currentTrack, isPlaying, duration};
+  const stateRef = useRef({
+    queue,
+    currentIndex,
+    shuffle,
+    repeat,
+    currentTrack,
+    isPlaying,
+    duration,
+    autoplayEnabled,
+    radioMode,
+  });
+  stateRef.current = {
+    queue,
+    currentIndex,
+    shuffle,
+    repeat,
+    currentTrack,
+    isPlaying,
+    duration,
+    autoplayEnabled,
+    radioMode,
+  };
 
   // Playback intent, user-pause tracking, lock-screen recovery & offline ObjectURL pre-warming refs
   const wantPlayingRef = useRef(false);
@@ -470,6 +517,17 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const slowTransitionTimerRef = useRef<number | null>(null);
   const slowTransitionRetriesRef = useRef(0);
   const lastRecordedPlayRef = useRef<{key: string; at: number} | null>(null);
+
+  // Background eligibility Web Lock, page lifecycle tracking & premature-ended recovery refs
+  const webLockGenRef = useRef(0);
+  const webLockRequestedRef = useRef(false);
+  const webLockHeldRef = useRef(false);
+  const releaseWebLockRef = useRef<(() => void) | null>(null);
+  const lastHiddenAtRef = useRef<number | null>(null);
+  const lastHiddenTimeRef = useRef<number | null>(null);
+  const resumePlayAttemptsRef = useRef(0);
+  const prematureEndRetriesRef = useRef(0);
+  const lastForcedAutoplayRefillAtRef = useRef(0);
 
   // Autoplay / radio single-flight & cancellation refs
   const autoplayAbortRef = useRef<AbortController | null>(null);
@@ -544,6 +602,76 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         window.clearTimeout(timerId);
       }
       visibilityResumeTimersRef.current = [];
+    }
+  }, []);
+
+  // Hold a single shared Web Lock while playback is wanted so mobile Chrome/Android keeps the
+  // page eligible to run across track transitions while the screen is locked.
+  const acquirePlaybackWebLock = useCallback(() => {
+    if (webLockRequestedRef.current || webLockHeldRef.current) return;
+    try {
+      if (
+        typeof navigator === 'undefined' ||
+        !('locks' in navigator) ||
+        !navigator.locks ||
+        typeof navigator.locks.request !== 'function'
+      ) {
+        return;
+      }
+      const gen = ++webLockGenRef.current;
+      webLockRequestedRef.current = true;
+      void navigator.locks
+        .request(
+          'xlab-playback',
+          {mode: 'shared'},
+          () =>
+            new Promise<void>((resolve) => {
+              if (
+                gen !== webLockGenRef.current ||
+                !webLockRequestedRef.current ||
+                !wantPlayingRef.current ||
+                userPausedRef.current
+              ) {
+                resolve();
+                return;
+              }
+              webLockHeldRef.current = true;
+              releaseWebLockRef.current = () => {
+                if (gen === webLockGenRef.current) {
+                  webLockHeldRef.current = false;
+                  webLockRequestedRef.current = false;
+                  releaseWebLockRef.current = null;
+                }
+                resolve();
+              };
+            })
+        )
+        .catch(() => {
+          if (gen === webLockGenRef.current) {
+            webLockRequestedRef.current = false;
+            webLockHeldRef.current = false;
+            releaseWebLockRef.current = null;
+          }
+        });
+    } catch {
+      webLockRequestedRef.current = false;
+      webLockHeldRef.current = false;
+      releaseWebLockRef.current = null;
+    }
+  }, []);
+
+  const releasePlaybackWebLock = useCallback(() => {
+    webLockGenRef.current += 1;
+    webLockRequestedRef.current = false;
+    webLockHeldRef.current = false;
+    const release = releaseWebLockRef.current;
+    releaseWebLockRef.current = null;
+    if (release) {
+      try {
+        release();
+      } catch {
+        // Ignore Web Lock release errors
+      }
     }
   }, []);
 
@@ -732,14 +860,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     }
   }, [currentTrack, currentIndex, queue, repeat, shuffle]);
 
-  // Silently prefetch the next track in the queue once the current track reaches 50% playback
-  // or <= 15 seconds remaining so auto-advance and album-cover swipes start without buffering.
+  // Silently prefetch the next track in the queue once the current track crosses the
+  // threshold (25% or <= 90s remaining for streamed tracks; 50% or <= 15s for library tracks)
+  // so auto-advance and album-cover swipes start without buffering.
   const prefetchNextTrackIfReady = useCallback((pos: number, dur: number) => {
     if (!Number.isFinite(dur) || dur <= 0 || !Number.isFinite(pos) || pos < 0) return;
-
-    const reachedHalfway = pos / dur >= PREFETCH_PROGRESS_THRESHOLD;
-    const withinRemainingWindow = dur - pos <= PREFETCH_REMAINING_SECONDS;
-    if (!reachedHalfway && !withinRemainingWindow) return;
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
@@ -754,6 +879,16 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     }
 
     if (!nextItem) return;
+
+    const progressThreshold = nextItem.isYouTubeStream
+      ? STREAM_PREFETCH_PROGRESS_THRESHOLD
+      : PREFETCH_PROGRESS_THRESHOLD;
+    const remainingThreshold = nextItem.isYouTubeStream
+      ? STREAM_PREFETCH_REMAINING_SECONDS
+      : PREFETCH_REMAINING_SECONDS;
+    const reachedProgress = pos / dur >= progressThreshold;
+    const withinRemainingWindow = dur - pos <= remainingThreshold;
+    if (!reachedProgress && !withinRemainingWindow) return;
 
     // Warm the next track's cover image & 512x512 MediaSession canvas artwork for instant lock-screen transitions
     const nextCoverUrl = getTrackCoverUrl(nextItem);
@@ -1217,6 +1352,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       userPausedRef.current = false;
       wantPlayingRef.current = true;
       lockAutoResumeAttemptsRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
+      if (!isSameLoadedTrack) {
+        prematureEndRetriesRef.current = 0;
+      }
       stateRef.current.isPlaying = true;
       stateRef.current.currentTrack = track;
       clearRecoveryTimer();
@@ -1225,12 +1364,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       recoveryAttemptsRef.current = 0;
       slowTransitionRetriesRef.current = 0;
       pendingTransitionRef.current = null;
+      acquirePlaybackWebLock();
 
       // Immediately register MediaSession handlers, metadata & playbackState = 'playing'
       activateMediaSessionForPlayback(track, true);
 
       const invokePlay = () => {
         unlockPersistentAudioElement(audio, false);
+        ensurePlaybackAudioSession();
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
           playPromise.catch((err: unknown) => {
@@ -1245,6 +1386,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
             clearSlowTransitionTimer();
             wantPlayingRef.current = false;
             stateRef.current.isPlaying = false;
+            releasePlaybackWebLock();
             setIsPlaying(false);
             setIsBuffering(false);
             setMediaSessionPlaybackState('paused');
@@ -1312,6 +1454,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
               endTrackTransition();
               wantPlayingRef.current = false;
               stateRef.current.isPlaying = false;
+              releasePlaybackWebLock();
               setIsPlaying(false);
               setIsBuffering(false);
               setMediaSessionPlaybackState('paused');
@@ -1335,6 +1478,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setDuration(track.duration || 0);
     },
     [
+      acquirePlaybackWebLock,
       activateMediaSessionForPlayback,
       beginTrackTransition,
       clearRecoveryTimer,
@@ -1342,6 +1486,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       clearVisibilityResumeTimers,
       endTrackTransition,
       recordTrackPlay,
+      releasePlaybackWebLock,
       setMediaSessionPlaybackState,
     ]
   );
@@ -1412,10 +1557,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       clearSlowTransitionTimer();
       clearVisibilityResumeTimers();
       slowTransitionRetriesRef.current = 0;
+      prematureEndRetriesRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
       pendingTransitionRef.current = null;
       userPausedRef.current = true;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
+      releasePlaybackWebLock();
       audio.pause();
       audio.removeAttribute('src');
       delete audio.dataset.trackId;
@@ -1439,6 +1587,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     currentTrackId,
     endTrackTransition,
     loadAndPlayTrackSync,
+    releasePlaybackWebLock,
     setMediaSessionPlaybackState,
     syncMediaSessionMetadata,
   ]);
@@ -1495,9 +1644,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       userPausedRef.current = false;
       wantPlayingRef.current = true;
       lockAutoResumeAttemptsRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
       stateRef.current.isPlaying = true;
       clearVisibilityResumeTimers();
       unlockPersistentAudioElement(audio, false);
+      ensurePlaybackAudioSession();
+      acquirePlaybackWebLock();
       activateMediaSessionForPlayback(activeTrack, false);
       audio
         .play()
@@ -1508,6 +1660,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         .catch(() => {
           wantPlayingRef.current = false;
           stateRef.current.isPlaying = false;
+          releasePlaybackWebLock();
           setIsPlaying(false);
           setMediaSessionPlaybackState('paused');
         });
@@ -1515,19 +1668,23 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       endTrackTransition();
       clearRecoveryTimer();
       clearVisibilityResumeTimers();
+      resumePlayAttemptsRef.current = 0;
       userPausedRef.current = true;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
+      releasePlaybackWebLock();
       audio.pause();
       setIsPlaying(false);
       setMediaSessionPlaybackState('paused');
       syncMediaSessionPositionState(audio);
     }
   }, [
+    acquirePlaybackWebLock,
     activateMediaSessionForPlayback,
     clearRecoveryTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
+    releasePlaybackWebLock,
     setMediaSessionPlaybackState,
     syncMediaSessionPositionState,
   ]);
@@ -1552,6 +1709,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       if (slowTransitionRetriesRef.current >= MAX_SLOW_TRANSITION_RETRIES) return;
 
       slowTransitionRetriesRef.current += 1;
+      ensurePlaybackAudioSession();
       activateMediaSessionForPlayback(activeTrack, false);
       syncMediaSessionPositionState(audio);
       const p = audio.play();
@@ -1575,7 +1733,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
   // Synchronous next-track transition shared by native `ended` event, MediaSession `nexttrack`, and UI button
   const advanceToNextTrack = useCallback(
-    (fromEndedEvent: boolean) => {
+    (
+      fromEndedEvent: boolean,
+      endedMediaState?: {readyState: number; networkState: number}
+    ) => {
       const audio = audioRef.current;
       const {queue: q, currentIndex: idx, shuffle: isShuf, repeat: rep} = stateRef.current;
       if (!audio || q.length === 0) return;
@@ -1583,17 +1744,23 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       const fromTrack = q[idx] ?? stateRef.current.currentTrack;
       const visibilityAtEnded: DocumentVisibilityState | 'unknown' =
         typeof document !== 'undefined' ? document.visibilityState : 'unknown';
+      const readyStateAtEnded = endedMediaState?.readyState ?? audio.readyState;
+      const networkStateAtEnded = endedMediaState?.networkState ?? audio.networkState;
 
       if (rep === 'one') {
         const activeTrack = fromTrack;
         userPausedRef.current = false;
         wantPlayingRef.current = true;
         lockAutoResumeAttemptsRef.current = 0;
+        resumePlayAttemptsRef.current = 0;
         slowTransitionRetriesRef.current = 0;
         clearSlowTransitionTimer();
         stateRef.current.isPlaying = true;
+        // Keep MediaSession playing & updated before resetting/restarting playback
+        activateMediaSessionForPlayback(activeTrack, true);
+        ensurePlaybackAudioSession();
+        acquirePlaybackWebLock();
         audio.currentTime = 0;
-        activateMediaSessionForPlayback(activeTrack, false);
         if (fromEndedEvent) {
           const entryId = recordTransitionDiagnostic({
             timestamp: new Date().toISOString(),
@@ -1603,6 +1770,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
             prewarmed: Boolean(audio.getAttribute('src')?.startsWith('blob:')),
             msToPlaying: null,
             error: null,
+            readyState: readyStateAtEnded,
+            networkState: networkStateAtEnded,
+            hasWebLock: webLockHeldRef.current,
           });
           pendingTransitionRef.current = {id: entryId, endedAt: Date.now()};
           scheduleSlowTransitionWatchdog();
@@ -1617,6 +1787,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           clearSlowTransitionTimer();
           wantPlayingRef.current = false;
           stateRef.current.isPlaying = false;
+          releasePlaybackWebLock();
           setIsPlaying(false);
           setMediaSessionPlaybackState('paused');
         });
@@ -1653,10 +1824,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         clearSlowTransitionTimer();
         clearVisibilityResumeTimers();
         slowTransitionRetriesRef.current = 0;
+        prematureEndRetriesRef.current = 0;
+        resumePlayAttemptsRef.current = 0;
         pendingTransitionRef.current = null;
         userPausedRef.current = true;
         wantPlayingRef.current = false;
         stateRef.current.isPlaying = false;
+        releasePlaybackWebLock();
         setIsPlaying(false);
         setMediaSessionPlaybackState('paused');
         if (fromEndedEvent) {
@@ -1669,6 +1843,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       stateRef.current.currentIndex = nextIdx;
       stateRef.current.currentTrack = nextItem;
 
+      // Immediately update MediaSession metadata and keep playbackState='playing' BEFORE audio.src changes
+      // so Android does not drop the lock-screen media notification between songs.
+      activateMediaSessionForPlayback(nextItem, true);
+
       // Immediately assign audio.src and invoke audio.play() inside this synchronous tick
       loadAndPlayTrackSync(nextItem, {resetIfSame: true});
       if (fromEndedEvent) {
@@ -1680,6 +1858,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           prewarmed: lastLoadUsedPrewarmedRef.current,
           msToPlaying: null,
           error: null,
+          readyState: readyStateAtEnded,
+          networkState: networkStateAtEnded,
+          hasWebLock: webLockHeldRef.current,
         });
         pendingTransitionRef.current = {id: entryId, endedAt: Date.now()};
         scheduleSlowTransitionWatchdog();
@@ -1687,12 +1868,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setCurrentIndex(nextIdx);
     },
     [
+      acquirePlaybackWebLock,
       activateMediaSessionForPlayback,
       clearRecoveryTimer,
       clearSlowTransitionTimer,
       clearVisibilityResumeTimers,
       endTrackTransition,
       loadAndPlayTrackSync,
+      releasePlaybackWebLock,
       scheduleSlowTransitionWatchdog,
       setMediaSessionPlaybackState,
       syncMediaSessionPositionState,
@@ -2299,8 +2482,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     userPausedRef.current = false;
     wantPlayingRef.current = true;
     lockAutoResumeAttemptsRef.current = 0;
+    resumePlayAttemptsRef.current = 0;
     stateRef.current.isPlaying = true;
     clearVisibilityResumeTimers();
+    ensurePlaybackAudioSession();
+    acquirePlaybackWebLock();
     activateMediaSessionForPlayback(activeTrack, false);
     try {
       await audio.play();
@@ -2310,6 +2496,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     } catch (err: unknown) {
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
+      releasePlaybackWebLock();
       setIsPlaying(false);
       setMediaSessionPlaybackState('paused');
       if (err instanceof DOMException && err.name === 'NotAllowedError') {
@@ -2318,8 +2505,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       return 'needs_gesture';
     }
   }, [
+    acquirePlaybackWebLock,
     activateMediaSessionForPlayback,
     clearVisibilityResumeTimers,
+    releasePlaybackWebLock,
     setMediaSessionPlaybackState,
     syncMediaSessionPositionState,
   ]);
@@ -2329,9 +2518,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     endTrackTransition();
     clearRecoveryTimer();
     clearVisibilityResumeTimers();
+    resumePlayAttemptsRef.current = 0;
     userPausedRef.current = true;
     wantPlayingRef.current = false;
     stateRef.current.isPlaying = false;
+    releasePlaybackWebLock();
     if (audio) {
       audio.pause();
       syncMediaSessionPositionState(audio);
@@ -2342,6 +2533,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     clearRecoveryTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
+    releasePlaybackWebLock,
     setMediaSessionPlaybackState,
     syncMediaSessionPositionState,
   ]);
@@ -2426,9 +2618,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       if (!payload.isPlaying) {
         endTrackTransition();
+        resumePlayAttemptsRef.current = 0;
         userPausedRef.current = true;
         wantPlayingRef.current = false;
         stateRef.current.isPlaying = false;
+        releasePlaybackWebLock();
         audio.pause();
         setIsPlaying(false);
         setMediaSessionPlaybackState('paused');
@@ -2437,7 +2631,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       userPausedRef.current = false;
       wantPlayingRef.current = true;
+      resumePlayAttemptsRef.current = 0;
       stateRef.current.isPlaying = true;
+      ensurePlaybackAudioSession();
+      acquirePlaybackWebLock();
       activateMediaSessionForPlayback(targetTrack, true);
       try {
         await audio.play();
@@ -2448,6 +2645,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         endTrackTransition();
         wantPlayingRef.current = false;
         stateRef.current.isPlaying = false;
+        releasePlaybackWebLock();
         setIsPlaying(false);
         setMediaSessionPlaybackState('paused');
         if (err instanceof DOMException && err.name === 'NotAllowedError') {
@@ -2457,10 +2655,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
     },
     [
+      acquirePlaybackWebLock,
       activateMediaSessionForPlayback,
       beginTrackTransition,
       cancelAutoplayPlan,
       endTrackTransition,
+      releasePlaybackWebLock,
       setMediaSessionPlaybackState,
       syncMediaSessionMetadata,
       syncMediaSessionPositionState,
@@ -2499,8 +2699,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       userPausedRef.current = false;
       wantPlayingRef.current = true;
       lockAutoResumeAttemptsRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
       stateRef.current.isPlaying = true;
       clearVisibilityResumeTimers();
+      ensurePlaybackAudioSession();
+      acquirePlaybackWebLock();
       activateMediaSessionForPlayback(stateRef.current.currentTrack, false);
       audio
         .play()
@@ -2511,6 +2714,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         .catch(() => {
           wantPlayingRef.current = false;
           stateRef.current.isPlaying = false;
+          releasePlaybackWebLock();
           setIsPlaying(false);
           setMediaSessionPlaybackState('paused');
         });
@@ -2521,9 +2725,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       endTrackTransition();
       clearRecoveryTimer();
       clearVisibilityResumeTimers();
+      resumePlayAttemptsRef.current = 0;
       userPausedRef.current = true;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
+      releasePlaybackWebLock();
       audio.pause();
       setIsPlaying(false);
       setMediaSessionPlaybackState('paused');
@@ -2537,12 +2743,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   // Stable ref for internal lifecycle callbacks so native DOM & visibilitychange listeners
   // attach ONCE on mount and never pause/reset the persistent HTMLAudioElement on re-render.
   const lifecycleRef = useRef({
+    acquirePlaybackWebLock,
     advanceToNextTrack,
+    beginTrackTransition,
     clearRecoveryTimer,
     clearSlowTransitionTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
     prefetchNextTrackIfReady,
+    releasePlaybackWebLock,
     scheduleBufferRecovery,
     activateMediaSessionForPlayback,
     registerMediaSessionHandlers,
@@ -2551,12 +2760,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     syncMediaSessionPositionState,
   });
   lifecycleRef.current = {
+    acquirePlaybackWebLock,
     advanceToNextTrack,
+    beginTrackTransition,
     clearRecoveryTimer,
     clearSlowTransitionTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
     prefetchNextTrackIfReady,
+    releasePlaybackWebLock,
     scheduleBufferRecovery,
     activateMediaSessionForPlayback,
     registerMediaSessionHandlers,
@@ -2565,7 +2777,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     syncMediaSessionPositionState,
   };
 
-  // Attach native DOM audio event listeners & lock-screen visibilitychange recovery ONCE
+  // Attach native DOM audio event listeners & lock-screen visibilitychange/lifecycle recovery ONCE
   // directly to the single persistent HTMLAudioElement so `ended`, `stalled`, `waiting`,
   // screen-lock auto-resume, and MediaSession sync run immediately even while locked/backgrounded.
   useEffect(() => {
@@ -2576,11 +2788,58 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     // Register MediaSession handlers initially as well
     lifecycleRef.current.registerMediaSessionHandlers();
 
+    const getRemainingQueueCount = (): number => {
+      const {queue: q, currentIndex: idx} = stateRef.current;
+      return idx >= 0 ? Math.max(0, q.length - 1 - idx) : 0;
+    };
+
+    const getRoundedAudioTime = (): number =>
+      Number.isFinite(audio.currentTime) ? Math.round(audio.currentTime * 100) / 100 : 0;
+
+    const reconcilePlaybackOnResume = (): boolean => {
+      const activeTrack = stateRef.current.currentTrack;
+      if (!wantPlayingRef.current || userPausedRef.current || audio.ended || !activeTrack) {
+        return false;
+      }
+      const currTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+      const didNotAdvance =
+        lastHiddenTimeRef.current !== null && Math.abs(currTime - lastHiddenTimeRef.current) < 0.25;
+
+      if (!audio.paused && !didNotAdvance) {
+        return false;
+      }
+      if (resumePlayAttemptsRef.current >= MAX_RESUME_PLAY_ATTEMPTS) {
+        return false;
+      }
+
+      resumePlayAttemptsRef.current += 1;
+      ensurePlaybackAudioSession();
+      lifecycleRef.current.acquirePlaybackWebLock();
+      lifecycleRef.current.activateMediaSessionForPlayback(activeTrack, false);
+      lifecycleRef.current.syncMediaSessionPositionState(audio);
+      stateRef.current.isPlaying = true;
+      setIsPlaying(true);
+
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          wantPlayingRef.current = false;
+          stateRef.current.isPlaying = false;
+          lifecycleRef.current.releasePlaybackWebLock();
+          setIsPlaying(false);
+          lifecycleRef.current.setMediaSessionPlaybackState('paused');
+        });
+      }
+      return true;
+    };
+
     const handlePlay = () => {
       lifecycleRef.current.endTrackTransition();
       userPausedRef.current = false;
       wantPlayingRef.current = true;
       stateRef.current.isPlaying = true;
+      lifecycleRef.current.acquirePlaybackWebLock();
       setIsPlaying(true);
       lifecycleRef.current.activateMediaSessionForPlayback(stateRef.current.currentTrack, true);
       lifecycleRef.current.syncMediaSessionPositionState(audio);
@@ -2593,6 +2852,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       lifecycleRef.current.clearVisibilityResumeTimers();
       recoveryAttemptsRef.current = 0;
       lockAutoResumeAttemptsRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
       slowTransitionRetriesRef.current = 0;
       if (pendingTransitionRef.current) {
         const msToPlaying = Math.max(0, Date.now() - pendingTransitionRef.current.endedAt);
@@ -2603,6 +2863,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       userPausedRef.current = false;
       wantPlayingRef.current = true;
       stateRef.current.isPlaying = true;
+      lifecycleRef.current.acquirePlaybackWebLock();
       setIsPlaying(true);
       lifecycleRef.current.activateMediaSessionForPlayback(stateRef.current.currentTrack, false);
       lifecycleRef.current.syncMediaSessionPositionState(audio);
@@ -2621,6 +2882,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         lastUnexpectedPauseAtRef.current = Date.now();
         if (document.visibilityState === 'hidden' && lockAutoResumeAttemptsRef.current < 3) {
           lockAutoResumeAttemptsRef.current += 1;
+          ensurePlaybackAudioSession();
           lifecycleRef.current.activateMediaSessionForPlayback(
             stateRef.current.currentTrack,
             false
@@ -2631,6 +2893,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
               if (err instanceof DOMException && err.name === 'AbortError') return;
               wantPlayingRef.current = false;
               stateRef.current.isPlaying = false;
+              lifecycleRef.current.releasePlaybackWebLock();
               setIsPlaying(false);
               lifecycleRef.current.setMediaSessionPlaybackState('paused');
             });
@@ -2641,8 +2904,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       lifecycleRef.current.clearRecoveryTimer();
       lifecycleRef.current.clearSlowTransitionTimer();
+      resumePlayAttemptsRef.current = 0;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
+      lifecycleRef.current.releasePlaybackWebLock();
       setIsPlaying(false);
       lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
       lifecycleRef.current.setMediaSessionPlaybackState('paused');
@@ -2670,6 +2935,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       recoveryAttemptsRef.current = 0;
       setIsBuffering(false);
       if (wantPlayingRef.current && !userPausedRef.current && audio.paused && !audio.ended) {
+        ensurePlaybackAudioSession();
         audio.play().catch(() => {});
       }
     };
@@ -2712,6 +2978,42 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         !audio.paused && !audio.ended
       );
       lifecycleRef.current.prefetchNextTrackIfReady(pos, dur);
+
+      // Early refill near the end of the track when the upcoming queue is empty
+      if (
+        Number.isFinite(dur) &&
+        dur > 0 &&
+        Number.isFinite(pos) &&
+        dur - pos <= EARLY_REFILL_REMAINING_SECONDS
+      ) {
+        const {
+          queue: q,
+          currentIndex: idx,
+          repeat: rep,
+          shuffle: isShuf,
+          autoplayEnabled: isAutoplay,
+          radioMode: isRadio,
+        } = stateRef.current;
+        const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
+        const upcomingEmpty = idx >= 0 && idx >= q.length - 1;
+        if (
+          upcomingEmpty &&
+          (isAutoplay || isRadio) &&
+          rep === 'off' &&
+          !isShuf &&
+          isOnline &&
+          !autoplayInFlightRef.current
+        ) {
+          const now = Date.now();
+          if (now - lastForcedAutoplayRefillAtRef.current >= EARLY_REFILL_RATE_LIMIT_MS) {
+            lastForcedAutoplayRefillAtRef.current = now;
+            autoplayEmptyExhaustedKeyRef.current = null;
+            autoplayEmptyRetryKeyRef.current = null;
+            setAutoplayRetryTick((t) => t + 1);
+          }
+        }
+      }
+
       lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
       if (!transitioningTrackRef.current) {
         lifecycleRef.current.setMediaSessionPlaybackState(audio.paused ? 'paused' : 'playing');
@@ -2736,12 +3038,95 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     const handleEnded = () => {
       if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
+      const readyStateAtEnded = audio.readyState;
+      const networkStateAtEnded = audio.networkState;
+      const {currentTrack: activeTrack, repeat: rep} = stateRef.current;
+      const knownDuration =
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : activeTrack &&
+              typeof activeTrack.duration === 'number' &&
+              Number.isFinite(activeTrack.duration) &&
+              activeTrack.duration > 0
+            ? activeTrack.duration
+            : 0;
+      const reachedPos = Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0;
+
+      // Recover from premature `ended` (cut stream > 8s before known duration), up to 2 times per track
+      if (
+        rep !== 'one' &&
+        activeTrack &&
+        knownDuration > 0 &&
+        knownDuration - reachedPos > PREMATURE_END_THRESHOLD_SECONDS &&
+        prematureEndRetriesRef.current < MAX_PREMATURE_END_RETRIES
+      ) {
+        prematureEndRetriesRef.current += 1;
+        const retryReqId = ++loadRequestIdRef.current;
+        const localTrackId =
+          !activeTrack.isYouTubeStream && typeof activeTrack.id === 'number'
+            ? activeTrack.id
+            : null;
+        const streamKey = activeTrack.isYouTubeStream
+          ? getStreamedTrackCacheKey(activeTrack)
+          : null;
+        const prewarmedBlobUrl =
+          localTrackId !== null
+            ? (prewarmedObjectUrlsRef.current.get(localTrackId) ??
+              prefetchedObjectUrlsRef.current.get(localTrackId))
+            : streamKey !== null
+              ? prewarmedObjectUrlsRef.current.get(streamKey)
+              : undefined;
+        const reloadUrl = prewarmedBlobUrl || getTrackStreamUrl(activeTrack);
+
+        userPausedRef.current = false;
+        wantPlayingRef.current = true;
+        stateRef.current.isPlaying = true;
+        ensurePlaybackAudioSession();
+        lifecycleRef.current.acquirePlaybackWebLock();
+        lifecycleRef.current.activateMediaSessionForPlayback(activeTrack, false);
+        lifecycleRef.current.beginTrackTransition();
+
+        const restorePosition = () => {
+          if (loadRequestIdRef.current !== retryReqId) return;
+          const maxDur =
+            Number.isFinite(audio.duration) && audio.duration > 0
+              ? audio.duration
+              : knownDuration;
+          if (reachedPos > 0 && reachedPos < maxDur) {
+            try {
+              audio.currentTime = reachedPos;
+            } catch {
+              // Ignore seek errors on recovery
+            }
+          }
+          lifecycleRef.current.syncMediaSessionPositionState(audio);
+        };
+        audio.addEventListener('loadedmetadata', restorePosition, {once: true});
+        audio.src = reloadUrl;
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch((err: unknown) => {
+            if (err instanceof DOMException && err.name === 'AbortError') return;
+            lifecycleRef.current.endTrackTransition();
+            wantPlayingRef.current = false;
+            stateRef.current.isPlaying = false;
+            lifecycleRef.current.releasePlaybackWebLock();
+            setIsPlaying(false);
+            lifecycleRef.current.setMediaSessionPlaybackState('paused');
+          });
+        }
+        return;
+      }
+
       const dur =
         Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration
           : stateRef.current.duration;
       listeningLearningRef.current?.complete(stateRef.current.currentTrack, dur);
-      lifecycleRef.current.advanceToNextTrack(true);
+      lifecycleRef.current.advanceToNextTrack(true, {
+        readyState: readyStateAtEnded,
+        networkState: networkStateAtEnded,
+      });
     };
 
     const handleError = () => {
@@ -2767,6 +3152,22 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     // Recover immediately if mobile browser/OS pauses audio when locking the screen (first lock or later)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
+        lastHiddenAtRef.current = Date.now();
+        lastHiddenTimeRef.current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+
+        recordLifecycleDiagnostic({
+          type: 'hidden',
+          timestamp: new Date().toISOString(),
+          track: getTrackDiagnosticKey(stateRef.current.currentTrack),
+          paused: audio.paused,
+          currentTime: getRoundedAudioTime(),
+          remainingQueue: getRemainingQueueCount(),
+          hasWebLock: webLockHeldRef.current,
+        });
+
+        // Re-register MediaSession action handlers whenever moving to the background
+        lifecycleRef.current.registerMediaSessionHandlers();
+
         const hadRecentBrowserPause =
           !userPausedRef.current && Date.now() - lastUnexpectedPauseAtRef.current < 600;
         const shouldKeepPlaying =
@@ -2791,6 +3192,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           ) {
             return;
           }
+          ensurePlaybackAudioSession();
+          lifecycleRef.current.acquirePlaybackWebLock();
           lifecycleRef.current.activateMediaSessionForPlayback(
             stateRef.current.currentTrack,
             false
@@ -2804,6 +3207,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
                 if (err instanceof DOMException && err.name === 'AbortError') return;
                 wantPlayingRef.current = false;
                 stateRef.current.isPlaying = false;
+                lifecycleRef.current.releasePlaybackWebLock();
                 setIsPlaying(false);
                 lifecycleRef.current.setMediaSessionPlaybackState('paused');
               });
@@ -2819,21 +3223,68 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           window.setTimeout(enforceBackgroundPlayback, 250),
         ];
       } else if (document.visibilityState === 'visible') {
+        const secondsSinceHidden =
+          lastHiddenAtRef.current !== null
+            ? Math.round(((Date.now() - lastHiddenAtRef.current) / 1000) * 10) / 10
+            : null;
+
+        recordLifecycleDiagnostic({
+          type: 'visible',
+          timestamp: new Date().toISOString(),
+          track: getTrackDiagnosticKey(stateRef.current.currentTrack),
+          paused: audio.paused,
+          currentTime: getRoundedAudioTime(),
+          remainingQueue: getRemainingQueueCount(),
+          secondsSinceHidden,
+          hasWebLock: webLockHeldRef.current,
+        });
+
         lifecycleRef.current.clearVisibilityResumeTimers();
         lockAutoResumeAttemptsRef.current = 0;
 
-        // Reconcile React & MediaSession state when returning from lock screen
-        const actuallyPlaying = !audio.paused && !audio.ended;
-        setIsPlaying(actuallyPlaying);
-        stateRef.current.isPlaying = actuallyPlaying;
-        if (stateRef.current.currentTrack) {
-          lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
-          lifecycleRef.current.setMediaSessionPlaybackState(
-            actuallyPlaying ? 'playing' : 'paused'
-          );
-          lifecycleRef.current.syncMediaSessionPositionState(audio);
+        const attemptedResume = reconcilePlaybackOnResume();
+        lastHiddenAtRef.current = null;
+        lastHiddenTimeRef.current = null;
+
+        if (!attemptedResume) {
+          // Reconcile React & MediaSession state when returning from lock screen
+          const actuallyPlaying = !audio.paused && !audio.ended;
+          setIsPlaying(actuallyPlaying);
+          stateRef.current.isPlaying = actuallyPlaying;
+          if (stateRef.current.currentTrack) {
+            lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
+            lifecycleRef.current.setMediaSessionPlaybackState(
+              actuallyPlaying ? 'playing' : 'paused'
+            );
+            lifecycleRef.current.syncMediaSessionPositionState(audio);
+          }
         }
       }
+    };
+
+    const handleFreeze = () => {
+      recordLifecycleDiagnostic({
+        type: 'freeze',
+        timestamp: new Date().toISOString(),
+        track: getTrackDiagnosticKey(stateRef.current.currentTrack),
+        paused: audio.paused,
+        currentTime: getRoundedAudioTime(),
+        remainingQueue: getRemainingQueueCount(),
+        hasWebLock: webLockHeldRef.current,
+      });
+    };
+
+    const handleResume = () => {
+      recordLifecycleDiagnostic({
+        type: 'resume',
+        timestamp: new Date().toISOString(),
+        track: getTrackDiagnosticKey(stateRef.current.currentTrack),
+        paused: audio.paused,
+        currentTime: getRoundedAudioTime(),
+        remainingQueue: getRemainingQueueCount(),
+        hasWebLock: webLockHeldRef.current,
+      });
+      reconcilePlaybackOnResume();
     };
 
     audio.addEventListener('play', handlePlay);
@@ -2850,6 +3301,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     audio.addEventListener('ended', handleEnded);
     audio.addEventListener('error', handleError);
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    try {
+      document.addEventListener('freeze', handleFreeze);
+      document.addEventListener('resume', handleResume);
+    } catch {
+      // Ignore on browsers without Page Lifecycle events
+    }
 
     return () => {
       audio.removeEventListener('play', handlePlay);
@@ -2866,6 +3323,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('error', handleError);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      try {
+        document.removeEventListener('freeze', handleFreeze);
+        document.removeEventListener('resume', handleResume);
+      } catch {
+        // Ignore on browsers without Page Lifecycle events
+      }
 
       // Pause cleanly if PlayerProvider unmounts (e.g. user logs out), while keeping singleton element intact
       lifecycleRef.current.endTrackTransition();
@@ -2873,9 +3336,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       lifecycleRef.current.clearSlowTransitionTimer();
       lifecycleRef.current.clearVisibilityResumeTimers();
       slowTransitionRetriesRef.current = 0;
+      prematureEndRetriesRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
       pendingTransitionRef.current = null;
       userPausedRef.current = true;
       wantPlayingRef.current = false;
+      lifecycleRef.current.releasePlaybackWebLock();
       audio.pause();
       audio.removeAttribute('src');
       delete audio.dataset.trackId;
