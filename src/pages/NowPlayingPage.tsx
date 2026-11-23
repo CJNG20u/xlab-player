@@ -5,6 +5,7 @@ import {
   Download,
   Heart,
   ListMusic,
+  ListPlus,
   Loader2,
   Mic2,
   MonitorSpeaker,
@@ -22,6 +23,7 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
+import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt} from '../components/AlbumArt';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
@@ -39,7 +41,7 @@ import {
 import {usePlaybackTime} from '../lib/playbackClock';
 import {useRemoteControl} from '../lib/remoteControl';
 import {useScrollReady} from '../lib/scrollHistory';
-import type {RepeatMode, Track} from '../types';
+import type {Playlist, RepeatMode, Track} from '../types';
 import {
   computeLightTintedTopHex,
   computeNowPlayingTopHex,
@@ -48,7 +50,11 @@ import {
   getCachedDominantColor,
   useStatusBarColor,
 } from '../lib/themeColor';
-import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineStore';
+import {
+  getOfflineCoverBlobUrl,
+  getOfflinePlaylists,
+  getOfflineTrackLyrics,
+} from '../utils/offlineStore';
 
 interface LyricsResponsePayload {
   lyrics: string | null;
@@ -66,6 +72,28 @@ function getSessionLyricsKey(track: {
   artist?: string;
 }): string {
   return `${track.id}|${(track.artist || '').trim().toLowerCase()}|${(track.title || '').trim().toLowerCase()}`;
+}
+
+const pendingPlaylistAddKeys = new Set<string>();
+const pendingPlaylistAddListeners = new Set<() => void>();
+
+function notifyPendingPlaylistAddListeners() {
+  for (const listener of pendingPlaylistAddListeners) {
+    listener();
+  }
+}
+
+function getTrackPlaylistActionKeys(track: Track): string[] {
+  const videoId = track.isYouTubeStream ? getYouTubeVideoId(track) : null;
+  return Array.from(
+    new Set(
+      [
+        String(track.id),
+        track.deezerTrackId ? `dz-track-${track.deezerTrackId}` : null,
+        videoId ? `yt-${videoId}` : null,
+      ].filter((k): k is string => Boolean(k))
+    )
+  );
 }
 
 export const NowPlayingPage: React.FC = () => {
@@ -101,6 +129,8 @@ export const NowPlayingPage: React.FC = () => {
     toggleLikeTrack,
     saveYouTubeTrackToLibrary,
     getYouTubeSaveStatus,
+    libraryRefreshVersion,
+    bumpLibraryRefresh,
     remoteHostApi,
   } = usePlayer();
 
@@ -218,16 +248,157 @@ export const NowPlayingPage: React.FC = () => {
   const [offlineCoverBackdrop, setOfflineCoverBackdrop] = useState<string | null>(null);
   const [sampledDominantColor, setSampledDominantColor] = useState<string | null>(null);
   const [actionToast, setActionToast] = useState<string | null>(null);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [pickerTrack, setPickerTrack] = useState<Track | null>(null);
+  const [, setPendingAddTick] = useState(0);
 
   const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
   const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const userScrollPauseUntilRef = useRef<number>(0);
   const justOpenedLyricsRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
+  const toastTimerRef = useRef<number | null>(null);
+  const playlistsLoadedRef = useRef<boolean>(false);
+  const playlistsLoadedVersionRef = useRef<number>(-1);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    const onPendingChange = () => setPendingAddTick((n) => n + 1);
+    pendingPlaylistAddListeners.add(onPendingChange);
+    return () => {
+      isMountedRef.current = false;
+      pendingPlaylistAddListeners.delete(onPendingChange);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const flashToast = useCallback((msg: string) => {
+    if (!isMountedRef.current) return;
     setActionToast(msg);
-    setTimeout(() => setActionToast(null), 2800);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      if (isMountedRef.current) {
+        setActionToast(null);
+      }
+    }, 2800);
   }, []);
+
+  const loadPlaylistsForModal = useCallback(async () => {
+    if (offline) {
+      const cached = await getOfflinePlaylists();
+      if (isMountedRef.current) {
+        setPlaylists(cached);
+        playlistsLoadedRef.current = true;
+        playlistsLoadedVersionRef.current = libraryRefreshVersion;
+      }
+      return;
+    }
+    try {
+      const res = await apiFetch<{playlists: Playlist[]}>('/api/playlists');
+      if (isMountedRef.current) {
+        setPlaylists(res.playlists || []);
+        playlistsLoadedRef.current = true;
+        playlistsLoadedVersionRef.current = libraryRefreshVersion;
+      }
+    } catch {
+      const cached = await getOfflinePlaylists();
+      if (isMountedRef.current) {
+        setPlaylists(cached);
+        playlistsLoadedRef.current = true;
+        playlistsLoadedVersionRef.current = libraryRefreshVersion;
+      }
+    }
+  }, [libraryRefreshVersion, offline]);
+
+  const handleOpenPlaylistPicker = useCallback(() => {
+    if (isRemoteActive || !currentTrack) return;
+    if (currentTrack.isYouTubeStream) {
+      if (!canDownload || offline) return;
+      const keys = getTrackPlaylistActionKeys(currentTrack);
+      if (keys.some((k) => pendingPlaylistAddKeys.has(k))) return;
+    } else if (typeof currentTrack.id !== 'number') {
+      return;
+    }
+    setPickerTrack(currentTrack);
+    if (!playlistsLoadedRef.current || playlistsLoadedVersionRef.current !== libraryRefreshVersion) {
+      void loadPlaylistsForModal();
+    }
+  }, [
+    canDownload,
+    currentTrack,
+    isRemoteActive,
+    libraryRefreshVersion,
+    loadPlaylistsForModal,
+    offline,
+  ]);
+
+  const handleLibraryPlaylistSuccess = useCallback(
+    (message: string, createdPlaylist?: Playlist) => {
+      if (createdPlaylist) {
+        setPlaylists((prev) =>
+          prev.some((p) => p.id === createdPlaylist.id) ? prev : [createdPlaylist, ...prev]
+        );
+        void loadPlaylistsForModal();
+      }
+      bumpLibraryRefresh();
+      flashToast(message);
+    },
+    [bumpLibraryRefresh, flashToast, loadPlaylistsForModal]
+  );
+
+  const handlePickYouTubePlaylist = useCallback(
+    (pickedPlaylist: Playlist) => {
+      const capturedTrack = pickerTrack;
+      if (!capturedTrack) return;
+      const actionKeys = getTrackPlaylistActionKeys(capturedTrack);
+      if (actionKeys.some((k) => pendingPlaylistAddKeys.has(k))) return;
+
+      setPlaylists((prev) =>
+        prev.some((p) => p.id === pickedPlaylist.id) ? prev : [pickedPlaylist, ...prev]
+      );
+      void loadPlaylistsForModal();
+
+      for (const k of actionKeys) pendingPlaylistAddKeys.add(k);
+      notifyPendingPlaylistAddListeners();
+      flashToast(`Downloading and adding to ${pickedPlaylist.name}...`);
+
+      void (async () => {
+        try {
+          const res = await saveYouTubeTrackToLibrary(capturedTrack);
+          const libraryTrackId = res.track?.id;
+          if (!res.ok || typeof libraryTrackId !== 'number' || !Number.isFinite(libraryTrackId)) {
+            if (isMountedRef.current) {
+              flashToast(res.message || 'Could not download track');
+            }
+            return;
+          }
+          await apiFetch(`/api/playlists/${pickedPlaylist.id}/tracks`, {
+            method: 'POST',
+            body: JSON.stringify({trackIds: [libraryTrackId]}),
+          });
+          bumpLibraryRefresh();
+          if (isMountedRef.current) {
+            void loadPlaylistsForModal();
+            flashToast(`Added to ${pickedPlaylist.name}`);
+          }
+        } catch (err) {
+          if (isMountedRef.current) {
+            flashToast(err instanceof Error ? err.message : 'Could not add track to playlist');
+          }
+        } finally {
+          for (const k of actionKeys) pendingPlaylistAddKeys.delete(k);
+          notifyPendingPlaylistAddListeners();
+        }
+      })();
+    },
+    [bumpLibraryRefresh, flashToast, loadPlaylistsForModal, pickerTrack, saveYouTubeTrackToLibrary]
+  );
 
   const handlePlayHereQuick = useCallback(async () => {
     if (!remote.targetDeviceId) return;
@@ -533,6 +704,12 @@ export const NowPlayingPage: React.FC = () => {
   const isYouTubeTrack = Boolean(activeTrack.isYouTubeStream);
   const ytSaveStatus =
     !isRemoteActive && isYouTubeTrack ? getYouTubeSaveStatus(activeTrack.id) : 'idle';
+  const isAddingCurrentToPlaylist = Boolean(
+    !isRemoteActive &&
+      currentTrack &&
+      currentTrack.isYouTubeStream &&
+      getTrackPlaylistActionKeys(currentTrack).some((k) => pendingPlaylistAddKeys.has(k))
+  );
 
   const handleSaveToLibrary = async () => {
     if (isRemoteActive || !currentTrack) return;
@@ -891,40 +1068,69 @@ export const NowPlayingPage: React.FC = () => {
             {!isRemoteActive && currentTrack ? (
               isYouTubeTrack ? (
                 canDownload && !offline ? (
-                  <button
-                    type="button"
-                    disabled={ytSaveStatus === 'saving'}
-                    onClick={() => void handleSaveToLibrary()}
-                    className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
-                      ytSaveStatus === 'saved'
-                        ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
-                        : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
-                    }`}
-                    title={ytSaveStatus === 'saved' ? 'Saved to library' : 'Save track'}
-                    aria-label="Save track"
-                  >
-                    {ytSaveStatus === 'saving' ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : ytSaveStatus === 'saved' ? (
-                      <Check className="w-4 h-4 stroke-[2.5]" />
-                    ) : (
-                      <Download className="w-4 h-4" />
-                    )}
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={ytSaveStatus === 'saving'}
+                      onClick={() => void handleSaveToLibrary()}
+                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                        ytSaveStatus === 'saved'
+                          ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
+                      }`}
+                      title={ytSaveStatus === 'saved' ? 'Saved to library' : 'Save track'}
+                      aria-label="Save track"
+                    >
+                      {ytSaveStatus === 'saving' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : ytSaveStatus === 'saved' ? (
+                        <Check className="w-4 h-4 stroke-[2.5]" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isAddingCurrentToPlaylist}
+                      onClick={handleOpenPlaylistPicker}
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60 transition-colors"
+                      title="Add to playlist"
+                      aria-label="Add to playlist"
+                    >
+                      {isAddingCurrentToPlaylist ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <ListPlus className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 ) : null
               ) : (
-                <button
-                  type="button"
-                  onClick={() => void toggleLikeTrack(currentTrack.id)}
-                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors ${
-                    currentTrack.liked
-                      ? 'text-[var(--accent)]'
-                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                  }`}
-                  aria-label={currentTrack.liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
-                >
-                  <Heart className={`w-6 h-6 ${currentTrack.liked ? 'fill-current' : ''}`} />
-                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => void toggleLikeTrack(currentTrack.id)}
+                    className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-colors ${
+                      currentTrack.liked
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                    aria-label={currentTrack.liked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}
+                  >
+                    <Heart className={`w-6 h-6 ${currentTrack.liked ? 'fill-current' : ''}`} />
+                  </button>
+                  {typeof currentTrack.id === 'number' && (
+                    <button
+                      type="button"
+                      onClick={handleOpenPlaylistPicker}
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                      title="Add to playlist"
+                      aria-label="Add to playlist"
+                    >
+                      <ListPlus className="w-6 h-6" />
+                    </button>
+                  )}
+                </div>
               )
             ) : null}
           </div>
@@ -1048,6 +1254,19 @@ export const NowPlayingPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <AddToPlaylistModal
+        open={Boolean(pickerTrack)}
+        trackIds={
+          pickerTrack && !pickerTrack.isYouTubeStream && typeof pickerTrack.id === 'number'
+            ? [pickerTrack.id]
+            : []
+        }
+        playlists={playlists}
+        onClose={() => setPickerTrack(null)}
+        onPick={pickerTrack?.isYouTubeStream ? handlePickYouTubePlaylist : undefined}
+        onSuccess={handleLibraryPlaylistSuccess}
+      />
     </div>
   );
 };

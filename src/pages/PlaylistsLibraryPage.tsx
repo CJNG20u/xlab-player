@@ -11,6 +11,7 @@ import {
   ListPlus,
   Loader2,
   MoreHorizontal,
+  Pencil,
   Play,
   Plus,
   Search,
@@ -28,6 +29,7 @@ import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
 import {ConfirmDeleteModal} from '../components/ConfirmDeleteModal';
 import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
 import {PlaylistsHubView, recordRecentPlaylistId} from '../components/PlaylistsHubView';
+import {RenamePlaylistModal} from '../components/RenamePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
@@ -159,6 +161,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const loadSeqRef = useRef(0);
   const currentRouteKey = `${location.pathname}${location.search}`;
   const [createOpen, setCreateOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<Playlist | null>(null);
   const [greeting, setGreeting] = useState<string>(() => getTimeOfDayGreeting());
   const [searchOpen, setSearchOpen] = useState(false);
   const [heroSampledColor, setHeroSampledColor] = useState<string | null>(null);
@@ -202,6 +205,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
     setPageToast(msg);
     setTimeout(() => setPageToast(null), 3200);
   }, []);
+
+  const canEditPlaylist = useCallback(
+    (pl: Playlist | null | undefined): boolean =>
+      Boolean(!offline && user && pl && (pl.user_id === user.id || user.role === 'admin')),
+    [offline, user]
+  );
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -998,9 +1007,22 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       </span>
                     )}
                   </div>
-                  <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-[var(--text-primary)] break-words">
-                    {activePlaylist.name}
-                  </h1>
+                  <div className="flex items-center gap-2.5">
+                    <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-[var(--text-primary)] break-words min-w-0">
+                      {activePlaylist.name}
+                    </h1>
+                    {canEditPlaylist(activePlaylist) && (
+                      <button
+                        type="button"
+                        onClick={() => setRenameTarget(activePlaylist)}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-secondary)]/80 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition-colors"
+                        aria-label="Rename playlist"
+                        title="Rename playlist"
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
                   {activePlaylist.description && (
                     <p className="text-sm text-[var(--text-secondary)] max-w-2xl">
                       {activePlaylist.description}
@@ -1581,6 +1603,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
               onPlayPlaylist={handlePlayPlaylistById}
               onPlayTracks={handlePlayTrackCollection}
               onOpenCreatePlaylist={() => setCreateOpen(true)}
+              canEditPlaylist={canEditPlaylist}
+              onRenamePlaylist={setRenameTarget}
               onExportM3u={handleExportM3u}
               onDeletePlaylist={handleDeletePlaylist}
               onNavigateHomeTab={(tab) => {
@@ -1748,6 +1772,21 @@ export const PlaylistsLibraryPage: React.FC = () => {
           setPlaylists((prev) => [pl, ...prev]);
           bumpLibraryRefresh();
           navigate(`/playlists/${pl.id}`);
+        }}
+      />
+
+      <RenamePlaylistModal
+        playlist={renameTarget}
+        onClose={() => setRenameTarget(null)}
+        onRenamed={(renamedPlaylist, newName) => {
+          setPlaylists((prev) =>
+            prev.map((pl) => (pl.id === renamedPlaylist.id ? {...pl, name: newName} : pl))
+          );
+          setActivePlaylist((prev) =>
+            prev && prev.id === renamedPlaylist.id ? {...prev, name: newName} : prev
+          );
+          bumpLibraryRefresh();
+          flashToast('Playlist renamed');
         }}
       />
 

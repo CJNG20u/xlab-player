@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import {type Response, Router} from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -689,11 +690,25 @@ libraryRouter.get('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
   res.json({playlist: {...playlist, covers, track_count: tracks.length}, tracks});
 });
 
-libraryRouter.put('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
+libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) => {
   const playlistId = Number(req.params.id);
+  if (!Number.isInteger(playlistId) || playlistId <= 0) {
+    res.status(400).json({error: 'Invalid playlist id'});
+    return;
+  }
+
   const existing = db
-    .prepare('SELECT id, user_id FROM playlists WHERE id = ?')
-    .get(playlistId) as {id: number; user_id: number} | undefined;
+    .prepare('SELECT id, user_id, name, description, source, m3u_path FROM playlists WHERE id = ?')
+    .get(playlistId) as
+    | {
+        id: number;
+        user_id: number;
+        name: string;
+        description: string | null;
+        source: string | null;
+        m3u_path: string | null;
+      }
+    | undefined;
 
   if (!existing) {
     res.status(404).json({error: 'Playlist not found'});
@@ -704,18 +719,52 @@ libraryRouter.put('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
     return;
   }
 
-  const name = String(req.body?.name || '').trim();
-  const description = String(req.body?.description || '').trim();
+  const rawName = typeof req.body?.name === 'string' ? req.body.name : '';
+  const name = rawName.replace(/[\r\n]/g, '').trim();
   if (!name) {
     res.status(400).json({error: 'Playlist name is required'});
     return;
   }
+  if (name.length > 100) {
+    res.status(400).json({error: 'Playlist name must be 100 characters or fewer'});
+    return;
+  }
+
+  const hasDescription =
+    req.body !== null &&
+    typeof req.body === 'object' &&
+    Object.prototype.hasOwnProperty.call(req.body, 'description') &&
+    req.body.description !== undefined;
+  const description = hasDescription
+    ? String(req.body.description ?? '').trim().slice(0, 300)
+    : existing.description || '';
+
+  if (existing.source === 'm3u' && existing.m3u_path) {
+    try {
+      await updateM3uPlaylistNameOnDisk(existing.m3u_path, name);
+    } catch {
+      res.status(409).json({
+        error: 'Could not update the playlist file; the name would revert on the next scan',
+      });
+      return;
+    }
+  }
 
   db.prepare(
     "UPDATE playlists SET name = ?, description = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(name.slice(0, 100), description.slice(0, 300), playlistId);
+  ).run(name, description, playlistId);
 
-  res.json({ok: true});
+  const updated = db
+    .prepare(
+      `SELECT p.id, p.user_id, p.name, p.description, p.source, p.m3u_path, p.created_at, p.updated_at,
+              u.username AS owner_username
+       FROM playlists p
+       LEFT JOIN users u ON u.id = p.user_id
+       WHERE p.id = ?`
+    )
+    .get(playlistId);
+
+  res.json({ok: true, playlist: updated});
 });
 
 libraryRouter.delete('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
@@ -742,6 +791,71 @@ const M3U_EXT_RE = /\.m3u8?$/i;
 function sanitizeM3uLabel(value: string, fallback: string): string {
   const cleaned = (value || '').replace(/[\r\n]+/g, ' ').trim();
   return cleaned || fallback;
+}
+
+export function rewriteM3uPlaylistNameContent(content: string, newName: string): string {
+  const safeName = newName.replace(/[\r\n]/g, '').trim();
+  const hasBom = content.startsWith('\uFEFF');
+  const bom = hasBom ? '\uFEFF' : '';
+  const body = hasBom ? content.slice(1) : content;
+  const eol = body.includes('\r\n') ? '\r\n' : '\n';
+  const playlistDirective = `#PLAYLIST:${safeName}`;
+
+  if (body.length === 0) {
+    return `${bom}${playlistDirective}${eol}`;
+  }
+
+  const lines = body.split(/\r?\n/);
+  const result: string[] = [];
+  let replacedFirst = false;
+
+  for (const line of lines) {
+    if (/^#PLAYLIST:/i.test(line.trim())) {
+      if (!replacedFirst) {
+        result.push(playlistDirective);
+        replacedFirst = true;
+      }
+      continue;
+    }
+    result.push(line);
+  }
+
+  if (!replacedFirst) {
+    const extm3uIdx = result.findIndex((line) => /^#EXTM3U\b/i.test(line.trim()));
+    if (extm3uIdx >= 0) {
+      result.splice(extm3uIdx + 1, 0, playlistDirective);
+    } else {
+      result.unshift(playlistDirective);
+    }
+  }
+
+  return `${bom}${result.join(eol)}`;
+}
+
+async function updateM3uPlaylistNameOnDisk(m3uRelPath: string, newName: string): Promise<void> {
+  if (!m3uRelPath || !M3U_EXT_RE.test(m3uRelPath)) {
+    throw new Error('Invalid M3U playlist extension');
+  }
+  const m3uAbsPath = resolveSafeTrackPath(m3uRelPath);
+  if (!m3uAbsPath) {
+    throw new Error('Invalid M3U playlist path');
+  }
+
+  const existingContent = await fs.promises.readFile(m3uAbsPath, 'utf-8');
+  const nextContent = rewriteM3uPlaylistNameContent(existingContent, newName);
+
+  const dirAbs = path.dirname(m3uAbsPath);
+  const baseName = path.basename(m3uAbsPath);
+  const tmpName = `.${baseName}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  const tmpPath = path.join(dirAbs, tmpName);
+
+  try {
+    await fs.promises.writeFile(tmpPath, nextContent, 'utf-8');
+    await fs.promises.rename(tmpPath, m3uAbsPath);
+  } catch (err) {
+    await fs.promises.unlink(tmpPath).catch(() => {});
+    throw err;
+  }
 }
 
 async function appendTracksToM3uFile(

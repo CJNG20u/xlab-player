@@ -10,7 +10,8 @@ interface AddToPlaylistModalProps {
   trackIds: number[];
   playlists: Playlist[];
   onClose: () => void;
-  onSuccess: (message: string, createdPlaylist?: Playlist) => void;
+  onSuccess?: (message: string, createdPlaylist?: Playlist) => void;
+  onPick?: (playlist: Playlist) => void | Promise<void>;
 }
 
 export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
@@ -19,17 +20,24 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   playlists,
   onClose,
   onSuccess,
+  onPick,
 }) => {
   const [newName, setNewName] = useState('');
   const [busyId, setBusyId] = useState<number | 'new' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const isVisible = open && trackIds.length > 0;
+  const isVisible = open && (Boolean(onPick) || trackIds.length > 0);
   useBackClose(isVisible, onClose);
 
   if (!isVisible) return null;
 
   const handlePickExisting = async (pl: Playlist) => {
+    if (onPick) {
+      setError(null);
+      onClose();
+      void onPick(pl);
+      return;
+    }
     setBusyId(pl.id);
     setError(null);
     try {
@@ -37,7 +45,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         method: 'POST',
         body: JSON.stringify({trackIds}),
       });
-      onSuccess(
+      onSuccess?.(
         `Added ${trackIds.length} ${trackIds.length === 1 ? 'track' : 'tracks'} to ${pl.name}`
       );
       onClose();
@@ -59,13 +67,23 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         method: 'POST',
         body: JSON.stringify({name: trimmed}),
       });
-      const created = createdRes.playlist;
+      const created: Playlist = {
+        ...createdRes.playlist,
+        track_count: createdRes.playlist.track_count ?? 0,
+        covers: createdRes.playlist.covers ?? [],
+      };
+      if (onPick) {
+        setNewName('');
+        onClose();
+        void onPick(created);
+        return;
+      }
       await apiFetch(`/api/playlists/${created.id}/tracks`, {
         method: 'POST',
         body: JSON.stringify({trackIds}),
       });
       setNewName('');
-      onSuccess(
+      onSuccess?.(
         `Created "${created.name}" with ${trackIds.length} ${trackIds.length === 1 ? 'track' : 'tracks'}`,
         {...created, track_count: trackIds.length, covers: []}
       );
@@ -91,7 +109,9 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
               Add to Playlist
             </h2>
             <p className="text-xs text-[var(--text-secondary)] font-mono tabular-nums mt-0.5">
-              {trackIds.length} {trackIds.length === 1 ? 'track' : 'tracks'} selected
+              {trackIds.length > 0
+                ? `${trackIds.length} ${trackIds.length === 1 ? 'track' : 'tracks'} selected`
+                : '1 track selected'}
             </p>
           </div>
           <button

@@ -9,6 +9,7 @@ import {
   Loader2,
   MoreHorizontal,
   Music2,
+  Pencil,
   Play,
   Plus,
   Shuffle,
@@ -191,6 +192,8 @@ interface PlaylistsHubViewProps {
   onPlayPlaylist: (playlistId: number, shufflePlay?: boolean) => Promise<void>;
   onPlayTracks: (trackList: Track[], shufflePlay?: boolean) => void;
   onOpenCreatePlaylist: () => void;
+  canEditPlaylist: (playlist: Playlist) => boolean;
+  onRenamePlaylist: (playlist: Playlist) => void;
   onExportM3u: (playlist: Playlist) => Promise<void>;
   onDeletePlaylist: (playlistId: number) => Promise<void>;
   onNavigateHomeTab: (tab: 'liked' | 'recent' | 'offline' | 'all') => void;
@@ -209,6 +212,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   onPlayPlaylist,
   onPlayTracks,
   onOpenCreatePlaylist,
+  canEditPlaylist,
+  onRenamePlaylist,
   onExportM3u,
   onDeletePlaylist,
   onNavigateHomeTab,
@@ -268,7 +273,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
     e.stopPropagation();
     const rect = e.currentTarget.getBoundingClientRect();
     const menuWidth = 196;
-    const menuHeight = 104;
+    const menuHeight = 144;
     const clampedLeft = Math.max(
       12,
       Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 12)
@@ -1018,6 +1023,20 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
           style={{top: `${menuState.top}px`, left: `${menuState.left}px`}}
           className="fixed z-50 w-48 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] p-1.5 shadow-2xl"
         >
+          {canEditPlaylist(menuState.playlist) && (
+            <button
+              type="button"
+              onClick={() => {
+                const target = menuState.playlist;
+                setMenuState(null);
+                onRenamePlaylist(target);
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+            >
+              <Pencil className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
+              <span>Rename</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
