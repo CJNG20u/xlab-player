@@ -25,6 +25,7 @@ import {
 import React, {useCallback, useEffect, useLayoutEffect, useState} from 'react';
 import {NavLink, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {useAuth} from '../context/AuthContext';
+import {MainScrollProvider} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
@@ -83,6 +84,10 @@ export const AppShell: React.FC = () => {
   const {isInstallable, isInstalled, install} = usePWAInstall();
   const navigate = useNavigate();
   const location = useLocation();
+  const [mainElement, setMainElement] = useState<HTMLElement | null>(null);
+  const handleMainRef = useCallback((node: HTMLElement | null) => {
+    setMainElement(node);
+  }, []);
 
   const miniPlayerSwipe = useSwipeTrackGesture({
     onSwipeNext: nextTrack,
@@ -175,7 +180,8 @@ export const AppShell: React.FC = () => {
     'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--nav-bg)] backdrop-blur-xl border-t border-[var(--nav-border)]';
 
   return (
-    <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+    <MainScrollProvider element={mainElement}>
+      <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Main Area: Sidebar (Desktop) + Scrollable Stage */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Desktop Fixed Left Sidebar (240px) */}
@@ -293,6 +299,7 @@ export const AppShell: React.FC = () => {
         <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[var(--bg-primary)] relative">
           {/* Unified Full-Bleed Top-to-Bottom Header Gradient Backdrop (starts flush at y=0 behind status bar) */}
           <main
+            ref={handleMainRef}
             className="flex-1 overflow-y-auto relative"
             style={{
               backgroundColor: 'var(--bg-primary)',
@@ -752,6 +759,7 @@ export const AppShell: React.FC = () => {
           navigate(`/playlists/${pl.id}`);
         }}
       />
-    </div>
+      </div>
+    </MainScrollProvider>
   );
 };

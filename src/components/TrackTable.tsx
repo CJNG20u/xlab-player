@@ -13,8 +13,10 @@ import {
   Radio,
   Trash2,
 } from 'lucide-react';
-import React, {useEffect, useRef, useState} from 'react';
+import {useVirtualizer, type VirtualItem} from '@tanstack/react-virtual';
+import React, {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {useAuth} from '../context/AuthContext';
+import {useMainScroll} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
@@ -23,6 +25,8 @@ import {apiFetch, formatDuration} from '../lib/api';
 import type {Playlist, Track} from '../types';
 import {AlbumArt} from './AlbumArt';
 import {ConfirmDeleteModal} from './ConfirmDeleteModal';
+
+const VIRTUALIZATION_THRESHOLD = 100;
 
 function formatDisplayTrackTitle(title: string): string {
   const cleaned = title.replace(/^\s*\d{1,3}(?:\.|\)|\s+-)\s+/, '').trim();
@@ -89,10 +93,90 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   const [deletingTrack, setDeletingTrack] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  const {element: mainScrollElement, getElement: getMainScrollElement} = useMainScroll();
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const lastViewportWidthRef = useRef<number>(
+    typeof window !== 'undefined' ? window.innerWidth : 0
+  );
+
   const menuRef = useRef<HTMLDivElement | null>(null);
   const longPressTimerRef = useRef<number | null>(null);
   const touchStartPosRef = useRef<{x: number; y: number} | null>(null);
   const didLongPressRef = useRef(false);
+
+  // Virtualization approach inspired by Soundsible (MIT, (c) 2026 Arzuparreta)
+  const isVirtualized = tracks.length > VIRTUALIZATION_THRESHOLD;
+
+  const estimateRowSize = useCallback(() => {
+    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      return 60;
+    }
+    return 65;
+  }, []);
+
+  const getTrackItemKey = useCallback(
+    (index: number) => tracks[index]?.id ?? index,
+    [tracks]
+  );
+
+  const virtualizer = useVirtualizer({
+    count: tracks.length,
+    getScrollElement: getMainScrollElement,
+    estimateSize: estimateRowSize,
+    overscan: 8,
+    scrollMargin,
+    enabled: isVirtualized,
+    getItemKey: getTrackItemKey,
+  });
+
+  useLayoutEffect(() => {
+    if (!isVirtualized || !mainScrollElement || !listRef.current) {
+      setScrollMargin(0);
+      return;
+    }
+
+    const computeScrollMargin = () => {
+      const listEl = listRef.current;
+      if (!listEl) return;
+      const listRect = listEl.getBoundingClientRect();
+      const scrollRect = mainScrollElement.getBoundingClientRect();
+      const nextMargin = Math.max(
+        0,
+        Math.round(listRect.top - scrollRect.top + mainScrollElement.scrollTop)
+      );
+      setScrollMargin((prev) => (prev === nextMargin ? prev : nextMargin));
+    };
+
+    computeScrollMargin();
+
+    const handleResize = () => {
+      computeScrollMargin();
+      const width = window.innerWidth;
+      if (width !== lastViewportWidthRef.current) {
+        lastViewportWidthRef.current = width;
+        virtualizer.measure();
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        computeScrollMargin();
+      });
+      observer.observe(mainScrollElement);
+      if (mainScrollElement.firstElementChild) {
+        observer.observe(mainScrollElement.firstElementChild);
+      }
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      observer?.disconnect();
+    };
+  }, [isVirtualized, mainScrollElement, offline, playlistId, selectionMode, tracks.length, virtualizer]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -244,66 +328,64 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     }
   };
 
-  return (
-    <div className="relative">
-      {toast && (
-        <div className="fixed bottom-28 md:bottom-24 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl">
-          {toast}
-        </div>
-      )}
+  const renderTrackRow = (track: Track, idx: number, virtualRow?: VirtualItem) => {
+    const numericId = typeof track.id === 'number' ? track.id : null;
+    const isActive = currentTrack?.id === track.id;
+    const isMenuOpen = numericId !== null && menuTrackId === numericId;
+    const isSelected = Boolean(
+      selectionMode && numericId !== null && selectedIds?.has(numericId)
+    );
+    const isCached = numericId !== null && cachedTrackIds.has(numericId);
+    const isDownloadingOffline = numericId !== null && downloadingTrackIds.has(numericId);
 
-      {/* Desktop Column Header */}
-      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-4 px-4 py-2 border-b border-[var(--border-subtle)] text-xs font-medium text-[var(--text-secondary)]">
-        <span className="text-center">{selectionMode ? '' : '#'}</span>
-        <span>Title</span>
-        <span>Album</span>
-        <span className="flex justify-end pr-2">
-          <Clock className="w-4 h-4" />
-        </span>
-        <span />
-      </div>
+    const virtualRowStyle: React.CSSProperties | undefined = virtualRow
+      ? {
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          transform: `translateY(${virtualRow.start - virtualizer.options.scrollMargin}px)`,
+          zIndex: isMenuOpen ? 40 : undefined,
+        }
+      : undefined;
 
-      {/* Rows */}
-      <div className="divide-y divide-[var(--border-subtle)] md:divide-y-0 mt-1">
-        {tracks.map((track, idx) => {
-          const numericId = typeof track.id === 'number' ? track.id : null;
-          const isActive = currentTrack?.id === track.id;
-          const isMenuOpen = numericId !== null && menuTrackId === numericId;
-          const isSelected = Boolean(
-            selectionMode && numericId !== null && selectedIds?.has(numericId)
-          );
-          const isCached = numericId !== null && cachedTrackIds.has(numericId);
-          const isDownloadingOffline = numericId !== null && downloadingTrackIds.has(numericId);
-
-          return (
-            <div
-              key={`${track.id}-${idx}`}
-              className={`group relative grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-3 md:gap-4 rounded-md px-3 md:px-4 py-2.5 transition-colors select-none ${
-                isSelected
-                  ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/40'
-                  : isActive
-                    ? 'bg-[var(--bg-elevated)]/85'
-                    : 'hover:bg-[var(--bg-hover)]'
-              } ${selectionMode ? 'cursor-pointer' : ''}`}
-              onTouchStart={(e) => {
-                if (numericId !== null) handleTouchStart(e, numericId);
-              }}
-              onTouchMove={handleTouchMove}
-              onTouchEnd={clearLongPress}
-              onTouchCancel={clearLongPress}
-              onClick={() => {
-                if (didLongPressRef.current) {
-                  didLongPressRef.current = false;
-                  return;
-                }
-                if (selectionMode && numericId !== null) {
-                  onToggleSelect?.(numericId);
-                }
-              }}
-              onDoubleClick={() => {
-                if (!selectionMode) playTrack(track, tracks);
-              }}
-            >
+    return (
+      <div
+        key={track.id}
+        ref={virtualRow ? virtualizer.measureElement : undefined}
+        data-index={virtualRow ? virtualRow.index : undefined}
+        role="listitem"
+        aria-setsize={tracks.length}
+        aria-posinset={idx + 1}
+        style={virtualRowStyle}
+        className={`group relative grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-3 md:gap-4 rounded-md px-3 md:px-4 py-2.5 transition-colors select-none ${
+          virtualRow && idx > 0 ? 'border-t border-[var(--border-subtle)] md:border-t-0' : ''
+        } ${
+          isSelected
+            ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/40'
+            : isActive
+              ? 'bg-[var(--bg-elevated)]/85'
+              : 'hover:bg-[var(--bg-hover)]'
+        } ${selectionMode ? 'cursor-pointer' : ''}`}
+        onTouchStart={(e) => {
+          if (numericId !== null) handleTouchStart(e, numericId);
+        }}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={clearLongPress}
+        onTouchCancel={clearLongPress}
+        onClick={() => {
+          if (didLongPressRef.current) {
+            didLongPressRef.current = false;
+            return;
+          }
+          if (selectionMode && numericId !== null) {
+            onToggleSelect?.(numericId);
+          }
+        }}
+        onDoubleClick={() => {
+          if (!selectionMode) playTrack(track, tracks);
+        }}
+      >
               {/* Index / Play button OR Checkbox (Desktop) */}
               <div className="hidden md:flex items-center justify-center">
                 {selectionMode ? (
@@ -695,8 +777,52 @@ export const TrackTable: React.FC<TrackTableProps> = ({
               )}
             </div>
           );
-        })}
+  };
+
+  return (
+    <div className="relative">
+      {toast && (
+        <div className="fixed bottom-28 md:bottom-24 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl">
+          {toast}
+        </div>
+      )}
+
+      {/* Desktop Column Header */}
+      <div className="hidden md:grid grid-cols-[40px_minmax(0,1.6fr)_minmax(0,1fr)_124px_40px] items-center gap-4 px-4 py-2 border-b border-[var(--border-subtle)] text-xs font-medium text-[var(--text-secondary)]">
+        <span className="text-center">{selectionMode ? '' : '#'}</span>
+        <span>Title</span>
+        <span>Album</span>
+        <span className="flex justify-end pr-2">
+          <Clock className="w-4 h-4" />
+        </span>
+        <span />
       </div>
+
+      {/* Rows */}
+      {isVirtualized ? (
+        <div
+          ref={listRef}
+          role="list"
+          aria-label="Tracks"
+          className="relative mt-1"
+          style={{height: `${virtualizer.getTotalSize()}px`}}
+        >
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            const track = tracks[virtualRow.index];
+            if (!track) return null;
+            return renderTrackRow(track, virtualRow.index, virtualRow);
+          })}
+        </div>
+      ) : (
+        <div
+          ref={listRef}
+          role="list"
+          aria-label="Tracks"
+          className="divide-y divide-[var(--border-subtle)] md:divide-y-0 mt-1"
+        >
+          {tracks.map((track, idx) => renderTrackRow(track, idx))}
+        </div>
+      )}
 
       <ConfirmDeleteModal
         open={Boolean(pendingDeleteTrack)}
