@@ -1,6 +1,7 @@
 import {db, getRecentPlayHistory} from './db.ts';
 import {
   getCachedTrackVideoId,
+  isValidYouTubeVideoId,
   pickDiscoverSeedArtists,
 } from './downloader.ts';
 
@@ -492,18 +493,18 @@ function attachCachedVideoIdsToFeed(
   return {
     ...feed,
     newReleases: feed.newReleases.map((item) => {
-      if (item.videoId) return item;
+      if (item.videoId && isValidYouTubeVideoId(item.videoId)) return item;
       const cachedVid = getCachedTrackVideoId(item.artist, item.title);
-      return cachedVid ? {...item, videoId: cachedVid} : item;
+      return cachedVid ? {...item, videoId: cachedVid} : {...item, videoId: undefined};
     }),
   };
 }
 
 function attachCachedVideoIdsToTracks(tracks: DiscoverAlbumTrack[]): DiscoverAlbumTrack[] {
   return tracks.map((t) => {
-    if (t.videoId) return t;
+    if (t.videoId && isValidYouTubeVideoId(t.videoId)) return t;
     const cachedVid = getCachedTrackVideoId(t.artist, t.title);
-    return cachedVid ? {...t, videoId: cachedVid} : t;
+    return cachedVid ? {...t, videoId: cachedVid} : {...t, videoId: undefined};
   });
 }
 

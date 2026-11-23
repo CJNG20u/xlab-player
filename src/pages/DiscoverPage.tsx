@@ -36,6 +36,7 @@ import {
   getCatalogMatchStreamUrl,
   getSSEUrl,
   getYouTubeThumbProxyUrl,
+  isValidYouTubeVideoId,
   prefetchYouTubeStreams,
 } from '../lib/api';
 import type {
@@ -116,23 +117,23 @@ function normalizeArtistSeedKey(artist: string | null | undefined, title?: strin
 
 function extractYouTubeVideoIdFromItem(item: MetadataPreviewItem): string {
   const candidate = (item.id || '').trim();
-  if (/^[A-Za-z0-9_-]{6,20}$/.test(candidate)) {
+  if (isValidYouTubeVideoId(candidate)) {
     return candidate;
   }
   if (item.url) {
     try {
       const parsed = new URL(item.url);
       const v = parsed.searchParams.get('v');
-      if (v && /^[A-Za-z0-9_-]{6,20}$/.test(v)) return v;
+      if (v && isValidYouTubeVideoId(v)) return v;
       if (parsed.hostname === 'youtu.be') {
         const seg = parsed.pathname.replace(/^\//, '').split('/')[0];
-        if (/^[A-Za-z0-9_-]{6,20}$/.test(seg)) return seg;
+        if (isValidYouTubeVideoId(seg)) return seg;
       }
     } catch {
       // ignore invalid URL
     }
   }
-  return candidate;
+  return '';
 }
 
 function metadataItemToYouTubeTrack(item: MetadataPreviewItem): Track {
@@ -161,7 +162,7 @@ function metadataItemToYouTubeTrack(item: MetadataPreviewItem): Track {
 }
 
 function discoverReleaseToTrack(item: DiscoverNewReleaseItem): Track {
-  const hasVid = Boolean(item.videoId && /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId));
+  const hasVid = isValidYouTubeVideoId(item.videoId);
   const trackId = hasVid
     ? `yt-${item.videoId}`
     : item.id || `dz-track-${item.deezerTrackId || `${item.artist}-${item.title}`}`;
@@ -202,7 +203,7 @@ function discoverReleaseToTrack(item: DiscoverNewReleaseItem): Track {
 }
 
 function discoverAlbumToTrack(item: DiscoverAlbumItem): Track {
-  const hasVid = Boolean(item.videoId && /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId));
+  const hasVid = isValidYouTubeVideoId(item.videoId);
   const trackId = hasVid ? `yt-${item.videoId}` : item.id || `dz-album-${item.deezerAlbumId || item.title}`;
   const coverUrl =
     item.thumbnailUrl || (hasVid ? getYouTubeThumbProxyUrl(item.videoId!) : undefined);

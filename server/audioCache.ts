@@ -15,6 +15,7 @@ import {
   isVideoDirectProxyNegative,
   isYouTubeStreamCached,
   markVideoDirectProxyNegative,
+  promoteInFlightAdGateToPlayback,
   recordStrategy403Rejection,
   recordStrategyDirectSuccess,
   requestIpv4MediaStream,
@@ -24,6 +25,7 @@ import {
   type Ipv4MediaResponse,
   type PrefetchRequestItem,
   type ResolvedYouTubeAudioStream,
+  type StreamResolvePriority,
 } from './downloader.ts';
 
 // ---------------------------------------------------------------------------
@@ -453,9 +455,14 @@ function releaseUpstreamLane(fill: FillState): void {
   }
 }
 
+function fillPriorityToResolvePriority(priority: number): StreamResolvePriority {
+  return priority === 0 ? 'playback' : 'prefetch';
+}
+
 async function openFillUpstreamWithSingleRetry(
   videoId: string,
   initialResolved: ResolvedStreamWithCacheMeta,
+  resolvePriority: StreamResolvePriority,
   signal: AbortSignal
 ): Promise<{upstream: Ipv4MediaResponse; resolved: ResolvedStreamWithCacheMeta}> {
   const openOnce = async (resolved: ResolvedStreamWithCacheMeta): Promise<Ipv4MediaResponse> => {
@@ -519,6 +526,7 @@ async function openFillUpstreamWithSingleRetry(
       forceRefresh: true,
       skipFastPath: true,
       defaultOnly: true,
+      priority: resolvePriority,
     });
     if (signal.aborted) {
       throw new Error('Cache fill aborted');
@@ -552,6 +560,9 @@ function startOrAttachFill(
   if (existing && !existing.done && !existing.canceled) {
     if (options.priority < existing.priority) {
       existing.priority = options.priority;
+      if (options.priority === 0) {
+        promoteInFlightAdGateToPlayback(videoId);
+      }
     }
     return existing;
   }
@@ -611,6 +622,7 @@ function startOrAttachFill(
         options.preResolved ||
         (await resolveYouTubeAudioStreamUrl(videoId, {
           skipFastPath: fill.priority > 0,
+          priority: fillPriorityToResolvePriority(fill.priority),
         }));
 
       if (fill.canceled) {
@@ -648,6 +660,7 @@ function startOrAttachFill(
       const opened = await openFillUpstreamWithSingleRetry(
         videoId,
         resolvedInitial,
+        fillPriorityToResolvePriority(fill.priority),
         abortController.signal
       );
       upstream = opened.upstream;
@@ -1406,6 +1419,7 @@ function drainResolveWorkers(): void {
           cachedUrl ||
           (await resolveYouTubeAudioStreamUrl(task.videoId, {
             skipFastPath: true,
+            priority: 'prefetch',
           }));
 
         if (task.download && isAudioCacheEnabled() && !getCachedAudio(task.videoId)) {

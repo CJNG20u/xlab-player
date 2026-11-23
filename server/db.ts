@@ -337,6 +337,8 @@ const prunePlayHistoryStmt = db.prepare(
      )`
 );
 
+const STRICT_YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
 export function recordPlayHistory(entry: {
   userId: number;
   title: string;
@@ -357,7 +359,8 @@ export function recordPlayHistory(entry: {
     typeof entry.trackId === 'number' && Number.isInteger(entry.trackId) && entry.trackId > 0
       ? entry.trackId
       : null;
-  const videoId = (entry.videoId || '').trim().slice(0, 32);
+  const rawVideoId = (entry.videoId || '').trim();
+  const videoId = STRICT_YOUTUBE_VIDEO_ID_RE.test(rawVideoId) ? rawVideoId : '';
 
   insertPlayHistoryStmt.run(
     entry.userId,
@@ -443,7 +446,7 @@ export function getCachedStreamUrlRow(
   egress: string,
   safetyMarginSec = 60
 ): StreamUrlCacheRow | null {
-  if (!videoId || !egress) return null;
+  if (!videoId || !STRICT_YOUTUBE_VIDEO_ID_RE.test(videoId) || !egress) return null;
   const nowSec = Date.now() / 1000 + Math.max(0, safetyMarginSec);
   const row = getStreamUrlCacheStmt.get(videoId, egress, nowSec) as StreamUrlCacheRow | undefined;
   return row ?? null;
@@ -464,7 +467,9 @@ export function setCachedStreamUrlRow(entry: {
   formatId: string | null;
   usedFormatHeaders: boolean;
 }): void {
-  if (!entry.videoId || !entry.url || !entry.egress) return;
+  if (!entry.videoId || !STRICT_YOUTUBE_VIDEO_ID_RE.test(entry.videoId) || !entry.url || !entry.egress) {
+    return;
+  }
   if (!Number.isFinite(entry.expiresAtSec) || entry.expiresAtSec <= Date.now() / 1000) return;
   upsertStreamUrlCacheStmt.run(
     entry.videoId,
@@ -484,7 +489,7 @@ export function setCachedStreamUrlRow(entry: {
 }
 
 export function invalidateCachedStreamUrlRow(videoId: string): void {
-  if (!videoId) return;
+  if (!videoId || !STRICT_YOUTUBE_VIDEO_ID_RE.test(videoId)) return;
   deleteStreamUrlCacheStmt.run(videoId);
 }
 

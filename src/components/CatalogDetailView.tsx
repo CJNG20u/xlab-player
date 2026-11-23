@@ -16,6 +16,7 @@ import {
   apiFetch,
   formatDuration,
   getCatalogMatchStreamUrl,
+  isValidYouTubeVideoId,
   prefetchYouTubeStreams,
 } from '../lib/api';
 import {
@@ -74,7 +75,7 @@ function hashTint(seed: string): string {
 }
 
 export function catalogTrackToPlayerTrack(item: DiscoverAlbumTrack): Track {
-  const hasVid = Boolean(item.videoId && /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId));
+  const hasVid = isValidYouTubeVideoId(item.videoId);
   const trackId = hasVid ? `yt-${item.videoId}` : item.id;
   const streamUrl = hasVid
     ? `/api/yt-stream/${encodeURIComponent(item.videoId!)}`

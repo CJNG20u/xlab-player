@@ -18,6 +18,7 @@ import {
   enqueueDownloadJob,
   fetchMetadataPreview,
   getDownloadJobs,
+  isValidYouTubeVideoId,
   normalizeDownloadQuality,
   peekTrackMetadata,
   sanitizeNasSegment,
@@ -44,7 +45,7 @@ discoverRouter.post('/discover/history', requireAuth, (req: AuthRequest, res) =>
       : null;
 
   const rawVideoId = typeof req.body?.videoId === 'string' ? req.body.videoId.trim() : '';
-  const videoId = /^[A-Za-z0-9_-]{6,20}$/.test(rawVideoId) ? rawVideoId : '';
+  const videoId = isValidYouTubeVideoId(rawVideoId) ? rawVideoId : '';
 
   const now = Date.now();
   const rawPlayedAt = req.body?.playedAt;
@@ -214,7 +215,7 @@ downloadRouter.post('/metadata', requireAuth, async (req, res) => {
 downloadRouter.post('/peek', requireAuth, async (req, res) => {
   try {
     const target = String(req.body?.url || req.body?.videoId || '').trim();
-    if (!target || (!/^https?:\/\//i.test(target) && !/^[A-Za-z0-9_-]{6,20}$/.test(target))) {
+    if (!target || (!/^https?:\/\//i.test(target) && !isValidYouTubeVideoId(target))) {
       res.status(400).json({error: 'A valid http(s) URL or YouTube videoId is required'});
       return;
     }
@@ -242,6 +243,11 @@ downloadRouter.post('/', requireDownloadPermission, async (req: AuthRequest, res
         : '';
   const rawDuration = Number(req.body?.duration);
   const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
+
+  if (videoId && !isValidYouTubeVideoId(videoId)) {
+    res.status(400).json({error: 'Invalid YouTube video ID'});
+    return;
+  }
 
   if (!videoId && !url && !title) {
     res.status(400).json({error: 'A videoId, url, or track title is required'});

@@ -98,26 +98,32 @@ export function getTrackCoverUrl(
   return track.coverUrl || null;
 }
 
+export const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+export function isValidYouTubeVideoId(id: string | null | undefined): boolean {
+  return Boolean(id && YOUTUBE_VIDEO_ID_RE.test(id));
+}
+
 export function getYouTubeVideoId(
   track: Pick<Track, 'id' | 'youtubeUrl' | 'streamUrl'> | null | undefined
 ): string | null {
   if (!track) return null;
   if (typeof track.id === 'string' && track.id.startsWith('yt-')) {
     const id = track.id.slice(3);
-    if (/^[A-Za-z0-9_-]{6,20}$/.test(id)) return id;
+    if (YOUTUBE_VIDEO_ID_RE.test(id)) return id;
   }
   if (track.streamUrl) {
-    const match = /\/api\/yt-stream\/([A-Za-z0-9_-]{6,20})/.exec(track.streamUrl);
+    const match = /\/api\/yt-stream\/([A-Za-z0-9_-]{11})(?:[/?#]|$)/.exec(track.streamUrl);
     if (match) return match[1];
   }
   if (track.youtubeUrl) {
     try {
       const parsed = new URL(track.youtubeUrl);
       const v = parsed.searchParams.get('v');
-      if (v && /^[A-Za-z0-9_-]{6,20}$/.test(v)) return v;
+      if (v && YOUTUBE_VIDEO_ID_RE.test(v)) return v;
       if (parsed.hostname === 'youtu.be') {
         const seg = parsed.pathname.replace(/^\//, '').split('/')[0];
-        if (/^[A-Za-z0-9_-]{6,20}$/.test(seg)) return seg;
+        if (YOUTUBE_VIDEO_ID_RE.test(seg)) return seg;
       }
     } catch {
       // ignore invalid URL

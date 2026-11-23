@@ -817,17 +817,23 @@ async function startServer() {
     }
 
     const rawVideoIds = req.body?.videoIds;
-    if (!Array.isArray(rawVideoIds)) {
-      res.status(400).json({error: 'videoIds must be an array of YouTube video IDs'});
+    if (!Array.isArray(rawVideoIds) || rawVideoIds.length === 0) {
+      res.status(400).json({error: 'videoIds must be a non-empty array of YouTube video IDs'});
       return;
     }
 
     const validIds: string[] = [];
     for (const raw of rawVideoIds) {
-      if (validIds.length >= 3) break;
-      if (typeof raw !== 'string') continue;
+      if (typeof raw !== 'string') {
+        res.status(400).json({error: 'Invalid YouTube video ID'});
+        return;
+      }
       const trimmed = raw.trim();
-      if (isValidYouTubeVideoId(trimmed) && !validIds.includes(trimmed)) {
+      if (!isValidYouTubeVideoId(trimmed)) {
+        res.status(400).json({error: 'Invalid YouTube video ID'});
+        return;
+      }
+      if (validIds.length < 3 && !validIds.includes(trimmed)) {
         validIds.push(trimmed);
       }
     }
@@ -856,8 +862,13 @@ async function startServer() {
     for (const raw of rawItems.slice(0, 5)) {
       if (!raw || typeof raw !== 'object') continue;
       const rec = raw as Record<string, unknown>;
+      const rawVid = typeof rec.videoId === 'string' ? rec.videoId.trim() : '';
+      if (rawVid && !isValidYouTubeVideoId(rawVid)) {
+        res.status(400).json({error: 'Invalid YouTube video ID'});
+        return;
+      }
       items.push({
-        videoId: typeof rec.videoId === 'string' ? rec.videoId.trim() : undefined,
+        videoId: rawVid || undefined,
         artist: typeof rec.artist === 'string' ? rec.artist.trim().slice(0, 120) : undefined,
         title: typeof rec.title === 'string' ? rec.title.trim().slice(0, 160) : undefined,
         duration:

@@ -4,6 +4,7 @@ dist/
 dev-dist/
 coverage/
 data/
+audio_cache/
 music_library/
 .env
 .env.local

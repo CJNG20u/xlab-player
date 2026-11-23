@@ -67,11 +67,12 @@ Once healthy, open `http://<your-server-ip>:3000`.
 
 ### Volume Mapping
 
-`docker-compose.yml` mounts two persistent directories:
+`docker-compose.yml` mounts three persistent directories:
 
 | Host Path | Container Path | Purpose |
 | --- | --- | --- |
-| `./data` | `/app/data` | SQLite database (`xlabplayer.db`), extracted album cover cache, and uploaded `cookies.txt` |
+| `./data` | `/app/data` | SQLite database (`xlabplayer.db` + `stream_url_cache`), extracted album cover cache, `yt-dlp` JS player cache, and uploaded `cookies.txt` |
+| `./audio_cache` | `/app/data/audio-cache` | LRU-evicted disk audio cache for streamed/prefetched tracks (controlled by `AUDIO_CACHE_MB`, default `2048` MB; mount on fast local SSD and keep out of git/backups) |
 | `./music_library` | `/music` | Music library root (`MUSIC_DIR`) for scanning, streaming, downloads, uploads, and `.m3u8` exports |
 
 To connect an existing NFS or SMB NAS share mounted on the Docker host (for example `/mnt/nas/music`), update the volume entry in `docker-compose.yml`:
@@ -79,6 +80,7 @@ To connect an existing NFS or SMB NAS share mounted on the Docker host (for exam
 ```yaml
 volumes:
   - ./data:/app/data
+  - ./audio_cache:/app/data/audio-cache
   - /mnt/nas/music:/music
 ```
 
@@ -86,7 +88,7 @@ volumes:
 
 ### NAS Permissions (`PUID` / `PGID`)
 
-On startup, `docker-entrypoint.sh` ensures `/app/data` and `/music` exist, aligns ownership of `/app/data` to `PUID:PGID`, and drops root privileges via `gosu` before starting Node.js. It intentionally avoids recursive `chown` over `/music` so large or read-only NAS shares start instantaneously.
+On startup, `docker-entrypoint.sh` ensures `/app/data`, `/app/data/audio-cache`, and `/music` exist, aligns ownership of `/app/data` and `/app/data/audio-cache` to `PUID:PGID`, and drops root privileges via `gosu` before starting Node.js. It intentionally avoids recursive `chown` over `/music` so large or read-only NAS shares start instantaneously.
 
 Find your host/NAS user and group IDs:
 
@@ -208,6 +210,10 @@ sudo systemctl status xlabplayer
 | `JWT_SECRET` | *(auto-generated)* | *(auto-generated)* | Secret key (16+ chars, 32+ recommended) for signing JWT session tokens. If left blank, a random 64-char hex secret is generated and persisted in SQLite. |
 | `COOKIE_SECURE` | `false` | `false` | Set to `true` when serving over HTTPS behind a reverse proxy so auth cookies include the `Secure` attribute. |
 | `DATA_DIR` | `/app/data` | `./data` | Directory storing `xlabplayer.db`, extracted cover art (`covers/`), and `secrets/cookies.txt`. |
+| `AUDIO_CACHE_DIR` | `/app/data/audio-cache` | `./data/audio-cache` | Persistent disk cache directory for streamed and prefetched audio files. |
+| `AUDIO_CACHE_MB` | `2048` | `2048` | Maximum disk audio cache size in MB (`0` disables disk caching). |
+| `YT_AD_GATE_MAX_WAIT_MS` | `12000` | `12000` | Max TV ad-gate polling window in ms for interactive playback. |
+| `YT_AD_GATE_MAX_WAIT_PREFETCH_MS` | `25000` | `25000` | Max TV ad-gate polling window in ms for background prefetch (clamped `1000-120000`). |
 | `MUSIC_DIR` | `/music` | `./music_library` | Initial music library path seeded into the database on first boot (can later be changed in **Settings**). |
 | `YTDLP_PATH` | `/usr/local/bin/yt-dlp` | `yt-dlp` | Path or command name for the `yt-dlp` binary seeded on first boot. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffmpeg` | Path or command name for the `ffmpeg` binary seeded on first boot. |

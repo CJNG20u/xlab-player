@@ -1,8 +1,9 @@
 node_modules
 dist
 dev-dist
-data
-music_library
+data/
+audio_cache/
+music_library/
 .env
 .env.*
 !.env.example

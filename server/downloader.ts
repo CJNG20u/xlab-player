@@ -317,7 +317,7 @@ function extractThumbnailUrl(entry: Record<string, unknown>): string {
     }
   }
   const id = typeof entry.id === 'string' ? entry.id.trim() : '';
-  if (/^[A-Za-z0-9_-]{11}$/.test(id)) {
+  if (YOUTUBE_VIDEO_ID_RE.test(id)) {
     return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
   }
   return '';
@@ -388,7 +388,7 @@ export function extractYouTubeVideoIdFromUrl(raw: string): string | null {
       const seg = parsed.pathname.replace(/^\//, '').split('/')[0];
       if (seg && YOUTUBE_VIDEO_ID_RE.test(seg)) return seg;
     }
-    const shortsMatch = /^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{6,20})/.exec(parsed.pathname);
+    const shortsMatch = /^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})(?:[/?#]|$)/.exec(parsed.pathname);
     if (shortsMatch) return shortsMatch[1];
   } catch {
     // ignore
@@ -615,7 +615,10 @@ export async function fetchMetadataPreview(
       }
 
       const items = rawEntries
-        .filter((e) => e && (e.title || e.id))
+        .filter((e) => {
+          const id = typeof e?.id === 'string' ? e.id.trim() : '';
+          return Boolean(e && id && YOUTUBE_VIDEO_ID_RE.test(id));
+        })
         .slice(0, searchLimit)
         .map((entry) => {
           const normalized = normalizeMetadataEntry(entry, trimmed, 'Singles');
@@ -688,8 +691,22 @@ export async function fetchMetadataPreview(
     }
 
     const fallbackAlbum = parsed.isPlaylist && parsed.playlistTitle ? parsed.playlistTitle : 'Singles';
+    const isYouTubeUrl = /(?:^|\.)(?:youtube\.com|youtu\.be)$/i.test(
+      (() => {
+        try {
+          return new URL(trimmed).hostname;
+        } catch {
+          return '';
+        }
+      })()
+    );
     const items = parsed.entries
-      .filter((e) => e && (e.title || e.id))
+      .filter((e) => {
+        if (!e || !(e.title || e.id)) return false;
+        if (!isYouTubeUrl) return true;
+        const id = typeof e.id === 'string' ? e.id.trim() : '';
+        return Boolean(id && YOUTUBE_VIDEO_ID_RE.test(id));
+      })
       .slice(0, 50)
       .map((entry) => {
         const normalized = normalizeMetadataEntry(entry, trimmed, fallbackAlbum);
@@ -2017,7 +2034,7 @@ export function spawnAudioPreviewStream(videoUrl: string) {
   return {stream: ffProc.stdout, cleanup};
 }
 
-const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{6,20}$/;
+export const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_streams.py
 const YT_STREAM_MEMO_TTL_MS = 5 * 60 * 1000; // 5 minutes in-memory memo TTL
 const YT_STREAM_NEGATIVE_TTL_MS = 20 * 1000; // 20 seconds negative memo TTL
@@ -2055,6 +2072,7 @@ const VIDEO_NEG_CACHE_MAX_ENTRIES = 500;
 // TV ad-gate polling defaults (single-URL poll; no re-resolve on exhaustion)
 const DEFAULT_AD_GATE_POLL_MS = 500;
 const DEFAULT_AD_GATE_MAX_WAIT_MS = 12_000;
+const DEFAULT_AD_GATE_MAX_WAIT_PREFETCH_MS = 25_000;
 const AD_GATE_HISTOGRAM_WINDOW_SIZE = 200;
 const AD_GATE_HISTOGRAM_LOG_EVERY = 50;
 
@@ -2079,6 +2097,8 @@ const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.ytimg.com',
   '.googleusercontent.com',
 ];
+
+export type StreamResolvePriority = 'playback' | 'prefetch';
 
 export type YouTubeStreamStrategy =
   | 'visionos'
@@ -2219,6 +2239,15 @@ function getAdGateMaxWaitMs(): number {
     DEFAULT_AD_GATE_MAX_WAIT_MS,
     1_000,
     60_000
+  );
+}
+
+function getAdGateMaxWaitPrefetchMs(): number {
+  return parseClampedInt(
+    process.env.YT_AD_GATE_MAX_WAIT_PREFETCH_MS?.trim(),
+    DEFAULT_AD_GATE_MAX_WAIT_PREFETCH_MS,
+    1_000,
+    120_000
   );
 }
 
@@ -2368,24 +2397,94 @@ function getCustomConfiguredPlayerClient(): string | null {
   return raw;
 }
 
-// FIFO semaphore capping concurrent yt-dlp resolver child processes on small VPS hosts
-let activeResolveSlots = 0;
-const resolveWaitQueue: Array<() => void> = [];
+// Priority-aware semaphore capping concurrent yt-dlp resolver child processes on small VPS hosts.
+// Reserves 1 slot for interactive playback when maxSlots >= 2 and lets playback jump ahead of prefetch.
+interface ResolveSlotWaiter {
+  priority: StreamResolvePriority;
+  videoId?: string;
+  wake: () => void;
+}
 
-async function withYtdlpResolveSlot<T>(fn: () => Promise<T>): Promise<T> {
+let activeResolveSlots = 0;
+const resolveWaitQueue: ResolveSlotWaiter[] = [];
+
+function canAcquireResolveSlot(priority: StreamResolvePriority): boolean {
   const maxSlots = getMaxConcurrentResolves();
-  if (activeResolveSlots >= maxSlots) {
-    await new Promise<void>((resolve) => {
-      resolveWaitQueue.push(resolve);
+  if (priority === 'playback') {
+    return activeResolveSlots < maxSlots;
+  }
+  if (resolveWaitQueue.some((w) => w.priority === 'playback')) {
+    return false;
+  }
+  const prefetchCap = maxSlots >= 2 ? maxSlots - 1 : 1;
+  return activeResolveSlots < prefetchCap;
+}
+
+function drainResolveWaitQueue(): void {
+  while (resolveWaitQueue.length > 0) {
+    const playbackIdx = resolveWaitQueue.findIndex((w) => w.priority === 'playback');
+    if (playbackIdx !== -1 && canAcquireResolveSlot('playback')) {
+      const [waiter] = resolveWaitQueue.splice(playbackIdx, 1);
+      activeResolveSlots += 1;
+      waiter.wake();
+      continue;
+    }
+    const prefetchIdx = resolveWaitQueue.findIndex((w) => w.priority === 'prefetch');
+    if (prefetchIdx !== -1 && canAcquireResolveSlot('prefetch')) {
+      const [waiter] = resolveWaitQueue.splice(prefetchIdx, 1);
+      activeResolveSlots += 1;
+      waiter.wake();
+      continue;
+    }
+    break;
+  }
+}
+
+async function withYtdlpResolveSlot<T>(
+  fn: () => Promise<T>,
+  priority: StreamResolvePriority = 'playback',
+  videoId?: string
+): Promise<T> {
+  if (canAcquireResolveSlot(priority)) {
+    activeResolveSlots += 1;
+  } else {
+    await new Promise<void>((wake) => {
+      resolveWaitQueue.push({priority, videoId, wake});
     });
   }
-  activeResolveSlots += 1;
   try {
     return await fn();
   } finally {
     activeResolveSlots -= 1;
-    const next = resolveWaitQueue.shift();
-    if (next) next();
+    drainResolveWaitQueue();
+  }
+}
+
+// Shared mutable per-videoId control object so promoting a prefetch to playback caps the active
+// ad-gate poll window in place without restarting the probe.
+interface ActiveAdGateControl {
+  priority: StreamResolvePriority;
+  promotedAtMs: number | null;
+}
+
+const activeAdGateControls = new Map<string, ActiveAdGateControl>();
+
+export function promoteInFlightAdGateToPlayback(videoId: string): void {
+  if (!isValidYouTubeVideoId(videoId)) return;
+  const control = activeAdGateControls.get(videoId);
+  if (control && control.priority !== 'playback') {
+    control.priority = 'playback';
+    control.promotedAtMs = Date.now();
+  }
+  let promotedWaiter = false;
+  for (const waiter of resolveWaitQueue) {
+    if (waiter.videoId === videoId && waiter.priority !== 'playback') {
+      waiter.priority = 'playback';
+      promotedWaiter = true;
+    }
+  }
+  if (promotedWaiter) {
+    drainResolveWaitQueue();
   }
 }
 
@@ -3953,6 +4052,7 @@ async function executeSingleIpv4RangeProbe(
 
 async function probeAudioStreamUrl(params: {
   videoId: string;
+  priority: StreamResolvePriority;
   strategy: YouTubeStreamStrategy;
   extractorArgs: string | null;
   ytdlpArgsForLog: string[];
@@ -3968,6 +4068,7 @@ async function probeAudioStreamUrl(params: {
   streamHeaders: Record<string, string>;
   topLevelHeaders: Record<string, string>;
   usedFormatHeaders: boolean;
+  adGateControl?: ActiveAdGateControl;
 }): Promise<{
   ok: boolean;
   status: number;
@@ -4043,102 +4144,128 @@ async function probeAudioStreamUrl(params: {
       // Never open the strategy-level circuit on first-probe 403s inside the polling window.
       if (shouldPollAdGate) {
         const pollMs = getAdGatePollMs();
-        const maxWaitMs = getAdGateMaxWaitMs();
         const pollStartMs = Date.now();
+        const ownsControl = !params.adGateControl && !activeAdGateControls.has(params.videoId);
+        const control: ActiveAdGateControl =
+          params.adGateControl ||
+          activeAdGateControls.get(params.videoId) || {
+            priority: params.priority,
+            promotedAtMs: null,
+          };
+        if (ownsControl) {
+          activeAdGateControls.set(params.videoId, control);
+        }
+
+        const getEffectiveGateBudget = (): {
+          priority: StreamResolvePriority;
+          maxWaitMs: number;
+          deadlineMs: number;
+        } => {
+          const playbackMaxWaitMs = getAdGateMaxWaitMs();
+          const prefetchMaxWaitMs = getAdGateMaxWaitPrefetchMs();
+          if (control.priority === 'prefetch') {
+            return {
+              priority: 'prefetch',
+              maxWaitMs: prefetchMaxWaitMs,
+              deadlineMs: pollStartMs + prefetchMaxWaitMs,
+            };
+          }
+          const baseMs =
+            control.promotedAtMs !== null ? Math.max(pollStartMs, control.promotedAtMs) : pollStartMs;
+          const deadlineMs =
+            control.promotedAtMs !== null
+              ? Math.min(pollStartMs + prefetchMaxWaitMs, baseMs + playbackMaxWaitMs)
+              : pollStartMs + playbackMaxWaitMs;
+          return {
+            priority: 'playback',
+            maxWaitMs: playbackMaxWaitMs,
+            deadlineMs,
+          };
+        };
+
         let pollAttempts = 0;
         let lastOutcome = first;
+        const initialBudget = getEffectiveGateBudget();
 
         console.info(
           '[yt-stream-probe]',
           JSON.stringify({
             event: 'ad_gate_poll_start',
             videoId: params.videoId,
+            priority: initialBudget.priority,
             strategy: params.strategy,
             formatId: params.formatId,
             client: urlParams.client,
             pollMs,
-            maxWaitMs,
+            maxWaitMs: initialBudget.maxWaitMs,
             firstProbeElapsedMs: firstElapsedMs,
           })
         );
 
-        while (true) {
-          const elapsedWaitMs = Date.now() - pollStartMs;
-          const remainingMs = maxWaitMs - elapsedWaitMs;
-          if (remainingMs <= 0) {
-            break;
-          }
+        try {
+          while (true) {
+            const budgetBeforeSleep = getEffectiveGateBudget();
+            const remainingMs = budgetBeforeSleep.deadlineMs - Date.now();
+            if (remainingMs <= 0) {
+              break;
+            }
 
-          await sleepDelay(Math.min(pollMs, remainingMs));
-          pollAttempts += 1;
+            await sleepDelay(Math.min(pollMs, remainingMs));
+            pollAttempts += 1;
 
-          const remainingAfterSleepMs = maxWaitMs - (Date.now() - pollStartMs);
-          const attemptTimeoutMs = Math.min(
-            YT_PROBE_TIMEOUT_MS,
-            Math.max(2_000, remainingAfterSleepMs + 2_000)
-          );
-
-          let attempt: SingleIpv4ProbeOutcome;
-          try {
-            attempt = await executeSingleIpv4RangeProbe(
-              params.streamUrl,
-              headers,
-              attemptTimeoutMs
+            const budgetAfterSleep = getEffectiveGateBudget();
+            const remainingAfterSleepMs = budgetAfterSleep.deadlineMs - Date.now();
+            const attemptTimeoutMs = Math.min(
+              YT_PROBE_TIMEOUT_MS,
+              Math.max(2_000, remainingAfterSleepMs + 2_000)
             );
-          } catch (pollErr) {
-            const waitedMs = Date.now() - pollStartMs;
-            console.warn(
-              '[yt-stream-probe]',
-              JSON.stringify({
-                event: 'probe_network_error',
-                videoId: params.videoId,
-                strategy: params.strategy,
-                formatId: params.formatId,
-                ipFamily: 'IPv4',
-                waitedMs,
-                attempts: pollAttempts,
-                adGatePolling: true,
-                usedFormatHeaders: params.usedFormatHeaders,
-                urlParams,
-                error: pollErr instanceof Error ? pollErr.message : String(pollErr),
-              })
-            );
-            return {
-              ok: false,
-              status: 0,
-              contentType: '',
-              contentLength: null,
-              ipFamily: 'IPv4',
-              urlParams,
-              poTokenSuspected: false,
-              adGateCleared: false,
-              adGateExhausted: false,
-              waitedMs,
-            };
-          }
 
-          lastOutcome = attempt;
-
-          if (!attempt.allowedHost) {
-            return {
-              ok: false,
-              status: attempt.statusCode,
-              contentType: attempt.contentType,
-              contentLength: null,
-              ipFamily: attempt.ipFamily,
-              urlParams,
-              poTokenSuspected: false,
-              adGateCleared: false,
-              adGateExhausted: false,
-              waitedMs: Date.now() - pollStartMs,
-            };
-          }
-
-          if (attempt.statusCode === 200 || attempt.statusCode === 206) {
-            if (isRejectedProbeContentType(attempt.contentType)) {
+            let attempt: SingleIpv4ProbeOutcome;
+            try {
+              attempt = await executeSingleIpv4RangeProbe(
+                params.streamUrl,
+                headers,
+                attemptTimeoutMs
+              );
+            } catch (pollErr) {
+              const waitedMs = Date.now() - pollStartMs;
+              console.warn(
+                '[yt-stream-probe]',
+                JSON.stringify({
+                  event: 'probe_network_error',
+                  videoId: params.videoId,
+                  priority: control.priority,
+                  strategy: params.strategy,
+                  formatId: params.formatId,
+                  ipFamily: 'IPv4',
+                  waitedMs,
+                  attempts: pollAttempts,
+                  adGatePolling: true,
+                  usedFormatHeaders: params.usedFormatHeaders,
+                  urlParams,
+                  error: pollErr instanceof Error ? pollErr.message : String(pollErr),
+                })
+              );
               return {
                 ok: false,
-                status: 415,
+                status: 0,
+                contentType: '',
+                contentLength: null,
+                ipFamily: 'IPv4',
+                urlParams,
+                poTokenSuspected: false,
+                adGateCleared: false,
+                adGateExhausted: false,
+                waitedMs,
+              };
+            }
+
+            lastOutcome = attempt;
+
+            if (!attempt.allowedHost) {
+              return {
+                ok: false,
+                status: attempt.statusCode,
                 contentType: attempt.contentType,
                 contentLength: null,
                 ipFamily: attempt.ipFamily,
@@ -4150,129 +4277,162 @@ async function probeAudioStreamUrl(params: {
               };
             }
 
-            const waitedMs = Date.now() - pollStartMs;
-            recordStrategyDirectSuccess(params.strategy, params.videoId);
-            clearUpstreamBackoff();
-            console.info(
-              '[yt-stream-probe]',
-              JSON.stringify({
-                event: 'ad_gate_cleared',
-                videoId: params.videoId,
-                waitedMs,
-                attempts: pollAttempts,
-                strategy: params.strategy,
-                formatId: params.formatId,
-                client: urlParams.client,
-                hasPot: urlParams.hasPot,
-                usedFormatHeaders: params.usedFormatHeaders,
+            if (attempt.statusCode === 200 || attempt.statusCode === 206) {
+              if (isRejectedProbeContentType(attempt.contentType)) {
+                return {
+                  ok: false,
+                  status: 415,
+                  contentType: attempt.contentType,
+                  contentLength: null,
+                  ipFamily: attempt.ipFamily,
+                  urlParams,
+                  poTokenSuspected: false,
+                  adGateCleared: false,
+                  adGateExhausted: false,
+                  waitedMs: Date.now() - pollStartMs,
+                };
+              }
+
+              const waitedMs = Date.now() - pollStartMs;
+              const clearedBudget = getEffectiveGateBudget();
+              recordStrategyDirectSuccess(params.strategy, params.videoId);
+              clearUpstreamBackoff();
+              console.info(
+                '[yt-stream-probe]',
+                JSON.stringify({
+                  event: 'ad_gate_cleared',
+                  videoId: params.videoId,
+                  priority: clearedBudget.priority,
+                  maxWaitMs: clearedBudget.maxWaitMs,
+                  waitedMs,
+                  attempts: pollAttempts,
+                  strategy: params.strategy,
+                  formatId: params.formatId,
+                  client: urlParams.client,
+                  hasPot: urlParams.hasPot,
+                  usedFormatHeaders: params.usedFormatHeaders,
+                  status: attempt.statusCode,
+                  ipFamily: attempt.ipFamily,
+                  contentType: attempt.contentTypeHeader,
+                  contentLength: attempt.parsedLength,
+                })
+              );
+              recordAdGateClearedWait(waitedMs);
+              return {
+                ok: true,
                 status: attempt.statusCode,
-                ipFamily: attempt.ipFamily,
-                contentType: attempt.contentTypeHeader,
+                contentType: attempt.contentType,
                 contentLength: attempt.parsedLength,
-              })
-            );
-            recordAdGateClearedWait(waitedMs);
-            return {
-              ok: true,
-              status: attempt.statusCode,
-              contentType: attempt.contentType,
-              contentLength: attempt.parsedLength,
-              ipFamily: attempt.ipFamily,
-              urlParams,
-              poTokenSuspected: false,
-              adGateCleared: true,
-              adGateExhausted: false,
-              waitedMs,
-            };
+                ipFamily: attempt.ipFamily,
+                urlParams,
+                poTokenSuspected: false,
+                adGateCleared: true,
+                adGateExhausted: false,
+                waitedMs,
+              };
+            }
+
+            // Do not continue polling on any non-403 HTTP error
+            if (attempt.statusCode !== 403) {
+              const waitedMs = Date.now() - pollStartMs;
+              console.warn(
+                '[yt-stream-probe]',
+                JSON.stringify({
+                  event: 'probe_rejected',
+                  videoId: params.videoId,
+                  priority: control.priority,
+                  strategy: params.strategy,
+                  formatId: params.formatId,
+                  status: attempt.statusCode,
+                  ipFamily: attempt.ipFamily,
+                  waitedMs,
+                  attempts: pollAttempts,
+                  adGatePolling: true,
+                  serverHeader: attempt.serverHeader,
+                  contentType: attempt.contentTypeHeader,
+                  usedFormatHeaders: params.usedFormatHeaders,
+                  urlParams,
+                })
+              );
+              return {
+                ok: false,
+                status: attempt.statusCode,
+                contentType: attempt.contentType,
+                contentLength: null,
+                ipFamily: attempt.ipFamily,
+                urlParams,
+                poTokenSuspected: false,
+                adGateCleared: false,
+                adGateExhausted: false,
+                waitedMs,
+              };
+            }
           }
 
-          // Do not continue polling on any non-403 HTTP error
-          if (attempt.statusCode !== 403) {
-            const waitedMs = Date.now() - pollStartMs;
-            console.warn(
-              '[yt-stream-probe]',
-              JSON.stringify({
-                event: 'probe_rejected',
-                videoId: params.videoId,
-                strategy: params.strategy,
-                formatId: params.formatId,
-                status: attempt.statusCode,
-                ipFamily: attempt.ipFamily,
-                waitedMs,
-                attempts: pollAttempts,
-                adGatePolling: true,
-                serverHeader: attempt.serverHeader,
-                contentType: attempt.contentTypeHeader,
-                usedFormatHeaders: params.usedFormatHeaders,
-                urlParams,
-              })
-            );
-            return {
-              ok: false,
-              status: attempt.statusCode,
-              contentType: attempt.contentType,
-              contentLength: null,
-              ipFamily: attempt.ipFamily,
-              urlParams,
-              poTokenSuspected: false,
-              adGateCleared: false,
-              adGateExhausted: false,
+          // Entire ad-gate polling window passed with 403s: emit diagnostics without full URLs/secrets,
+          // and open the short global upstream backoff ONLY for interactive playback (never prefetch).
+          const waitedMs = Date.now() - pollStartMs;
+          const finalBudget = getEffectiveGateBudget();
+          const backoffOpened = finalBudget.priority === 'playback';
+          const otherResolvesInFlight = Math.max(0, inFlightResolutions.size - 1);
+
+          console.warn(
+            '[yt-stream-probe]',
+            JSON.stringify({
+              event: 'ad_gate_exhausted',
+              videoId: params.videoId,
+              priority: finalBudget.priority,
               waitedMs,
-            };
+              attempts: pollAttempts,
+              pollMs,
+              maxWaitMs: finalBudget.maxWaitMs,
+              backoffOpened,
+              strategy: params.strategy,
+              formatId: params.formatId,
+              client: urlParams.client,
+              fromCache: params.fromCache,
+              cacheAgeMs: params.cacheAgeMs,
+              urlAgeMs: Date.now() - params.resolvedAtMs,
+              extractorArgs: params.extractorArgs || 'default',
+              ytdlpArgs: params.ytdlpArgsForLog,
+              otherResolvesInFlightAtResolve: params.otherResolvesInFlightAtResolve,
+              otherResolvesInFlight,
+              activeResolveSlots,
+              status: 403,
+              ipFamily: lastOutcome.ipFamily,
+              serverHeader: lastOutcome.serverHeader,
+              contentType: lastOutcome.contentTypeHeader,
+              usedFormatHeaders: params.usedFormatHeaders,
+              urlParams,
+              sentHeaders: summarizeHeadersForLog(headers),
+              attribution: backoffOpened
+                ? '403 persisted through polling window; handing off to pipe + 5m negative cache'
+                : '403 persisted through prefetch polling window; negative-cached video without opening global backoff',
+            })
+          );
+
+          if (backoffOpened) {
+            openUpstreamBackoff(params.videoId, 403, 'ad_gate_exhausted');
+          }
+          await maybeRunAutoDebugCompare();
+
+          return {
+            ok: false,
+            status: 403,
+            contentType: lastOutcome.contentType,
+            contentLength: null,
+            ipFamily: lastOutcome.ipFamily,
+            urlParams,
+            poTokenSuspected: false,
+            adGateCleared: false,
+            adGateExhausted: true,
+            waitedMs,
+          };
+        } finally {
+          if (ownsControl && activeAdGateControls.get(params.videoId) === control) {
+            activeAdGateControls.delete(params.videoId);
           }
         }
-
-        // Entire ad-gate polling window passed with 403s: emit diagnostics without full URLs/secrets,
-        // and open the short global upstream backoff ONLY here (never on a first-probe 403).
-        const waitedMs = Date.now() - pollStartMs;
-        const otherResolvesInFlight = Math.max(0, inFlightResolutions.size - 1);
-
-        console.warn(
-          '[yt-stream-probe]',
-          JSON.stringify({
-            event: 'ad_gate_exhausted',
-            videoId: params.videoId,
-            waitedMs,
-            attempts: pollAttempts,
-            pollMs,
-            maxWaitMs,
-            strategy: params.strategy,
-            formatId: params.formatId,
-            client: urlParams.client,
-            fromCache: params.fromCache,
-            cacheAgeMs: params.cacheAgeMs,
-            urlAgeMs: Date.now() - params.resolvedAtMs,
-            extractorArgs: params.extractorArgs || 'default',
-            ytdlpArgs: params.ytdlpArgsForLog,
-            otherResolvesInFlightAtResolve: params.otherResolvesInFlightAtResolve,
-            otherResolvesInFlight,
-            activeResolveSlots,
-            status: 403,
-            ipFamily: lastOutcome.ipFamily,
-            serverHeader: lastOutcome.serverHeader,
-            contentType: lastOutcome.contentTypeHeader,
-            usedFormatHeaders: params.usedFormatHeaders,
-            urlParams,
-            sentHeaders: summarizeHeadersForLog(headers),
-            attribution: '403 persisted through polling window; handing off to pipe + 5m negative cache',
-          })
-        );
-
-        openUpstreamBackoff(params.videoId, 403, 'ad_gate_exhausted');
-        await maybeRunAutoDebugCompare();
-
-        return {
-          ok: false,
-          status: 403,
-          contentType: lastOutcome.contentType,
-          contentLength: null,
-          ipFamily: lastOutcome.ipFamily,
-          urlParams,
-          poTokenSuspected: false,
-          adGateCleared: false,
-          adGateExhausted: true,
-          waitedMs,
-        };
       }
 
       // Non-TV or first-probe-only strategy (e.g., visionos): do NOT poll; fail fast and update circuit
@@ -4449,12 +4609,14 @@ export async function resolveYouTubeAudioStreamUrl(
     skipStrategies?: YouTubeStreamStrategy[];
     skipFastPath?: boolean;
     defaultOnly?: boolean;
+    priority?: StreamResolvePriority;
   } = {}
 ): Promise<ResolvedYouTubeAudioStream & {fromCache: boolean; cacheAgeMs: number | null}> {
   if (!isValidYouTubeVideoId(videoId)) {
     throw new Error('Invalid YouTube video ID');
   }
 
+  const priority: StreamResolvePriority = options.priority ?? 'playback';
   const skipSet = new Set<YouTubeStreamStrategy>(options.skipStrategies || []);
   const memoKey = getStreamMemoKey(videoId);
 
@@ -4479,12 +4641,23 @@ export async function resolveYouTubeAudioStreamUrl(
     }
   }
 
-  // Single-flight deduplication per (videoId, egress)
+  // Single-flight deduplication per (videoId, egress).
+  // If interactive playback attaches to an in-flight prefetch, promote its active ad-gate
+  // control and slot waiter to playback in place rather than restarting the probe.
   const existingPromise = inFlightResolutions.get(memoKey);
   if (existingPromise) {
+    if (priority === 'playback') {
+      promoteInFlightAdGateToPlayback(videoId);
+    }
     const resolved = await existingPromise;
     return {...resolved, headers: {...resolved.headers}, fromCache: false, cacheAgeMs: null};
   }
+
+  const adGateControl: ActiveAdGateControl = {
+    priority,
+    promotedAtMs: null,
+  };
+  activeAdGateControls.set(videoId, adGateControl);
 
   const runExtractionAttempt = async (
     extractorArgs: string | null,
@@ -4522,13 +4695,17 @@ export async function resolveYouTubeAudioStreamUrl(
     let stdout = '';
     let otherResolvesInFlightAtResolve = 0;
     try {
-      const result = await withYtdlpResolveSlot(() => {
-        otherResolvesInFlightAtResolve = Math.max(0, inFlightResolutions.size - 1);
-        return execYtdlp(args, {
-          timeout: timeoutMs,
-          maxBuffer: 12 * 1024 * 1024,
-        });
-      });
+      const result = await withYtdlpResolveSlot(
+        () => {
+          otherResolvesInFlightAtResolve = Math.max(0, inFlightResolutions.size - 1);
+          return execYtdlp(args, {
+            timeout: timeoutMs,
+            maxBuffer: 12 * 1024 * 1024,
+          });
+        },
+        adGateControl.priority,
+        videoId
+      );
       stdout = result.stdout;
     } catch (rawErr) {
       const execErr = rawErr as ExecFileError;
@@ -4624,6 +4801,7 @@ export async function resolveYouTubeAudioStreamUrl(
     // and clears any TV-client ad gate BEFORE the URL is persisted to memory or SQLite.
     const probe = await probeAudioStreamUrl({
       videoId,
+      priority: adGateControl.priority,
       strategy,
       extractorArgs: safeExtractorArgsForLog,
       ytdlpArgsForLog: sanitizedArgs,
@@ -4639,6 +4817,7 @@ export async function resolveYouTubeAudioStreamUrl(
       streamHeaders: headers,
       topLevelHeaders,
       usedFormatHeaders,
+      adGateControl,
     });
     if (!probe.ok) {
       const clientFamily = classifyClientFamily(probe.urlParams.client, strategy);
@@ -4915,7 +5094,9 @@ export async function resolveYouTubeAudioStreamUrl(
           markVideoDirectProxyNegative(
             videoId,
             failReason,
-            adGateExhausted ? AD_GATE_NEG_CACHE_TTL_MS : undefined
+            adGateExhausted && adGateControl.priority === 'playback'
+              ? AD_GATE_NEG_CACHE_TTL_MS
+              : undefined
           );
         }
         if (attemptedCount === 0 && isDirectProxyCircuitOpen()) {
@@ -4954,6 +5135,9 @@ export async function resolveYouTubeAudioStreamUrl(
   } finally {
     if (inFlightResolutions.get(memoKey) === resolvePromise) {
       inFlightResolutions.delete(memoKey);
+    }
+    if (activeAdGateControls.get(videoId) === adGateControl) {
+      activeAdGateControls.delete(videoId);
     }
   }
 }
