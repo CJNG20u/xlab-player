@@ -5,8 +5,6 @@ import express from 'express';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
-import {Readable} from 'stream';
-import type {ReadableStream as NodeReadableStream} from 'stream/web';
 import {type AuthRequest, requireAuth} from './server/auth.ts';
 import {
   cacheYouTubeThumbnailUrl,
@@ -19,11 +17,13 @@ import {
   isAllowedYouTubeMediaUrl,
   isDirectProxyCircuitOpen,
   isValidYouTubeVideoId,
-  recordUpstream403Rejection,
-  recordUpstreamDirectSuccess,
+  recordStrategy403Rejection,
+  recordStrategyDirectSuccess,
+  requestIpv4MediaStream,
   resolveTrackToVideoId,
   resolveYouTubeAudioStreamUrl,
   spawnDirectYouTubeAudioStream,
+  type Ipv4MediaResponse,
   type PrefetchRequestItem,
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
@@ -243,7 +243,7 @@ async function startServer() {
     const fetchUpstream = async (
       streamUrl: string,
       streamHeaders: Record<string, string>
-    ): Promise<globalThis.Response> => {
+    ): Promise<Ipv4MediaResponse> => {
       const headers: Record<string, string> = {...streamHeaders};
       const hasAccept = Object.keys(headers).some((k) => k.toLowerCase() === 'accept');
       if (!hasAccept) {
@@ -253,34 +253,11 @@ async function startServer() {
         headers.Range = safeRange;
       }
 
-      const attemptController = new AbortController();
-      const onParentAbort = () => {
-        if (!attemptController.signal.aborted) {
-          attemptController.abort();
-        }
-      };
-      if (abortController.signal.aborted) {
-        attemptController.abort();
-      } else {
-        abortController.signal.addEventListener('abort', onParentAbort, {once: true});
-      }
-
-      const connectTimer = setTimeout(() => {
-        if (!attemptController.signal.aborted) {
-          attemptController.abort(new Error(`Upstream fetch timed out after ${UPSTREAM_FETCH_TIMEOUT_MS}ms`));
-        }
-      }, UPSTREAM_FETCH_TIMEOUT_MS);
-
-      try {
-        return await fetch(streamUrl, {
-          method: 'GET',
-          headers,
-          signal: attemptController.signal,
-          redirect: 'follow',
-        });
-      } finally {
-        clearTimeout(connectTimer);
-      }
+      return requestIpv4MediaStream(streamUrl, {
+        headers,
+        timeoutMs: UPSTREAM_FETCH_TIMEOUT_MS,
+        signal: abortController.signal,
+      });
     };
 
     const pipeDirectFallback = (fallbackReason: string): boolean => {
@@ -411,7 +388,7 @@ async function startServer() {
         throw resolveErr;
       }
 
-      let upstream: globalThis.Response;
+      let upstream: Ipv4MediaResponse;
       try {
         upstream = await fetchUpstream(resolved.url, resolved.headers);
       } catch (fetchErr) {
@@ -427,19 +404,44 @@ async function startServer() {
         throw fetchErr;
       }
 
-      // If a cached signed URL expired OR was rejected with 403/410, update circuit breaker
-      // and either short-circuit to fallback pipe or run one deduplicated refresh.
-      if (upstream.status === 403 || upstream.status === 410) {
-        const failedStatus = upstream.status;
-        try {
-          await upstream.body?.cancel();
-        } catch {
-          // ignore
-        }
+      const headerStr = (h: string | string[] | undefined): string =>
+        Array.isArray(h) ? h[0] || '' : h || '';
+
+      // If a cached/resolved signed URL expired OR was rejected with 403/410, update the
+      // per-strategy circuit breaker and try a DIFFERENT strategy without retrying the same client.
+      if (upstream.statusCode === 403 || upstream.statusCode === 410) {
+        const failedStatus = upstream.statusCode;
+        const failedStrategy = resolved.strategy;
+        const failedServer = headerStr(upstream.headers.server);
+        const failedContentType = headerStr(upstream.headers['content-type']);
+        const failedIpFamily = upstream.ipFamily;
+        upstream.stream.resume();
+        upstream.abort();
         invalidateYouTubeAudioStreamCache(videoId);
 
-        if (failedStatus === 403 && recordUpstream403Rejection('upstream-proxy')) {
-          if (pipeDirectFallback('upstream HTTP 403 tripped 10m circuit breaker')) {
+        if (failedStatus === 403) {
+          console.warn(
+            '[yt-stream-proxy]',
+            JSON.stringify({
+              event: 'proxy_403',
+              videoId,
+              strategy: failedStrategy,
+              fromCache: resolved.fromCache,
+              status: failedStatus,
+              ipFamily: failedIpFamily,
+              serverHeader: failedServer,
+              contentType: failedContentType,
+              sentHeaderKeys: Object.keys(resolved.headers),
+            })
+          );
+          recordStrategy403Rejection(
+            failedStrategy,
+            resolved.fromCache ? 'proxy-403-cached' : 'proxy-403-fresh'
+          );
+        }
+
+        if (isDirectProxyCircuitOpen()) {
+          if (pipeDirectFallback(`all strategies in 403 cooldown after ${failedStrategy}`)) {
             return;
           }
           detachClientListeners();
@@ -447,13 +449,27 @@ async function startServer() {
         }
 
         try {
+          // If it was a stale cached URL (410 or expired 403), allow fresh resolution;
+          // if it was freshly resolved and still got 403, skip that exact strategy so we don't retry the same client.
           resolved = await resolveYouTubeAudioStreamUrl(videoId, {
             forceRefresh: true,
-            skipFastPath: resolved.strategy === 'fast-path',
+            skipStrategies: !resolved.fromCache && failedStatus === 403 ? [failedStrategy] : [],
           });
           upstream = await fetchUpstream(resolved.url, resolved.headers);
-          if (upstream.status === 403) {
-            recordUpstream403Rejection('upstream-proxy-retry');
+          if (upstream.statusCode === 403) {
+            console.warn(
+              '[yt-stream-proxy]',
+              JSON.stringify({
+                event: 'proxy_403_retry',
+                videoId,
+                strategy: resolved.strategy,
+                status: upstream.statusCode,
+                ipFamily: upstream.ipFamily,
+                serverHeader: headerStr(upstream.headers.server),
+                contentType: headerStr(upstream.headers['content-type']),
+              })
+            );
+            recordStrategy403Rejection(resolved.strategy, 'proxy-403-retry');
           }
         } catch (retryErr) {
           if (abortController.signal.aborted) {
@@ -470,25 +486,20 @@ async function startServer() {
       }
 
       // Re-verify final upstream host after any redirects
-      if (upstream.url && !isAllowedYouTubeMediaUrl(upstream.url)) {
-        try {
-          await upstream.body?.cancel();
-        } catch {
-          // ignore
-        }
+      if (upstream.finalUrl && !isAllowedYouTubeMediaUrl(upstream.finalUrl)) {
+        upstream.stream.resume();
+        upstream.abort();
         detachClientListeners();
         console.error('[yt-stream]', videoId, 'unexpected-upstream-host');
         res.status(502).json({error: 'Unexpected upstream media host'});
         return;
       }
 
-      if (!upstream.ok && upstream.status !== 206 && upstream.status !== 416) {
-        const failedStatus = upstream.status;
-        try {
-          await upstream.body?.cancel();
-        } catch {
-          // ignore
-        }
+      const isOkStatus = upstream.statusCode >= 200 && upstream.statusCode < 300;
+      if (!isOkStatus && upstream.statusCode !== 206 && upstream.statusCode !== 416) {
+        const failedStatus = upstream.statusCode;
+        upstream.stream.resume();
+        upstream.abort();
         if (failedStatus !== 404 && pipeDirectFallback(`upstream HTTP ${failedStatus}`)) {
           return;
         }
@@ -500,16 +511,17 @@ async function startServer() {
         return;
       }
 
-      if (upstream.status === 200 || upstream.status === 206) {
-        recordUpstreamDirectSuccess();
+      if (upstream.statusCode === 200 || upstream.statusCode === 206) {
+        recordStrategyDirectSuccess(resolved.strategy);
       }
 
-      const contentType = upstream.headers.get('content-type') || resolved.contentType || 'audio/mp4';
-      const contentRange = upstream.headers.get('content-range');
-      const contentLength = upstream.headers.get('content-length');
-      const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
+      const contentType =
+        headerStr(upstream.headers['content-type']) || resolved.contentType || 'audio/mp4';
+      const contentRange = headerStr(upstream.headers['content-range']);
+      const contentLength = headerStr(upstream.headers['content-length']);
+      const acceptRanges = headerStr(upstream.headers['accept-ranges']) || 'bytes';
 
-      res.status(upstream.status);
+      res.status(upstream.statusCode);
       res.setHeader('Content-Type', contentType);
       res.setHeader('Accept-Ranges', acceptRanges);
       res.setHeader('Vary', 'Range');
@@ -521,18 +533,10 @@ async function startServer() {
         res.setHeader('Content-Length', contentLength);
       }
 
-      if (!upstream.body) {
-        detachClientListeners();
-        res.end();
-        return;
-      }
-
-      const nodeStream = Readable.fromWeb(upstream.body as unknown as NodeReadableStream<Uint8Array>);
+      const nodeStream = upstream.stream;
       const destroyNodeStream = () => {
         detachClientListeners();
-        if (!nodeStream.destroyed) {
-          nodeStream.destroy();
-        }
+        upstream.abort();
       };
 
       nodeStream.on('error', () => {

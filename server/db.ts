@@ -10,6 +10,9 @@ export const DATA_DIR = process.env.DATA_DIR?.trim()
   : path.resolve(ROOT_DIR, 'data');
 export const COVERS_DIR = path.resolve(DATA_DIR, 'covers');
 export const SECRETS_DIR = path.resolve(DATA_DIR, 'secrets');
+export const YTDLP_CACHE_DIR = process.env.YTDLP_CACHE_DIR?.trim()
+  ? path.resolve(process.env.YTDLP_CACHE_DIR.trim())
+  : path.resolve(DATA_DIR, 'ytdlp-cache');
 export const COOKIES_FILE = path.resolve(SECRETS_DIR, 'cookies.txt');
 export const DEFAULT_MUSIC_DIR = process.env.MUSIC_DIR?.trim()
   ? path.resolve(process.env.MUSIC_DIR.trim())
@@ -18,7 +21,7 @@ export const DEFAULT_YTDLP_PATH = process.env.YTDLP_PATH?.trim() || 'yt-dlp';
 export const DEFAULT_FFMPEG_PATH = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 
 // Ensure core runtime directories exist
-for (const dir of [DATA_DIR, COVERS_DIR, SECRETS_DIR]) {
+for (const dir of [DATA_DIR, COVERS_DIR, SECRETS_DIR, YTDLP_CACHE_DIR]) {
   fs.mkdirSync(dir, {recursive: true});
 }
 if (!process.env.MUSIC_DIR?.trim()) {
@@ -181,7 +184,9 @@ const defaultSettings: Record<string, string> = {
   ytdlp_path: DEFAULT_YTDLP_PATH,
   ffmpeg_path: DEFAULT_FFMPEG_PATH,
   ytdlp_remote_components: 'true',
-  ytdlp_player_client: 'web,mweb,android_vr',
+  ytdlp_player_client: '',
+  ytdlp_resolve_timeout_ms: '35000',
+  ytdlp_resolve_fallback_timeout_ms: '30000',
   ytdlp_sleep_interval: '2',
   ytdlp_max_sleep_interval: '5',
   ytdlp_force_ipv4: 'true',

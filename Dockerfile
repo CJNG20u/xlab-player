@@ -45,6 +45,17 @@ RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp 
   && chmod a+rx /usr/local/bin/yt-dlp \
   && printf '%s\n' '--js-runtimes node' > /etc/yt-dlp.conf
 
+# Optional: install the bgutil-ytdlp-pot-provider yt-dlp plugin when building with
+# `--build-arg INSTALL_POT_PLUGIN=true` (used together with the optional `bgutil-provider`
+# sidecar in docker-compose.yml and `YTDLP_POT_PROVIDER_URL=http://bgutil-provider:4416`).
+ARG INSTALL_POT_PLUGIN=false
+RUN if [ "$INSTALL_POT_PLUGIN" = "true" ]; then \
+      mkdir -p /etc/yt-dlp/plugins && \
+      curl -fsSL https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/latest/download/bgutil-ytdlp-pot-provider.zip \
+        -o /etc/yt-dlp/plugins/bgutil-ytdlp-pot-provider.zip && \
+      chmod a+r /etc/yt-dlp/plugins/bgutil-ytdlp-pot-provider.zip; \
+    fi
+
 # Copy manifests, full node_modules (including tsx for `npm start`), server, and built frontend
 COPY --from=builder /app/package.json /app/package-lock.json* ./
 COPY --from=builder /app/node_modules ./node_modules
@@ -55,11 +66,12 @@ COPY --from=builder /app/dist ./dist
 # Copy and enable container entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-  && mkdir -p /app/data /music
+  && mkdir -p /app/data/ytdlp-cache /music
 
 ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/app/data \
+    YTDLP_CACHE_DIR=/app/data/ytdlp-cache \
     MUSIC_DIR=/music \
     YTDLP_PATH=/usr/local/bin/yt-dlp \
     FFMPEG_PATH=/usr/bin/ffmpeg

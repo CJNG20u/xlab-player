@@ -1,8 +1,11 @@
 services:
   xlabplayer:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_POT_PLUGIN: ${INSTALL_POT_PLUGIN:-false}
     # To pull a prebuilt image from GitHub Container Registry or Docker Hub instead of building locally,
-    # comment out `build: .` above and uncomment the line below:
+    # comment out `build:` above and uncomment the line below:
     # image: ghcr.io/cjng20u/xlab-player:latest
     container_name: xlabplayer
     restart: unless-stopped
@@ -10,7 +13,7 @@ services:
       - "3000:3000"
     env_file: .env
     volumes:
-      # Persistent SQLite database, extracted album covers, and cookies.txt
+      # Persistent SQLite database, extracted album covers, cookies.txt, and yt-dlp JS player cache (/app/data/ytdlp-cache)
       - ./data:/app/data
       # Local music library directory
       - ./music_library:/music
@@ -19,3 +22,18 @@ services:
       # - /mnt/nas/music:/music
       # Or mount read-only (streaming & scanning only; disables downloads/uploads/deletes):
       # - /mnt/nas/music:/music:ro
+
+  # Optional PO token provider sidecar (opt-in via `--profile pot`).
+  # Enable by setting in `.env`:
+  #   INSTALL_POT_PLUGIN=true
+  #   YTDLP_POT_PROVIDER_URL=http://bgutil-provider:4416
+  # Then start with: docker compose --profile pot up -d --build
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    container_name: xlabplayer-bgutil-provider
+    profiles:
+      - pot
+    init: true
+    restart: unless-stopped
+    expose:
+      - "4416"

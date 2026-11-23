@@ -1,7 +1,10 @@
 import {type ChildProcess, execFile, spawn} from 'child_process';
 import crypto from 'crypto';
+import dns from 'dns';
 import {EventEmitter} from 'events';
 import fs from 'fs';
+import type {IncomingHttpHeaders, IncomingMessage} from 'http';
+import https from 'https';
 import os from 'os';
 import path from 'path';
 import {promisify} from 'util';
@@ -13,6 +16,7 @@ import {
   getSetting,
   getYtdlpPath,
   setSetting,
+  YTDLP_CACHE_DIR,
 } from './db.ts';
 import {computeFileSha256, indexSingleFile} from './scanner.ts';
 
@@ -105,14 +109,18 @@ interface YtdlpInvocation {
 }
 
 function resolveYtdlpInvocation(forcePythonModule = false): YtdlpInvocation {
-  const env: NodeJS.ProcessEnv = {...process.env, PYTHONUNBUFFERED: '1'};
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PYTHONUNBUFFERED: '1',
+    XDG_CACHE_HOME: YTDLP_CACHE_DIR,
+  };
   if (forcePythonModule) {
     return {cmd: 'python3', prefixArgs: ['-u', '-m', 'yt_dlp'], env};
   }
   const ytdlpPath = getYtdlpPath();
   // Execute the configured yt-dlp binary/script directly with PYTHONUNBUFFERED=1 so
   // virtualenv shebangs, zipapps, and standalone binaries all use their intended runtime
-  // while keeping stdout/stderr completely unbuffered.
+  // while keeping stdout/stderr completely unbuffered and persisting player caches.
   return {cmd: ytdlpPath, prefixArgs: [], env};
 }
 
@@ -1616,19 +1624,18 @@ const YT_STREAM_CACHE_TTL_MS = 30 * 60 * 1000;
 const YT_STREAM_CACHE_MAX_ENTRIES = 500;
 const YT_THUMB_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
-const YT_VISITOR_DATA_TTL_MS = 30 * 60 * 1000; // Refresh session visitor_data every 30 min
 const TRACK_VIDEO_MAP_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const TRACK_VIDEO_CACHE_MAX_ENTRIES = 2000;
 
-// Strict per-attempt timeouts so slow/unresponsive upstream attempts fail fast
-const YT_EXTRACTION_FAST_TIMEOUT_MS = 8_000;
-const YT_EXTRACTION_FALLBACK_TIMEOUT_MS = 10_000;
-const YT_PROBE_TIMEOUT_MS = 4_000;
+// Realistic configurable timeouts (Node EJS challenge solving on a small VPS can take 10-30s)
+const DEFAULT_RESOLVE_PRIMARY_TIMEOUT_MS = 35_000;
+const DEFAULT_RESOLVE_FALLBACK_TIMEOUT_MS = 30_000;
+const YT_PROBE_TIMEOUT_MS = 8_000;
 
-// Adaptive circuit breaker: if direct HTTP proxying hits consecutive 403 rejections,
-// short-circuit directly to the fallback audio pipe for a 10-minute cooldown window.
-const DIRECT_PROXY_403_THRESHOLD = 3;
-const DIRECT_PROXY_COOLDOWN_MS = 10 * 60 * 1000;
+// Per-strategy 403 circuit breaker (counts consecutive 403s per client strategy, not globally)
+const DEFAULT_STRATEGY_403_THRESHOLD = 2;
+const STRATEGY_403_COOLDOWN_MS = 10 * 60 * 1000;
+const LEGACY_SEEDED_PLAYER_CLIENT = 'web,mweb,android_vr';
 
 const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googlevideo.com',
@@ -1637,10 +1644,18 @@ const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googleusercontent.com',
 ];
 
+export type YouTubeStreamStrategy =
+  | 'default'
+  | 'tv-android-vr'
+  | 'custom-client'
+  | 'po-token-mobile'
+  | 'default-cookies'
+  | 'tv-cookies';
+
 export interface ResolvedYouTubeAudioStream {
   url: string;
   headers: Record<string, string>;
-  strategy: 'fast-path' | 'tv-fallback' | 'fallback' | 'fallback-cookies';
+  strategy: YouTubeStreamStrategy;
   thumbnailUrl: string;
   contentType: string;
   contentLength: number | null;
@@ -1652,51 +1667,217 @@ export class DirectProxyCircuitOpenError extends Error {
 
   constructor(cooldownRemainingMs: number) {
     super(
-      `Direct upstream HTTP proxy circuit open (${Math.ceil(cooldownRemainingMs / 1000)}s cooldown remaining)`
+      `All direct upstream HTTP proxy strategies are in cooldown (${Math.ceil(cooldownRemainingMs / 1000)}s remaining)`
     );
     this.name = 'DirectProxyCircuitOpenError';
     this.cooldownRemainingMs = cooldownRemainingMs;
   }
 }
 
-let consecutiveUpstream403s = 0;
-let directProxyCircuitOpenUntil = 0;
+interface ExecFileError extends Error {
+  code?: number | string | null;
+  killed?: boolean;
+  signal?: NodeJS.Signals | null;
+  stdout?: string | Buffer;
+  stderr?: string | Buffer;
+}
 
-export function isDirectProxyCircuitOpen(): boolean {
-  if (directProxyCircuitOpenUntil === 0) return false;
-  if (Date.now() < directProxyCircuitOpenUntil) {
+function parseClampedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+function getResolvePrimaryTimeoutMs(): number {
+  const envVal = process.env.YTDLP_RESOLVE_PRIMARY_TIMEOUT_MS?.trim();
+  if (envVal) return parseClampedInt(envVal, DEFAULT_RESOLVE_PRIMARY_TIMEOUT_MS, 10_000, 90_000);
+  return parseClampedInt(
+    getSetting('ytdlp_resolve_timeout_ms', String(DEFAULT_RESOLVE_PRIMARY_TIMEOUT_MS)),
+    DEFAULT_RESOLVE_PRIMARY_TIMEOUT_MS,
+    10_000,
+    90_000
+  );
+}
+
+function getResolveFallbackTimeoutMs(): number {
+  const envVal = process.env.YTDLP_RESOLVE_FALLBACK_TIMEOUT_MS?.trim();
+  if (envVal) return parseClampedInt(envVal, DEFAULT_RESOLVE_FALLBACK_TIMEOUT_MS, 10_000, 90_000);
+  return parseClampedInt(
+    getSetting('ytdlp_resolve_fallback_timeout_ms', String(DEFAULT_RESOLVE_FALLBACK_TIMEOUT_MS)),
+    DEFAULT_RESOLVE_FALLBACK_TIMEOUT_MS,
+    10_000,
+    90_000
+  );
+}
+
+function getStrategy403Threshold(): number {
+  return parseClampedInt(
+    process.env.YTDLP_STRATEGY_403_THRESHOLD?.trim(),
+    DEFAULT_STRATEGY_403_THRESHOLD,
+    1,
+    10
+  );
+}
+
+function getMaxConcurrentResolves(): number {
+  return parseClampedInt(process.env.YTDLP_MAX_CONCURRENT_RESOLVES?.trim(), 2, 1, 6);
+}
+
+/**
+ * Optional opt-in PO token provider URL (e.g. http://bgutil-provider:4416).
+ * Validated strictly so it cannot inject extra extractor arguments.
+ */
+export function getPoTokenProviderBaseUrl(): string | null {
+  const raw = process.env.YTDLP_POT_PROVIDER_URL?.trim();
+  if (!raw || /[\s;\r\n'"`]/.test(raw)) return null;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    if (parsed.username || parsed.password) return null;
+    if (!parsed.hostname) return null;
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+export function hasPoTokenProvider(): boolean {
+  return getPoTokenProviderBaseUrl() !== null;
+}
+
+function appendPoTokenExtractorArgs(args: string[]): void {
+  const baseUrl = getPoTokenProviderBaseUrl();
+  if (baseUrl) {
+    args.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${baseUrl}`);
+  }
+}
+
+function getCustomConfiguredPlayerClient(): string | null {
+  const raw = getSetting('ytdlp_player_client', '').trim();
+  if (!raw) return null;
+  // Ignore the legacy seeded 'web,mweb,android_vr' default unless a PO token provider is configured
+  if (raw.toLowerCase() === LEGACY_SEEDED_PLAYER_CLIENT && !hasPoTokenProvider()) {
+    return null;
+  }
+  if (!/^[a-z0-9_,+-]+$/i.test(raw)) return null;
+  return raw;
+}
+
+// FIFO semaphore capping concurrent yt-dlp resolver child processes on small VPS hosts
+let activeResolveSlots = 0;
+const resolveWaitQueue: Array<() => void> = [];
+
+async function withYtdlpResolveSlot<T>(fn: () => Promise<T>): Promise<T> {
+  const maxSlots = getMaxConcurrentResolves();
+  if (activeResolveSlots >= maxSlots) {
+    await new Promise<void>((resolve) => {
+      resolveWaitQueue.push(resolve);
+    });
+  }
+  activeResolveSlots += 1;
+  try {
+    return await fn();
+  } finally {
+    activeResolveSlots -= 1;
+    const next = resolveWaitQueue.shift();
+    if (next) next();
+  }
+}
+
+// Per-strategy circuit breaker state
+const strategyCircuits = new Map<
+  YouTubeStreamStrategy,
+  {consecutive403s: number; openUntil: number}
+>();
+
+function getActiveStrategiesForCircuit(): YouTubeStreamStrategy[] {
+  const list: YouTubeStreamStrategy[] = ['default', 'tv-android-vr'];
+  if (getCustomConfiguredPlayerClient()) {
+    list.push('custom-client');
+  }
+  if (hasPoTokenProvider()) {
+    list.push('po-token-mobile');
+  }
+  if (hasConfiguredCookies()) {
+    list.push('default-cookies', 'tv-cookies');
+  }
+  return list;
+}
+
+export function isStrategyCircuitOpen(strategy: YouTubeStreamStrategy): boolean {
+  const state = strategyCircuits.get(strategy);
+  if (!state || state.openUntil === 0) return false;
+  if (Date.now() < state.openUntil) {
     return true;
   }
-  // Cooldown expired — reset for half-open probe on the next track
-  directProxyCircuitOpenUntil = 0;
-  consecutiveUpstream403s = 0;
+  // Cooldown expired — close circuit so this strategy can be probed again
+  state.openUntil = 0;
+  state.consecutive403s = 0;
+  console.info(
+    `[yt-stream-circuit] Circuit CLOSED for strategy "${strategy}" (10m cooldown expired)`
+  );
   return false;
 }
 
-export function getDirectProxyCircuitCooldownRemainingMs(): number {
-  if (!isDirectProxyCircuitOpen()) return 0;
-  return Math.max(0, directProxyCircuitOpenUntil - Date.now());
+export function getStrategyCircuitCooldownRemainingMs(strategy: YouTubeStreamStrategy): number {
+  if (!isStrategyCircuitOpen(strategy)) return 0;
+  const state = strategyCircuits.get(strategy);
+  return state ? Math.max(0, state.openUntil - Date.now()) : 0;
 }
 
-export function recordUpstream403Rejection(context?: string): boolean {
+export function recordStrategy403Rejection(
+  strategy: YouTubeStreamStrategy,
+  context?: string
+): boolean {
   const now = Date.now();
-  if (directProxyCircuitOpenUntil > now) {
+  const threshold = getStrategy403Threshold();
+  let state = strategyCircuits.get(strategy);
+  if (!state) {
+    state = {consecutive403s: 0, openUntil: 0};
+    strategyCircuits.set(strategy, state);
+  }
+  if (state.openUntil > now) {
     return true;
   }
-  consecutiveUpstream403s += 1;
-  if (consecutiveUpstream403s >= DIRECT_PROXY_403_THRESHOLD) {
-    directProxyCircuitOpenUntil = now + DIRECT_PROXY_COOLDOWN_MS;
+  state.consecutive403s += 1;
+  if (state.consecutive403s >= threshold) {
+    state.openUntil = now + STRATEGY_403_COOLDOWN_MS;
     console.warn(
-      `[yt-stream-circuit] Direct HTTP proxying rejected ${consecutiveUpstream403s} consecutive times (${context || '403'}); short-circuiting to fallback pipe for 10m`
+      `[yt-stream-circuit] Circuit OPENED for strategy "${strategy}" after ${state.consecutive403s} consecutive 403 rejections (${context || '403'}); cooling down for 10m`
     );
     return true;
   }
   return false;
 }
 
-export function recordUpstreamDirectSuccess(): void {
-  consecutiveUpstream403s = 0;
-  directProxyCircuitOpenUntil = 0;
+export function recordStrategyDirectSuccess(strategy: YouTubeStreamStrategy): void {
+  const state = strategyCircuits.get(strategy);
+  if (!state) return;
+  const wasOpenOrDegraded = state.openUntil > 0 || state.consecutive403s > 0;
+  state.consecutive403s = 0;
+  state.openUntil = 0;
+  if (wasOpenOrDegraded) {
+    console.info(
+      `[yt-stream-circuit] Circuit CLOSED for strategy "${strategy}" (direct upstream probe/proxy succeeded)`
+    );
+  }
+}
+
+export function isDirectProxyCircuitOpen(): boolean {
+  const active = getActiveStrategiesForCircuit();
+  return active.length > 0 && active.every((s) => isStrategyCircuitOpen(s));
+}
+
+export function getDirectProxyCircuitCooldownRemainingMs(): number {
+  const active = getActiveStrategiesForCircuit();
+  if (active.length === 0) return 0;
+  let minRemaining = Infinity;
+  for (const s of active) {
+    const rem = getStrategyCircuitCooldownRemainingMs(s);
+    if (rem === 0) return 0;
+    if (rem < minRemaining) minRemaining = rem;
+  }
+  return Number.isFinite(minRemaining) ? minRemaining : 0;
 }
 
 const HOP_BY_HOP_AND_EXCLUDED_HEADERS = new Set([
@@ -1732,14 +1913,243 @@ function sanitizeStreamHeaders(raw: unknown): Record<string, string> {
   return cleaned;
 }
 
+function mergeStreamHeaders(baseRaw: unknown, overrideRaw: unknown): Record<string, string> {
+  const base = sanitizeStreamHeaders(baseRaw);
+  const override = sanitizeStreamHeaders(overrideRaw);
+  const merged: Record<string, string> = {...base};
+  const existingKeysByLower = new Map<string, string>();
+  for (const k of Object.keys(merged)) {
+    existingKeysByLower.set(k.toLowerCase(), k);
+  }
+  for (const [k, v] of Object.entries(override)) {
+    const prevKey = existingKeysByLower.get(k.toLowerCase());
+    if (prevKey && prevKey !== k) {
+      delete merged[prevKey];
+    }
+    merged[k] = v;
+    existingKeysByLower.set(k.toLowerCase(), k);
+  }
+  return merged;
+}
+
+function summarizeHeadersForLog(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, val] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (lower === 'cookie' || lower === 'authorization' || lower === 'proxy-authorization') {
+      out[key] = '[REDACTED]';
+    } else {
+      out[key] = val.length > 160 ? `${val.slice(0, 160)}...` : val;
+    }
+  }
+  return out;
+}
+
+function sanitizeStderrForLog(
+  rawStderr: unknown,
+  tempCookiePath: string | null,
+  maxChars = 2000
+): string {
+  let text =
+    typeof rawStderr === 'string'
+      ? rawStderr
+      : Buffer.isBuffer(rawStderr)
+        ? rawStderr.toString('utf-8')
+        : '';
+  if (tempCookiePath) {
+    text = text.split(tempCookiePath).join('<temp-cookies>');
+  }
+  if (COOKIES_FILE) {
+    text = text.split(COOKIES_FILE).join('<cookies-file>');
+  }
+  text = text.replace(/(cookie\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]');
+  return text.trim().slice(0, maxChars);
+}
+
+// Strict IPv4-only HTTPS Agent so Node's probe & proxy always match yt-dlp --force-ipv4
+// (avoids undici Happy Eyeballs connecting over IPv6 to an IPv4-signed googlevideo URL).
+const ipv4Lookup: https.RequestOptions['lookup'] = (hostname, options, callback) => {
+  if (typeof options === 'object' && options?.all) {
+    dns.lookup(
+      hostname,
+      {family: 4, all: true},
+      callback as (err: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void
+    );
+    return;
+  }
+  dns.lookup(
+    hostname,
+    {family: 4, all: false},
+    callback as (err: NodeJS.ErrnoException | null, address: string, family: number) => void
+  );
+};
+
+const ipv4HttpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 32,
+  family: 4,
+  lookup: ipv4Lookup,
+});
+
+export interface Ipv4MediaResponse {
+  statusCode: number;
+  headers: IncomingHttpHeaders;
+  finalUrl: string;
+  ipFamily: string;
+  stream: IncomingMessage;
+  abort: () => void;
+}
+
+export async function requestIpv4MediaStream(
+  rawUrl: string,
+  options: {
+    headers: Record<string, string>;
+    timeoutMs: number;
+    signal?: AbortSignal;
+    maxRedirects?: number;
+  }
+): Promise<Ipv4MediaResponse> {
+  const maxRedirects = options.maxRedirects ?? 5;
+  let currentUrl = rawUrl;
+
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    if (!isAllowedYouTubeMediaUrl(currentUrl)) {
+      throw new Error('Unexpected upstream media host');
+    }
+    if (options.signal?.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    const parsed = new URL(currentUrl);
+    const response = await new Promise<Ipv4MediaResponse>((resolve, reject) => {
+      let settled = false;
+      let connectTimer: ReturnType<typeof setTimeout> | null = null;
+      let activeRes: IncomingMessage | null = null;
+
+      const onAbort = () => {
+        if (connectTimer) {
+          clearTimeout(connectTimer);
+          connectTimer = null;
+        }
+        if (activeRes && !activeRes.destroyed) {
+          activeRes.destroy();
+        }
+        if (!req.destroyed) {
+          req.destroy(new Error('Request aborted'));
+        }
+        if (!settled) {
+          settled = true;
+          reject(new Error('Request aborted'));
+        }
+      };
+
+      const req = https.request(
+        parsed,
+        {
+          method: 'GET',
+          headers: options.headers,
+          agent: ipv4HttpsAgent,
+          family: 4,
+          lookup: ipv4Lookup,
+        },
+        (res) => {
+          if (connectTimer) {
+            clearTimeout(connectTimer);
+            connectTimer = null;
+          }
+          activeRes = res;
+          const ipFamily = res.socket?.remoteFamily || 'IPv4';
+          const statusCode = res.statusCode ?? 0;
+
+          const detachSignal = () => {
+            options.signal?.removeEventListener('abort', onAbort);
+          };
+          res.once('end', detachSignal);
+          res.once('close', detachSignal);
+          res.once('error', detachSignal);
+
+          if (!settled) {
+            settled = true;
+            resolve({
+              statusCode,
+              headers: res.headers,
+              finalUrl: currentUrl,
+              ipFamily,
+              stream: res,
+              abort: () => {
+                detachSignal();
+                if (!res.destroyed) res.destroy();
+                if (!req.destroyed) req.destroy();
+              },
+            });
+          }
+        }
+      );
+
+      connectTimer = setTimeout(() => {
+        const timeoutErr = new Error(`Upstream IPv4 request timed out after ${options.timeoutMs}ms`);
+        req.destroy(timeoutErr);
+        if (!settled) {
+          settled = true;
+          options.signal?.removeEventListener('abort', onAbort);
+          reject(timeoutErr);
+        }
+      }, options.timeoutMs);
+      connectTimer.unref();
+
+      req.on('error', (err) => {
+        if (connectTimer) {
+          clearTimeout(connectTimer);
+          connectTimer = null;
+        }
+        options.signal?.removeEventListener('abort', onAbort);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      });
+
+      if (options.signal) {
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
+        options.signal.addEventListener('abort', onAbort, {once: true});
+      }
+
+      req.end();
+    });
+
+    const isRedirect =
+      response.statusCode === 301 ||
+      response.statusCode === 302 ||
+      response.statusCode === 303 ||
+      response.statusCode === 307 ||
+      response.statusCode === 308;
+    const location = typeof response.headers.location === 'string' ? response.headers.location : '';
+
+    if (isRedirect && location) {
+      response.stream.resume();
+      response.abort();
+      if (hop >= maxRedirects) {
+        throw new Error('Too many upstream redirects');
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+
+    return response;
+  }
+
+  throw new Error('Too many upstream redirects');
+}
+
 const ytStreamUrlCache = new Map<
   string,
   ResolvedYouTubeAudioStream & {expiresAt: number}
 >();
 const inFlightResolutions = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
 const ytThumbnailCache = new Map<string, {url: string; expiresAt: number}>();
-let ytVisitorDataCache: {value: string; expiresAt: number} | null = null;
-let ytVisitorDataInFlight: Promise<string | null> | null = null;
 
 export function isValidYouTubeVideoId(videoId: string): boolean {
   return YOUTUBE_VIDEO_ID_RE.test(videoId);
@@ -1838,55 +2248,6 @@ export function isYouTubeStreamCached(videoId: string): boolean {
   return getCachedYouTubeAudioStream(videoId) !== null;
 }
 
-async function getSessionVisitorData(): Promise<string | null> {
-  const now = Date.now();
-  if (ytVisitorDataCache && ytVisitorDataCache.expiresAt > now) {
-    return ytVisitorDataCache.value;
-  }
-  if (ytVisitorDataInFlight) {
-    return ytVisitorDataInFlight;
-  }
-
-  ytVisitorDataInFlight = (async (): Promise<string | null> => {
-    try {
-      const resp = await fetch('https://www.youtube.com/sw.js_data', {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          Accept: 'application/json, text/plain, */*',
-        },
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!resp.ok) return null;
-      const text = (await resp.text()).replace(/^\)\]\}'\s*/, '');
-      const parsed = JSON.parse(text) as unknown;
-      const candidate =
-        Array.isArray(parsed) &&
-        Array.isArray(parsed[0]) &&
-        Array.isArray(parsed[0][2]) &&
-        Array.isArray(parsed[0][2][0]) &&
-        Array.isArray(parsed[0][2][0][0]) &&
-        typeof parsed[0][2][0][0][13] === 'string'
-          ? parsed[0][2][0][0][13].trim()
-          : '';
-      if (candidate && /^[A-Za-z0-9_%-]{10,120}$/.test(candidate)) {
-        ytVisitorDataCache = {
-          value: candidate,
-          expiresAt: Date.now() + YT_VISITOR_DATA_TTL_MS,
-        };
-        return candidate;
-      }
-      return null;
-    } catch {
-      return null;
-    } finally {
-      ytVisitorDataInFlight = null;
-    }
-  })();
-
-  return ytVisitorDataInFlight;
-}
-
 function isMuxedVideoFormat(vcodec: unknown): boolean {
   if (typeof vcodec !== 'string') return false;
   const norm = vcodec.trim().toLowerCase();
@@ -1922,6 +2283,7 @@ interface RawYtdlpFormat {
   acodec?: unknown;
   protocol?: unknown;
   ext?: unknown;
+  format_id?: unknown;
   abr?: unknown;
   tbr?: unknown;
   filesize?: unknown;
@@ -1936,6 +2298,7 @@ function pickDirectAudioFormat(
     acodec?: unknown;
     protocol?: unknown;
     ext?: unknown;
+    format_id?: unknown;
     filesize?: unknown;
     filesize_approx?: unknown;
     http_headers?: unknown;
@@ -1980,89 +2343,219 @@ function pickDirectAudioFormat(
   return null;
 }
 
-async function probeAudioStreamUrl(
-  streamUrl: string,
-  streamHeaders: Record<string, string>
-): Promise<{ok: boolean; status: number; contentType: string; contentLength: number | null}> {
+async function probeAudioStreamUrl(params: {
+  videoId: string;
+  strategy: YouTubeStreamStrategy;
+  formatId: string;
+  streamUrl: string;
+  streamHeaders: Record<string, string>;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  contentType: string;
+  contentLength: number | null;
+  ipFamily: string;
+  likelyPoTokenRequired: boolean;
+}> {
+  const startedAt = Date.now();
+  const headers: Record<string, string> = {
+    ...params.streamHeaders,
+    Range: 'bytes=0-1',
+  };
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === 'accept')) {
+    headers.Accept = '*/*';
+  }
+
   try {
-    const headers: Record<string, string> = {
-      ...streamHeaders,
-      Range: 'bytes=0-1',
-    };
-    if (!Object.keys(headers).some((k) => k.toLowerCase() === 'accept')) {
-      headers.Accept = '*/*';
-    }
-    const resp = await fetch(streamUrl, {
-      method: 'GET',
+    const resp = await requestIpv4MediaStream(params.streamUrl, {
       headers,
-      redirect: 'follow',
-      signal: AbortSignal.timeout(YT_PROBE_TIMEOUT_MS),
+      timeoutMs: YT_PROBE_TIMEOUT_MS,
     });
-    const finalUrl = resp.url || streamUrl;
-    const ct = (resp.headers.get('content-type') || '').toLowerCase();
-    const contentRange = resp.headers.get('content-range');
-    const rawContentLength = resp.headers.get('content-length');
+    const elapsedMs = Date.now() - startedAt;
+    const ctHeader = Array.isArray(resp.headers['content-type'])
+      ? resp.headers['content-type'][0] || ''
+      : resp.headers['content-type'] || '';
+    const ct = ctHeader.toLowerCase();
+    const serverHeader = Array.isArray(resp.headers.server)
+      ? resp.headers.server.join(', ')
+      : resp.headers.server || '';
+    const contentRange = Array.isArray(resp.headers['content-range'])
+      ? resp.headers['content-range'][0] || ''
+      : resp.headers['content-range'] || '';
+    const rawContentLength = Array.isArray(resp.headers['content-length'])
+      ? resp.headers['content-length'][0] || ''
+      : resp.headers['content-length'] || '';
+
     let parsedLength: number | null = null;
-    const rangeTotalMatch = contentRange?.match(/\/(\d+)$/);
+    const rangeTotalMatch = contentRange.match(/\/(\d+)$/);
     if (rangeTotalMatch?.[1]) {
       const n = Number(rangeTotalMatch[1]);
       if (Number.isFinite(n) && n > 0) parsedLength = n;
-    } else if (resp.status === 200 && rawContentLength) {
+    } else if (resp.statusCode === 200 && rawContentLength) {
       const n = Number(rawContentLength);
       if (Number.isFinite(n) && n > 0) parsedLength = n;
     }
 
-    try {
-      await resp.body?.cancel();
-    } catch {
-      // ignore
+    resp.stream.resume();
+    resp.abort();
+
+    if (!isAllowedYouTubeMediaUrl(resp.finalUrl)) {
+      return {
+        ok: false,
+        status: resp.statusCode,
+        contentType: ct,
+        contentLength: null,
+        ipFamily: resp.ipFamily,
+        likelyPoTokenRequired: false,
+      };
     }
-    if (!isAllowedYouTubeMediaUrl(finalUrl)) {
-      return {ok: false, status: resp.status, contentType: ct, contentLength: null};
+
+    if (resp.statusCode === 403) {
+      const likelyPoTokenRequired = resp.ipFamily === 'IPv4' && !hasPoTokenProvider();
+      console.warn(
+        '[yt-stream-probe]',
+        JSON.stringify({
+          event: 'probe_403',
+          videoId: params.videoId,
+          strategy: params.strategy,
+          formatId: params.formatId,
+          status: resp.statusCode,
+          ipFamily: resp.ipFamily,
+          elapsedMs,
+          serverHeader,
+          contentType: ctHeader,
+          sentHeaders: summarizeHeadersForLog(headers),
+          likelyPoTokenRequired,
+          hint: likelyPoTokenRequired
+            ? `Fresh URL for strategy "${params.strategy}" rejected with 403 over IPv4 with yt-dlp http_headers — strategy likely requires a PO token`
+            : 'Fresh URL rejected with 403 over IPv4',
+        })
+      );
+      recordStrategy403Rejection(params.strategy, 'probe-403-ipv4');
+      return {
+        ok: false,
+        status: 403,
+        contentType: ct,
+        contentLength: null,
+        ipFamily: resp.ipFamily,
+        likelyPoTokenRequired,
+      };
     }
-    if (resp.status === 403) {
-      recordUpstream403Rejection('probe');
-      return {ok: false, status: 403, contentType: ct, contentLength: null};
+
+    if (resp.statusCode !== 200 && resp.statusCode !== 206) {
+      console.warn(
+        '[yt-stream-probe]',
+        JSON.stringify({
+          event: 'probe_rejected',
+          videoId: params.videoId,
+          strategy: params.strategy,
+          formatId: params.formatId,
+          status: resp.statusCode,
+          ipFamily: resp.ipFamily,
+          elapsedMs,
+          serverHeader,
+          contentType: ctHeader,
+          sentHeaders: summarizeHeadersForLog(headers),
+        })
+      );
+      return {
+        ok: false,
+        status: resp.statusCode,
+        contentType: ct,
+        contentLength: null,
+        ipFamily: resp.ipFamily,
+        likelyPoTokenRequired: false,
+      };
     }
-    if (resp.status !== 200 && resp.status !== 206) {
-      return {ok: false, status: resp.status, contentType: ct, contentLength: null};
-    }
+
     if (
       ct.includes('text/html') ||
       ct.includes('mpegurl') ||
       ct.includes('dash+xml') ||
       ct.includes('application/json')
     ) {
-      return {ok: false, status: 415, contentType: ct, contentLength: null};
+      return {
+        ok: false,
+        status: 415,
+        contentType: ct,
+        contentLength: null,
+        ipFamily: resp.ipFamily,
+        likelyPoTokenRequired: false,
+      };
     }
-    recordUpstreamDirectSuccess();
-    return {ok: true, status: resp.status, contentType: ct, contentLength: parsedLength};
-  } catch {
-    return {ok: false, status: 0, contentType: '', contentLength: null};
+
+    recordStrategyDirectSuccess(params.strategy);
+    console.info(
+      '[yt-stream-probe]',
+      JSON.stringify({
+        event: 'probe_ok',
+        videoId: params.videoId,
+        strategy: params.strategy,
+        formatId: params.formatId,
+        status: resp.statusCode,
+        ipFamily: resp.ipFamily,
+        elapsedMs,
+        contentType: ctHeader,
+        contentLength: parsedLength,
+      })
+    );
+    return {
+      ok: true,
+      status: resp.statusCode,
+      contentType: ct,
+      contentLength: parsedLength,
+      ipFamily: resp.ipFamily,
+      likelyPoTokenRequired: false,
+    };
+  } catch (err) {
+    const elapsedMs = Date.now() - startedAt;
+    console.warn(
+      '[yt-stream-probe]',
+      JSON.stringify({
+        event: 'probe_network_error',
+        videoId: params.videoId,
+        strategy: params.strategy,
+        formatId: params.formatId,
+        ipFamily: 'IPv4',
+        elapsedMs,
+        sentHeaders: summarizeHeadersForLog(headers),
+        error: err instanceof Error ? err.message : String(err),
+      })
+    );
+    return {
+      ok: false,
+      status: 0,
+      contentType: '',
+      contentLength: null,
+      ipFamily: 'IPv4',
+      likelyPoTokenRequired: false,
+    };
   }
 }
 
 export async function resolveYouTubeAudioStreamUrl(
   videoId: string,
-  options: {forceRefresh?: boolean; skipFastPath?: boolean} = {}
+  options: {forceRefresh?: boolean; skipStrategies?: YouTubeStreamStrategy[]} = {}
 ): Promise<ResolvedYouTubeAudioStream & {fromCache: boolean}> {
   if (!isValidYouTubeVideoId(videoId)) {
     throw new Error('Invalid YouTube video ID');
   }
 
-  // Short-circuit immediately while the 10-minute 403 circuit breaker is active
+  const skipSet = new Set<YouTubeStreamStrategy>(options.skipStrategies || []);
+
+  // Short-circuit immediately only if every active direct strategy is in cooldown
   if (isDirectProxyCircuitOpen()) {
     throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
   }
 
-  if (!options.forceRefresh && !options.skipFastPath) {
+  if (!options.forceRefresh && skipSet.size === 0) {
     const cached = getCachedYouTubeAudioStream(videoId);
-    if (cached) {
+    if (cached && !isStrategyCircuitOpen(cached.strategy)) {
       return {...cached, fromCache: true};
     }
   }
 
-  // Deduplicate concurrent requests (e.g., HEAD + GET or concurrent range probes) for the same videoId
+  // Deduplicate concurrent requests (e.g. HEAD + GET or concurrent range probes) per videoId
   const existingPromise = inFlightResolutions.get(videoId);
   if (existingPromise) {
     const resolved = await existingPromise;
@@ -2075,15 +2568,15 @@ export async function resolveYouTubeAudioStreamUrl(
   const runExtractionAttempt = async (
     extractorArgs: string | null,
     cookiePath: string | null,
-    strategy: ResolvedYouTubeAudioStream['strategy'],
+    strategy: YouTubeStreamStrategy,
     timeoutMs: number
   ): Promise<ResolvedYouTubeAudioStream> => {
     const args = [
       '--dump-single-json',
       '--skip-download',
       '--no-playlist',
-      '--quiet',
-      '--no-warnings',
+      '--cache-dir',
+      YTDLP_CACHE_DIR,
       '--js-runtimes',
       'node',
       '--force-ipv4',
@@ -2093,6 +2586,7 @@ export async function resolveYouTubeAudioStreamUrl(
     if (extractorArgs) {
       args.push('--extractor-args', extractorArgs);
     }
+    appendPoTokenExtractorArgs(args);
     if (getSetting('ytdlp_remote_components', 'true') === 'true') {
       args.push('--remote-components', 'ejs:github');
     }
@@ -2101,14 +2595,64 @@ export async function resolveYouTubeAudioStreamUrl(
     }
     args.push('--', `https://www.youtube.com/watch?v=${videoId}`);
 
-    const {stdout} = await execYtdlp(args, {
-      timeout: timeoutMs,
-      maxBuffer: 12 * 1024 * 1024,
-    });
+    const startedAt = Date.now();
+    let stdout = '';
+    try {
+      const result = await withYtdlpResolveSlot(() =>
+        execYtdlp(args, {
+          timeout: timeoutMs,
+          maxBuffer: 12 * 1024 * 1024,
+        })
+      );
+      stdout = result.stdout;
+    } catch (rawErr) {
+      const execErr = rawErr as ExecFileError;
+      const elapsedMs = Date.now() - startedAt;
+      const killed = Boolean(execErr.killed);
+      const signal = execErr.signal ?? null;
+      const code = execErr.code ?? null;
+      const isTimeout = killed || signal === 'SIGKILL' || signal === 'SIGTERM';
+      const stderrText = sanitizeStderrForLog(execErr.stderr, cookiePath, 2000);
+      console.error(
+        '[yt-stream-resolve]',
+        JSON.stringify({
+          event: 'ytdlp_exec_failed',
+          videoId,
+          strategy,
+          extractorArgs: extractorArgs || 'default',
+          potProviderConfigured: hasPoTokenProvider(),
+          useCookies: Boolean(cookiePath),
+          timeoutMs,
+          elapsedMs,
+          failureKind: isTimeout ? 'timeout' : typeof code === 'number' ? 'non-zero-exit' : 'spawn-error',
+          code,
+          killed,
+          signal,
+          stderr: stderrText || execErr.message.slice(0, 500),
+        })
+      );
+      throw new Error(
+        isTimeout
+          ? `yt-dlp ${strategy} timed out after ${elapsedMs}ms (limit ${timeoutMs}ms)`
+          : `yt-dlp ${strategy} exited (${String(code ?? signal ?? 'error')}): ${(stderrText || execErr.message).slice(0, 260)}`
+      );
+    }
 
     const trimmed = stdout.trim();
     const jsonStart = trimmed.indexOf('{');
     if (jsonStart === -1) {
+      console.error(
+        '[yt-stream-resolve]',
+        JSON.stringify({
+          event: 'ytdlp_parse_failed',
+          videoId,
+          strategy,
+          extractorArgs: extractorArgs || 'default',
+          elapsedMs: Date.now() - startedAt,
+          failureKind: 'parse-error',
+          stdoutPreview: trimmed.slice(0, 400),
+        })
+      );
       throw new Error('Could not parse YouTube stream metadata JSON');
     }
     const data = JSON.parse(trimmed.slice(jsonStart)) as Record<string, unknown> & {
@@ -2117,6 +2661,7 @@ export async function resolveYouTubeAudioStreamUrl(
       acodec?: unknown;
       protocol?: unknown;
       ext?: unknown;
+      format_id?: unknown;
       duration?: unknown;
       filesize?: unknown;
       filesize_approx?: unknown;
@@ -2137,12 +2682,20 @@ export async function resolveYouTubeAudioStreamUrl(
     }
 
     const directUrl = primaryFormat.url.trim();
-    const headers = sanitizeStreamHeaders(primaryFormat.http_headers ?? data.http_headers);
+    const headers = mergeStreamHeaders(data.http_headers, primaryFormat.http_headers);
+    const formatId = String(primaryFormat.format_id ?? data.format_id ?? 'unknown');
 
-    // Live Range probe guarantees Node's fetch() can stream this URL without a 403/502
-    const probe = await probeAudioStreamUrl(directUrl, headers);
+    // Live IPv4 Range probe guarantees Node can stream this URL with yt-dlp's http_headers
+    const probe = await probeAudioStreamUrl({
+      videoId,
+      strategy,
+      formatId,
+      streamUrl: directUrl,
+      streamHeaders: headers,
+    });
     if (!probe.ok) {
-      throw new Error(`Upstream probe rejected (${probe.status || 'network-error'})`);
+      const poHint = probe.likelyPoTokenRequired ? ' (likely requires PO token)' : '';
+      throw new Error(`Upstream probe rejected (${probe.status || 'network-error'})${poHint}`);
     }
 
     const rawSize = Number(primaryFormat.filesize || primaryFormat.filesize_approx || data.filesize || 0);
@@ -2165,66 +2718,85 @@ export async function resolveYouTubeAudioStreamUrl(
   const resolvePromise = (async (): Promise<ResolvedYouTubeAudioStream> => {
     let tempCookiePath: string | null = null;
     try {
-      const configuredClient = getSetting('ytdlp_player_client', '').trim();
+      const primaryTimeoutMs = getResolvePrimaryTimeoutMs();
+      const fallbackTimeoutMs = getResolveFallbackTimeoutMs();
+      const customClient = getCustomConfiguredPlayerClient();
+
       const strategies: Array<{
-        strategy: ResolvedYouTubeAudioStream['strategy'];
+        strategy: YouTubeStreamStrategy;
         extractorArgs: string | null;
         useCookies: boolean;
         timeoutMs: number;
-      }> = [];
-
-      if (!options.skipFastPath) {
-        // Attempt 1 (Fast Path): android_vr + cached 30m visitor_data with player_skip=webpage,configs
-        // to avoid downloading full watch-page HTML on every stream lookup.
-        const visitorData = await getSessionVisitorData();
-        const fastArgs = visitorData
-          ? `youtube:player_client=android_vr;visitor_data=${visitorData};player_skip=webpage,configs`
-          : 'youtube:player_client=android_vr;player_skip=webpage,configs';
-        strategies.push({
-          strategy: 'fast-path',
-          extractorArgs: fastArgs,
+      }> = [
+        // 1. Prefer yt-dlp's own default clients first (no forced player_client or player_skip)
+        {
+          strategy: 'default',
+          extractorArgs: null,
           useCookies: false,
-          timeoutMs: YT_EXTRACTION_FAST_TIMEOUT_MS,
+          timeoutMs: primaryTimeoutMs,
+        },
+        // 2. tv + android_vr + default fallback (datacenter-friendly, no ios/mweb PO-token clients)
+        {
+          strategy: 'tv-android-vr',
+          extractorArgs: 'youtube:player_client=tv,android_vr,default',
+          useCookies: false,
+          timeoutMs: fallbackTimeoutMs,
+        },
+      ];
+
+      // 3. Explicit non-legacy admin custom client override, if set
+      if (customClient) {
+        strategies.push({
+          strategy: 'custom-client',
+          extractorArgs: `youtube:player_client=${customClient}`,
+          useCookies: false,
+          timeoutMs: fallbackTimeoutMs,
         });
       }
 
-      // Attempt 2: tv + android_vr (tv client bypasses web PO-token 403s reliably)
-      const tvClients =
-        configuredClient && configuredClient !== 'android_vr'
-          ? `${configuredClient},tv,android_vr`
-          : 'tv,android_vr';
-      strategies.push({
-        strategy: 'tv-fallback',
-        extractorArgs: `youtube:player_client=${tvClients}`,
-        useCookies: false,
-        timeoutMs: YT_EXTRACTION_FALLBACK_TIMEOUT_MS,
-      });
-
-      // Attempt 3: mobile/default multi-client anonymous fallback
-      strategies.push({
-        strategy: 'fallback',
-        extractorArgs: 'youtube:player_client=ios,mweb,default',
-        useCookies: false,
-        timeoutMs: YT_EXTRACTION_FALLBACK_TIMEOUT_MS,
-      });
-
-      // Attempt 4: cookies.txt fallback when configured
-      if (hasConfiguredCookies()) {
+      // 4. Demote mweb/ios strictly behind an active PO token provider
+      if (hasPoTokenProvider()) {
         strategies.push({
-          strategy: 'fallback-cookies',
-          extractorArgs: 'youtube:player_client=tv,default,mweb',
-          useCookies: true,
-          timeoutMs: YT_EXTRACTION_FALLBACK_TIMEOUT_MS,
+          strategy: 'po-token-mobile',
+          extractorArgs: 'youtube:player_client=mweb,ios,default',
+          useCookies: false,
+          timeoutMs: fallbackTimeoutMs,
         });
+      }
+
+      // 5. Cookies variants only when cookies.txt is configured
+      if (hasConfiguredCookies()) {
+        strategies.push(
+          {
+            strategy: 'default-cookies',
+            extractorArgs: null,
+            useCookies: true,
+            timeoutMs: fallbackTimeoutMs,
+          },
+          {
+            strategy: 'tv-cookies',
+            extractorArgs: 'youtube:player_client=tv,android_vr,default',
+            useCookies: true,
+            timeoutMs: fallbackTimeoutMs,
+          }
+        );
       }
 
       let resolved: ResolvedYouTubeAudioStream | null = null;
       let lastError: unknown = null;
+      let attemptedCount = 0;
 
       for (const step of strategies) {
-        if (isDirectProxyCircuitOpen()) {
-          throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
+        if (skipSet.has(step.strategy)) {
+          continue;
         }
+        if (isStrategyCircuitOpen(step.strategy)) {
+          console.info(
+            `[yt-stream-resolve] ${videoId} skipping strategy "${step.strategy}" (circuit open, ${Math.ceil(getStrategyCircuitCooldownRemainingMs(step.strategy) / 1000)}s left)`
+          );
+          continue;
+        }
+        attemptedCount += 1;
         try {
           let cookieArg: string | null = null;
           if (step.useCookies) {
@@ -2241,14 +2813,14 @@ export async function resolveYouTubeAudioStreamUrl(
         } catch (err) {
           lastError = err;
           const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[yt-stream-resolve] ${videoId} ${step.strategy} failed:`, msg.slice(0, 220));
-          if (isDirectProxyCircuitOpen()) {
-            throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
-          }
+          console.warn(`[yt-stream-resolve] ${videoId} ${step.strategy} failed: ${msg}`);
         }
       }
 
       if (!resolved) {
+        if (attemptedCount === 0 && isDirectProxyCircuitOpen()) {
+          throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
+        }
         throw lastError instanceof Error
           ? lastError
           : new Error('Could not resolve a playable YouTube audio-only stream');
@@ -2305,12 +2877,15 @@ export function spawnDirectYouTubeAudioStream(videoId: string): {
     '--no-playlist',
     '--no-warnings',
     '--quiet',
+    '--cache-dir',
+    YTDLP_CACHE_DIR,
     '--js-runtimes',
     'node',
     '--force-ipv4',
     '--extractor-args',
     'youtube:player_client=tv,android_vr,default',
   ];
+  appendPoTokenExtractorArgs(args);
   if (getSetting('ytdlp_remote_components', 'true') === 'true') {
     args.push('--remote-components', 'ejs:github');
   }

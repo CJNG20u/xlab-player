@@ -85,6 +85,8 @@ const ALLOWED_SETTINGS_KEYS = new Set([
   'ffmpeg_path',
   'ytdlp_remote_components',
   'ytdlp_player_client',
+  'ytdlp_resolve_timeout_ms',
+  'ytdlp_resolve_fallback_timeout_ms',
   'ytdlp_sleep_interval',
   'ytdlp_max_sleep_interval',
   'ytdlp_force_ipv4',
