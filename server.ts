@@ -13,10 +13,14 @@ import {
   getCachedYouTubeAudioStream,
   getCachedYouTubeThumbnailUrl,
   getDirectProxyCircuitCooldownRemainingMs,
+  getVideoDirectProxyNegativeInfo,
+  inspectYouTubeStreamUrlParams,
   invalidateYouTubeAudioStreamCache,
   isAllowedYouTubeMediaUrl,
   isDirectProxyCircuitOpen,
   isValidYouTubeVideoId,
+  isVideoDirectProxyNegative,
+  markVideoDirectProxyNegative,
   recordStrategy403Rejection,
   recordStrategyDirectSuccess,
   requestIpv4MediaStream,
@@ -25,6 +29,7 @@ import {
   spawnDirectYouTubeAudioStream,
   type Ipv4MediaResponse,
   type PrefetchRequestItem,
+  type YouTubeStreamStrategy,
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
@@ -203,7 +208,7 @@ async function startServer() {
           return;
         }
 
-        if (isDirectProxyCircuitOpen()) {
+        if (isVideoDirectProxyNegative(videoId) || isDirectProxyCircuitOpen()) {
           sendHeadHeaders({
             contentType: 'audio/mp4',
             acceptRanges: 'none',
@@ -244,11 +249,8 @@ async function startServer() {
       streamUrl: string,
       streamHeaders: Record<string, string>
     ): Promise<Ipv4MediaResponse> => {
+      // Send only the selected format's own http_headers plus the client's Range header
       const headers: Record<string, string> = {...streamHeaders};
-      const hasAccept = Object.keys(headers).some((k) => k.toLowerCase() === 'accept');
-      if (!hasAccept) {
-        headers.Accept = '*/*';
-      }
       if (safeRange) {
         headers.Range = safeRange;
       }
@@ -357,7 +359,19 @@ async function startServer() {
     };
 
     try {
-      // Short-circuit straight to the fallback pipe while the adaptive 10-minute 403 circuit is open
+      // Fast per-video handoff: if this videoId recently 403d on direct proxy, skip yt-dlp JSON
+      // resolution and stream directly through the pipe fallback for 15 minutes.
+      const videoNegInfo = getVideoDirectProxyNegativeInfo(videoId);
+      if (videoNegInfo) {
+        const remainingSec = Math.ceil(videoNegInfo.remainingMs / 1000);
+        if (pipeDirectFallback(`per-video 403 negative cache (${remainingSec}s left)`)) {
+          return;
+        }
+        detachClientListeners();
+        return;
+      }
+
+      // Short-circuit straight to the fallback pipe while every active strategy's circuit is open
       if (isDirectProxyCircuitOpen()) {
         const remainingSec = Math.ceil(getDirectProxyCircuitCooldownRemainingMs() / 1000);
         if (pipeDirectFallback(`403 circuit breaker open (${remainingSec}s cooldown left)`)) {
@@ -408,10 +422,13 @@ async function startServer() {
         Array.isArray(h) ? h[0] || '' : h || '';
 
       // If a cached/resolved signed URL expired OR was rejected with 403/410, update the
-      // per-strategy circuit breaker and try a DIFFERENT strategy without retrying the same client.
+      // sliding-window circuit breaker and either try a distinct client family or hand off fast to pipe.
       if (upstream.statusCode === 403 || upstream.statusCode === 410) {
         const failedStatus = upstream.statusCode;
         const failedStrategy = resolved.strategy;
+        const failedClientParam = resolved.clientParam || null;
+        const failedUsedFormatHeaders = Boolean(resolved.usedFormatHeaders);
+        const failedUrlParams = inspectYouTubeStreamUrlParams(resolved.url);
         const failedServer = headerStr(upstream.headers.server);
         const failedContentType = headerStr(upstream.headers['content-type']);
         const failedIpFamily = upstream.ipFamily;
@@ -431,11 +448,14 @@ async function startServer() {
               ipFamily: failedIpFamily,
               serverHeader: failedServer,
               contentType: failedContentType,
+              usedFormatHeaders: failedUsedFormatHeaders,
+              urlParams: failedUrlParams,
               sentHeaderKeys: Object.keys(resolved.headers),
             })
           );
           recordStrategy403Rejection(
             failedStrategy,
+            videoId,
             resolved.fromCache ? 'proxy-403-cached' : 'proxy-403-fresh'
           );
         }
@@ -449,11 +469,20 @@ async function startServer() {
         }
 
         try {
-          // If it was a stale cached URL (410 or expired 403), allow fresh resolution;
-          // if it was freshly resolved and still got 403, skip that exact strategy so we don't retry the same client.
+          const skipStrategies: YouTubeStreamStrategy[] = [];
+          if (!resolved.fromCache && failedStatus === 403) {
+            skipStrategies.push(failedStrategy);
+            const normClient = (failedClientParam || '').toUpperCase();
+            if (
+              failedStrategy === 'default' &&
+              (normClient.startsWith('TV') || normClient === 'ANDROID_VR')
+            ) {
+              skipStrategies.push('tv-android-vr');
+            }
+          }
           resolved = await resolveYouTubeAudioStreamUrl(videoId, {
             forceRefresh: true,
-            skipStrategies: !resolved.fromCache && failedStatus === 403 ? [failedStrategy] : [],
+            skipStrategies,
           });
           upstream = await fetchUpstream(resolved.url, resolved.headers);
           if (upstream.statusCode === 403) {
@@ -467,15 +496,21 @@ async function startServer() {
                 ipFamily: upstream.ipFamily,
                 serverHeader: headerStr(upstream.headers.server),
                 contentType: headerStr(upstream.headers['content-type']),
+                usedFormatHeaders: Boolean(resolved.usedFormatHeaders),
+                urlParams: inspectYouTubeStreamUrlParams(resolved.url),
               })
             );
-            recordStrategy403Rejection(resolved.strategy, 'proxy-403-retry');
+            recordStrategy403Rejection(resolved.strategy, videoId, 'proxy-403-retry');
+            markVideoDirectProxyNegative(videoId, `proxy 403 retry on ${resolved.strategy}`);
           }
         } catch (retryErr) {
           if (abortController.signal.aborted) {
             detachClientListeners();
             if (!res.writableEnded) res.end();
             return;
+          }
+          if (failedStatus === 403) {
+            markVideoDirectProxyNegative(videoId, `proxy 403 on ${failedStrategy}`);
           }
           const reason = retryErr instanceof Error ? retryErr.message : String(retryErr);
           if (pipeDirectFallback(reason)) {
@@ -500,6 +535,9 @@ async function startServer() {
         const failedStatus = upstream.statusCode;
         upstream.stream.resume();
         upstream.abort();
+        if (failedStatus === 403) {
+          markVideoDirectProxyNegative(videoId, `upstream proxy HTTP 403 (${resolved.strategy})`);
+        }
         if (failedStatus !== 404 && pipeDirectFallback(`upstream HTTP ${failedStatus}`)) {
           return;
         }
@@ -512,7 +550,7 @@ async function startServer() {
       }
 
       if (upstream.statusCode === 200 || upstream.statusCode === 206) {
-        recordStrategyDirectSuccess(resolved.strategy);
+        recordStrategyDirectSuccess(resolved.strategy, videoId);
       }
 
       const contentType =

@@ -47,7 +47,7 @@ RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp 
 
 # Optional: install the bgutil-ytdlp-pot-provider yt-dlp plugin when building with
 # `--build-arg INSTALL_POT_PLUGIN=true` (used together with the optional `bgutil-provider`
-# sidecar in docker-compose.yml and `YTDLP_POT_PROVIDER_URL=http://bgutil-provider:4416`).
+# sidecar in docker-compose.yml and `POT_PROVIDER_URL=http://bgutil-provider:4416`).
 ARG INSTALL_POT_PLUGIN=false
 RUN if [ "$INSTALL_POT_PLUGIN" = "true" ]; then \
       mkdir -p /etc/yt-dlp/plugins && \

@@ -26,7 +26,7 @@ services:
   # Optional PO token provider sidecar (opt-in via `--profile pot`).
   # Enable by setting in `.env`:
   #   INSTALL_POT_PLUGIN=true
-  #   YTDLP_POT_PROVIDER_URL=http://bgutil-provider:4416
+  #   POT_PROVIDER_URL=http://bgutil-provider:4416
   # Then start with: docker compose --profile pot up -d --build
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:latest

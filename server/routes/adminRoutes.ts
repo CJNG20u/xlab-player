@@ -5,7 +5,13 @@ import os from 'os';
 import path from 'path';
 import {type AuthRequest, hashPassword, requireAdmin, requireAuth} from '../auth.ts';
 import {COOKIES_FILE, db, getAllSettings, getMusicDir, setSetting} from '../db.ts';
-import {checkBinariesStatus, testCookiesFile, updateYtdlpBinary} from '../downloader.ts';
+import {
+  checkBinariesStatus,
+  isValidYouTubeVideoId,
+  runYouTubeDebugCompare,
+  testCookiesFile,
+  updateYtdlpBinary,
+} from '../downloader.ts';
 import {getScanState, runLibraryScan, scanEvents, type ScanProgress} from '../scanner.ts';
 
 export const adminRouter = Router();
@@ -275,6 +281,23 @@ adminRouter.post('/cookies/test', requireAdmin, async (_req, res) => {
 adminRouter.post('/ytdlp/update', requireAdmin, async (_req, res) => {
   const result = await updateYtdlpBinary();
   res.json(result);
+});
+
+// On-demand 3-way IPv4 probe comparison for diagnosing googlevideo 403s (admin-only, redacts cookies/URLs/sigs)
+adminRouter.get('/yt-debug-compare/:videoId', requireAdmin, async (req, res) => {
+  const videoId = String(req.params.videoId || '').trim();
+  if (!isValidYouTubeVideoId(videoId)) {
+    res.status(400).json({error: 'Invalid YouTube video ID'});
+    return;
+  }
+  try {
+    const report = await runYouTubeDebugCompare(videoId);
+    res.json(report);
+  } catch (err) {
+    res.status(502).json({
+      error: err instanceof Error ? err.message : 'Debug comparison failed',
+    });
+  }
 });
 
 // User management
