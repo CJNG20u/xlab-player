@@ -155,6 +155,8 @@ export interface DiscoverNewReleaseItem {
   artistId?: string;
   album?: string;
   albumId?: string;
+  recordType?: string;
+  releaseDate?: string;
   releaseLabel: string;
   duration: number;
   thumbnailUrl: string;
@@ -184,6 +186,7 @@ export interface DiscoverAlbumItem {
   artist: string;
   artistId?: string;
   subtitle: string;
+  recordType?: string;
   releaseDate?: string;
   trackCount?: number;
   duration: number;
@@ -224,6 +227,7 @@ export interface DiscoverAlbumTrack {
   diskNumber: number;
   title: string;
   artist: string;
+  featuredArtists?: string;
   artistId?: string;
   album: string;
   albumId: string;
@@ -242,6 +246,8 @@ export interface DiscoverAlbumDetail {
   artistPictureUrl: string;
   coverUrl: string;
   releaseDate: string;
+  releaseYear?: string;
+  recordType?: string;
   label: string;
   genre: string;
   trackCount: number;
@@ -255,6 +261,7 @@ export interface DiscoverArtistAlbumSummary {
   deezerAlbumId: string;
   title: string;
   releaseDate: string;
+  rawReleaseDate?: string;
   recordType: string;
   coverUrl: string;
 }
@@ -266,9 +273,11 @@ export interface DiscoverArtistDetail {
   pictureUrl: string;
   fans: number;
   albumCount: number;
+  latestRelease?: DiscoverArtistAlbumSummary | null;
   topTracks: DiscoverAlbumTrack[];
   albums: DiscoverArtistAlbumSummary[];
   relatedArtists: DiscoverArtistItem[];
   cached: boolean;
 }
+
 

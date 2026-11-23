@@ -27,6 +27,8 @@ export interface DiscoverNewReleaseItem {
   artistId?: string;
   album?: string;
   albumId?: string;
+  recordType?: string;
+  releaseDate?: string;
   releaseLabel: string;
   duration: number;
   thumbnailUrl: string;
@@ -56,6 +58,7 @@ export interface DiscoverAlbumItem {
   artist: string;
   artistId?: string;
   subtitle: string;
+  recordType?: string;
   releaseDate?: string;
   trackCount?: number;
   duration: number;
@@ -90,6 +93,7 @@ export interface DiscoverAlbumTrack {
   diskNumber: number;
   title: string;
   artist: string;
+  featuredArtists?: string;
   artistId?: string;
   album: string;
   albumId: string;
@@ -108,6 +112,8 @@ export interface DiscoverAlbumDetail {
   artistPictureUrl: string;
   coverUrl: string;
   releaseDate: string;
+  releaseYear?: string;
+  recordType?: string;
   label: string;
   genre: string;
   trackCount: number;
@@ -121,6 +127,7 @@ export interface DiscoverArtistAlbumSummary {
   deezerAlbumId: string;
   title: string;
   releaseDate: string;
+  rawReleaseDate?: string;
   recordType: string;
   coverUrl: string;
 }
@@ -132,6 +139,7 @@ export interface DiscoverArtistDetail {
   pictureUrl: string;
   fans: number;
   albumCount: number;
+  latestRelease: DiscoverArtistAlbumSummary | null;
   topTracks: DiscoverAlbumTrack[];
   albums: DiscoverArtistAlbumSummary[];
   relatedArtists: DiscoverArtistItem[];
@@ -304,15 +312,42 @@ function normalizeKey(str: string): string {
     .trim();
 }
 
+const SHORT_MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+function formatRecordType(raw: string | undefined): string {
+  const lower = (raw || '').trim().toLowerCase();
+  if (!lower) return 'Album';
+  if (lower === 'ep') return 'EP';
+  if (lower === 'single') return 'Single';
+  if (lower === 'compile' || lower === 'compilation') return 'Compilation';
+  return `${lower.charAt(0).toUpperCase()}${lower.slice(1)}`;
+}
+
 function formatYearLabel(releaseDate: string | undefined, fallback: string): string {
   if (!releaseDate) return fallback;
   const trimmed = releaseDate.trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     const year = trimmed.slice(0, 4);
     const monthIdx = Number(trimmed.slice(5, 7)) - 1;
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = Number(trimmed.slice(8, 10));
+    if (monthIdx >= 0 && monthIdx < 12 && day >= 1 && day <= 31) {
+      return `${SHORT_MONTHS[monthIdx]} ${day}, ${year}`;
+    }
     if (monthIdx >= 0 && monthIdx < 12) {
-      return `${months[monthIdx]} ${year}`;
+      return `${SHORT_MONTHS[monthIdx]} ${year}`;
     }
     return year;
   }
@@ -320,6 +355,34 @@ function formatYearLabel(releaseDate: string | undefined, fallback: string): str
     return trimmed.slice(0, 4);
   }
   return fallback;
+}
+
+function formatShortReleaseDate(releaseDate: string | undefined): string {
+  if (!releaseDate) return '';
+  const trimmed = releaseDate.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const year = Number(trimmed.slice(0, 4));
+    const monthIdx = Number(trimmed.slice(5, 7)) - 1;
+    const day = Number(trimmed.slice(8, 10));
+    if (monthIdx >= 0 && monthIdx < 12 && day >= 1 && day <= 31) {
+      const currentYear = new Date().getFullYear();
+      if (year >= currentYear - 1) {
+        return `${SHORT_MONTHS[monthIdx]} ${day}`;
+      }
+      return `${SHORT_MONTHS[monthIdx]} ${year}`;
+    }
+    return String(year);
+  }
+  if (/^\d{4}/.test(trimmed)) {
+    return trimmed.slice(0, 4);
+  }
+  return '';
+}
+
+function extractReleaseYear(releaseDate: string | undefined): string {
+  if (!releaseDate) return '';
+  const m = /^(\d{4})/.exec(releaseDate.trim());
+  return m ? m[1] : '';
 }
 
 async function fetchDeezerJson<T>(endpointPath: string): Promise<T> {
@@ -379,6 +442,7 @@ interface RawDeezerTrack {
   disk_number?: number;
   explicit_lyrics?: boolean;
   artist?: RawDeezerArtist;
+  contributors?: Array<{id?: number; name?: string; role?: string}>;
   album?: RawDeezerAlbum;
 }
 
@@ -593,10 +657,10 @@ export async function getCatalogDiscoverFeed(
 
   // Preserve recency order in cache key so changing the most recently played artist refreshes immediately
   const cacheKey = basedOnHistory
-    ? `discover:deezer:v2:hist:${seeds.map(normalizeKey).join('>')}`
+    ? `discover:deezer:v3:hist:${seeds.map(normalizeKey).join('>')}`
     : basedOnLibrary
-      ? `discover:deezer:v2:lib:${seeds.map(normalizeKey).join('>')}`
-      : 'discover:deezer:v2:__chart__';
+      ? `discover:deezer:v3:lib:${seeds.map(normalizeKey).join('>')}`
+      : 'discover:deezer:v3:__chart__';
 
   const {data, cached} = await withCatalogCache<Omit<DiscoverFeedResponse, 'cached'>>(
     cacheKey,
@@ -614,7 +678,7 @@ export async function getCatalogDiscoverFeed(
         ...secondarySeeds.map((s) => resolveDeezerArtist(s)),
       ]);
 
-      // Fetch primary artist's related artists (up to 12), albums (up to 12), and top tracks (up to 10)
+      // Fetch primary artist's related artists (up to 12), albums/singles (up to 16), and top tracks (up to 10)
       let primaryRelated: RawDeezerArtist[] = [];
       let primaryAlbums: RawDeezerAlbum[] = [];
       let primaryTopTracks: RawDeezerTrack[] = [];
@@ -625,7 +689,7 @@ export async function getCatalogDiscoverFeed(
             `/artist/${primaryArtist.id}/related?limit=12`
           ).catch(() => ({data: []})),
           fetchDeezerJson<{data?: RawDeezerAlbum[]}>(
-            `/artist/${primaryArtist.id}/albums?limit=12`
+            `/artist/${primaryArtist.id}/albums?limit=16`
           ).catch(() => ({data: []})),
           fetchDeezerJson<{data?: RawDeezerTrack[]}>(
             `/artist/${primaryArtist.id}/top?limit=10`
@@ -637,15 +701,15 @@ export async function getCatalogDiscoverFeed(
       } else if (primarySeed) {
         // Fallback if artist lookup missed: search albums directly by artist name
         const albSearch = await fetchDeezerJson<{data?: RawDeezerAlbum[]}>(
-          `/search/album?q=${encodeURIComponent(primarySeed)}&limit=10`
+          `/search/album?q=${encodeURIComponent(primarySeed)}&limit=12`
         ).catch(() => ({data: []}));
-        primaryAlbums = albSearch.data || [];
+        primaryAlbums = sortAlbumsNewestFirst(albSearch.data || []);
       }
 
-      // Fetch top tracks & albums from top 3 related artists of the primary seed + secondary recent seeds
+      // Fetch albums & top tracks from top 4 related artists of the primary seed + secondary recent seeds
       const topRelatedForExpansion = primaryRelated
         .filter((a) => a?.id && a.name && !seedKeys.has(normalizeKey(a.name)))
-        .slice(0, 3);
+        .slice(0, 4);
 
       const [relatedExpansions, secondaryExpansions] = await Promise.all([
         Promise.all(
@@ -655,7 +719,7 @@ export async function getCatalogDiscoverFeed(
                 `/artist/${rel.id}/top?limit=4`
               ).catch(() => ({data: []})),
               fetchDeezerJson<{data?: RawDeezerAlbum[]}>(
-                `/artist/${rel.id}/albums?limit=4`
+                `/artist/${rel.id}/albums?limit=6`
               ).catch(() => ({data: []})),
             ]);
             return {
@@ -672,6 +736,7 @@ export async function getCatalogDiscoverFeed(
               return {
                 seed: seedName,
                 displayName: seedName,
+                artistId: undefined as string | undefined,
                 related: [] as RawDeezerArtist[],
                 albums: [] as RawDeezerAlbum[],
                 topTracks: [] as RawDeezerTrack[],
@@ -679,10 +744,10 @@ export async function getCatalogDiscoverFeed(
             }
             const [relRes, albRes, topRes] = await Promise.all([
               fetchDeezerJson<{data?: RawDeezerArtist[]}>(
-                `/artist/${resolved.id}/related?limit=10`
+                `/artist/${resolved.id}/related?limit=12`
               ).catch(() => ({data: []})),
               fetchDeezerJson<{data?: RawDeezerAlbum[]}>(
-                `/artist/${resolved.id}/albums?limit=6`
+                `/artist/${resolved.id}/albums?limit=8`
               ).catch(() => ({data: []})),
               fetchDeezerJson<{data?: RawDeezerTrack[]}>(
                 `/artist/${resolved.id}/top?limit=5`
@@ -691,6 +756,7 @@ export async function getCatalogDiscoverFeed(
             return {
               seed: seedName,
               displayName: resolved.name?.trim() || seedName,
+              artistId: String(resolved.id),
               related: relRes.data || [],
               albums: sortAlbumsNewestFirst(albRes.data || []),
               topTracks: topRes.data || [],
@@ -702,12 +768,11 @@ export async function getCatalogDiscoverFeed(
       const primaryDisplayName = primaryArtist?.name?.trim() || primarySeed || '';
       const primaryKey = normalizeKey(primaryDisplayName);
 
-      // Only query global Deezer chart if we have no seeds or need fallback items to reach healthy shelf sizes
+      // Query global Deezer chart when we have no seeds or need fallback items to reach 10-12 per shelf
       const needsChartFallback =
         !primarySeed ||
-        primaryRelated.length < 8 ||
-        primaryTopTracks.length < 4 ||
-        primaryAlbums.length < 4;
+        primaryRelated.length < 10 ||
+        primaryAlbums.length < 6;
 
       const chart: RawDeezerChartResponse = needsChartFallback
         ? await fetchDeezerJson<RawDeezerChartResponse>('/chart?limit=15').catch(
@@ -716,7 +781,7 @@ export async function getCatalogDiscoverFeed(
         : {};
 
       // -----------------------------------------------------------------------
-      // Shelf 2: Artists to discover (8 to 12 artists from primary + secondary related)
+      // Shelf 2: Artists to discover (10 to 12 circular artist avatar cards)
       // -----------------------------------------------------------------------
       const artistsToDiscover: DiscoverArtistItem[] = [];
       const seenArtists = new Set<string>();
@@ -753,7 +818,7 @@ export async function getCatalogDiscoverFeed(
         pushArtist(a, `Similar to ${primaryDisplayName}`, primaryDisplayName);
       }
 
-      // 2) Top up from secondary recent played artists' related artists if fewer than 12
+      // 2) Top up from secondary recent played artists' related artists to reach 12
       if (artistsToDiscover.length < 12) {
         for (const sec of secondaryExpansions) {
           for (const a of sec.related) {
@@ -765,130 +830,173 @@ export async function getCatalogDiscoverFeed(
         }
       }
 
-      // 3) Only if still under 8 artists (or cold start with no history/library), fill from chart
-      if (artistsToDiscover.length < 8) {
+      // 3) If still under 10 artists (or cold start), fill from Deezer chart artists
+      if (artistsToDiscover.length < 10) {
         for (const a of chart.artists?.data || []) {
           if (artistsToDiscover.length >= 12) break;
           if (seedKeys.has(normalizeKey(a.name || ''))) continue;
-          pushArtist(a, 'Trending artist', null);
+          pushArtist(
+            a,
+            primaryDisplayName ? `Similar to ${primaryDisplayName}` : 'Trending artist',
+            primaryDisplayName || null
+          );
         }
       }
 
       // -----------------------------------------------------------------------
-      // Shelf 1: New releases (driven by last played artist + related/recent artists)
+      // Shelf 1: New releases (newest singles/EPs/albums with release type + date & "New" badge)
       // -----------------------------------------------------------------------
-      const lastPlayedTitleKey = normalizeKey(lastPlayed?.title || '');
-      const trackBuckets: DiscoverNewReleaseItem[][] = [];
+      const releaseCandidates: Array<{
+        album: RawDeezerAlbum;
+        artistName: string;
+        artistId?: string;
+        seedLabel: string | null;
+      }> = [];
 
-      const mapTrack = (
-        t: RawDeezerTrack,
-        fallbackArtist: string,
-        releaseLabel: string,
-        seedLabel: string | null,
-        isNew: boolean
-      ): DiscoverNewReleaseItem | null => {
-        if (!t?.id || !t.title) return null;
-        const cover = pickHighResCover(t.album as unknown as Record<string, unknown>);
-        const artistName = t.artist?.name?.trim() || fallbackArtist;
-        return {
-          id: `dz-track-${t.id}`,
-          deezerTrackId: String(t.id),
+      if (primaryDisplayName) {
+        for (const alb of primaryAlbums.slice(0, 4)) {
+          releaseCandidates.push({
+            album: alb,
+            artistName: alb.artist?.name?.trim() || primaryDisplayName,
+            artistId: alb.artist?.id
+              ? String(alb.artist.id)
+              : primaryArtist?.id
+                ? String(primaryArtist.id)
+                : undefined,
+            seedLabel: primaryDisplayName,
+          });
+        }
+      }
+
+      for (const rel of relatedExpansions) {
+        for (const alb of rel.albums.slice(0, 3)) {
+          releaseCandidates.push({
+            album: alb,
+            artistName: alb.artist?.name?.trim() || rel.artist.name,
+            artistId: alb.artist?.id ? String(alb.artist.id) : String(rel.artist.id),
+            seedLabel: primaryDisplayName || rel.artist.name,
+          });
+        }
+      }
+
+      for (const sec of secondaryExpansions) {
+        for (const alb of sec.albums.slice(0, 2)) {
+          releaseCandidates.push({
+            album: alb,
+            artistName: alb.artist?.name?.trim() || sec.displayName,
+            artistId: alb.artist?.id ? String(alb.artist.id) : sec.artistId,
+            seedLabel: sec.displayName,
+          });
+        }
+      }
+
+      // Sort newest-first by release_date so freshest singles/albums appear first
+      releaseCandidates.sort((a, b) =>
+        (b.album.release_date || '').localeCompare(a.album.release_date || '')
+      );
+
+      const seenReleaseIds = new Set<string>();
+      const newReleases: DiscoverNewReleaseItem[] = [];
+
+      for (const cand of releaseCandidates) {
+        const alb = cand.album;
+        if (!alb?.id || !alb.title) continue;
+        const idKey = String(alb.id);
+        const titleKey = `${normalizeKey(cand.artistName)}::${normalizeKey(alb.title)}`;
+        if (seenReleaseIds.has(idKey) || seenReleaseIds.has(titleKey)) continue;
+        seenReleaseIds.add(idKey);
+        seenReleaseIds.add(titleKey);
+
+        const cover = pickHighResCover(alb as unknown as Record<string, unknown>);
+        const recType = formatRecordType(alb.record_type);
+        const shortDate = formatShortReleaseDate(alb.release_date);
+        const releaseLabel = shortDate ? `${recType} · ${shortDate}` : recType;
+        const isFresh = isRecentReleaseDate(alb.release_date);
+
+        newReleases.push({
+          id: `dz-release-${alb.id}`,
           url: '',
-          title: t.title.trim(),
-          artist: artistName,
-          artistId: t.artist?.id ? String(t.artist.id) : undefined,
-          album: t.album?.title?.trim() || 'Single',
-          albumId: t.album?.id ? String(t.album.id) : undefined,
-          releaseLabel: t.album?.title?.trim() || releaseLabel,
-          duration: Number(t.duration) || 0,
+          title: alb.title.trim(),
+          artist: cand.artistName,
+          artistId: cand.artistId,
+          album: alb.title.trim(),
+          albumId: idKey,
+          recordType: recType,
+          releaseDate: alb.release_date || undefined,
+          releaseLabel,
+          duration: Number(alb.duration) || 0,
           thumbnailUrl: cover,
           fallbackThumbnailUrl: cover,
-          isNew,
-          seedArtist: seedLabel,
-        };
-      };
+          isNew: isFresh || newReleases.length < 3,
+          seedArtist: cand.seedLabel,
+        });
 
-      // Primary artist's tracks (defer exact just-played track so recommendations feel fresh)
-      if (primaryTopTracks.length > 0 && primaryDisplayName) {
-        const freshPrimary: DiscoverNewReleaseItem[] = [];
-        const deferredJustPlayed: DiscoverNewReleaseItem[] = [];
-        for (let i = 0; i < primaryTopTracks.length; i++) {
-          const t = primaryTopTracks[i];
-          const mapped = mapTrack(
-            t,
-            primaryDisplayName,
-            `More from ${primaryDisplayName}`,
-            primaryDisplayName,
-            i < 2
-          );
-          if (!mapped) continue;
-          if (lastPlayedTitleKey && normalizeKey(mapped.title) === lastPlayedTitleKey) {
-            deferredJustPlayed.push(mapped);
-          } else {
-            freshPrimary.push(mapped);
-          }
-        }
-        const combined = [...freshPrimary, ...deferredJustPlayed];
-        if (combined.length > 0) trackBuckets.push(combined);
+        if (newReleases.length >= 12) break;
       }
 
-      // Related artists' top tracks (same vibe as last played artist)
-      for (const rel of relatedExpansions) {
-        const bucket: DiscoverNewReleaseItem[] = [];
-        for (let i = 0; i < rel.topTracks.length; i++) {
-          const mapped = mapTrack(
-            rel.topTracks[i],
-            rel.artist.name,
-            `Similar to ${primaryDisplayName}`,
-            primaryDisplayName,
-            i === 0
-          );
-          if (mapped) bucket.push(mapped);
-        }
-        if (bucket.length > 0) trackBuckets.push(bucket);
-      }
+      // Fallback to top tracks / chart tracks when personalized release list has fewer than 10 items
+      if (newReleases.length < 10) {
+        const fallbackTracks: Array<{
+          track: RawDeezerTrack;
+          fallbackArtist: string;
+          seedLabel: string | null;
+        }> = [
+          ...primaryTopTracks.map((track) => ({
+            track,
+            fallbackArtist: primaryDisplayName || 'Artist',
+            seedLabel: primaryDisplayName || null,
+          })),
+          ...relatedExpansions.flatMap((rel) =>
+            rel.topTracks.map((track) => ({
+              track,
+              fallbackArtist: rel.artist.name,
+              seedLabel: primaryDisplayName || null,
+            }))
+          ),
+          ...(chart.tracks?.data || []).map((track) => ({
+            track,
+            fallbackArtist: 'Artist',
+            seedLabel: null,
+          })),
+        ];
 
-      // Secondary recent played artists' tracks
-      for (const sec of secondaryExpansions) {
-        const bucket: DiscoverNewReleaseItem[] = [];
-        for (const t of sec.topTracks) {
-          const mapped = mapTrack(
-            t,
-            sec.displayName,
-            `Because you played ${sec.displayName}`,
-            sec.displayName,
-            false
-          );
-          if (mapped) bucket.push(mapped);
-        }
-        if (bucket.length > 0) trackBuckets.push(bucket);
-      }
+        for (const item of fallbackTracks) {
+          const t = item.track;
+          if (!t?.id || !t.title) continue;
+          const artistName = t.artist?.name?.trim() || item.fallbackArtist;
+          const albId = t.album?.id ? String(t.album.id) : '';
+          const titleKey = `${normalizeKey(artistName)}::${normalizeKey(t.title)}`;
+          if ((albId && seenReleaseIds.has(albId)) || seenReleaseIds.has(titleKey)) continue;
+          if (albId) seenReleaseIds.add(albId);
+          seenReleaseIds.add(titleKey);
 
-      const seenTracks = new Set<string>();
-      const newReleases: DiscoverNewReleaseItem[] = [];
-      for (const item of interleaveBuckets(trackBuckets, 24)) {
-        const key = `${normalizeKey(item.artist)}::${normalizeKey(item.title)}`;
-        if (seenTracks.has(key)) continue;
-        seenTracks.add(key);
-        newReleases.push(item);
-        if (newReleases.length >= 14) break;
-      }
-
-      // Fallback to chart tracks only when personalized results are empty or sparse
-      if (newReleases.length < 6) {
-        for (const t of chart.tracks?.data || []) {
-          const mapped = mapTrack(t, 'Artist', 'Trending', null, true);
-          if (!mapped) continue;
-          const key = `${normalizeKey(mapped.artist)}::${normalizeKey(mapped.title)}`;
-          if (seenTracks.has(key)) continue;
-          seenTracks.add(key);
-          newReleases.push(mapped);
-          if (newReleases.length >= 14) break;
+          const cover = pickHighResCover(t.album as unknown as Record<string, unknown>);
+          const recType = formatRecordType(t.album?.record_type || 'single');
+          const shortDate = formatShortReleaseDate(t.album?.release_date);
+          newReleases.push({
+            id: `dz-track-${t.id}`,
+            deezerTrackId: String(t.id),
+            url: '',
+            title: t.title.trim(),
+            artist: artistName,
+            artistId: t.artist?.id ? String(t.artist.id) : undefined,
+            album: t.album?.title?.trim() || 'Single',
+            albumId: albId || undefined,
+            recordType: recType,
+            releaseDate: t.album?.release_date || undefined,
+            releaseLabel: shortDate ? `${recType} · ${shortDate}` : recType,
+            duration: Number(t.duration) || 0,
+            thumbnailUrl: cover,
+            fallbackThumbnailUrl: cover,
+            isNew: newReleases.length < 4,
+            seedArtist: item.seedLabel,
+          });
+          if (newReleases.length >= 12) break;
         }
       }
 
       // -----------------------------------------------------------------------
-      // Shelf 3: Albums for you (last played artist's albums + related & recent artists' albums)
+      // Shelf 3: Albums for you (10 to 12 square album cards with "Similar to <Seed>" subtitle)
       // -----------------------------------------------------------------------
       const albumBuckets: DiscoverAlbumItem[][] = [];
 
@@ -901,10 +1009,7 @@ export async function getCatalogDiscoverFeed(
       ): DiscoverAlbumItem | null => {
         if (!alb?.id || !alb.title) return null;
         const cover = pickHighResCover(alb as unknown as Record<string, unknown>);
-        const recordType = alb.record_type
-          ? `${alb.record_type.charAt(0).toUpperCase()}${alb.record_type.slice(1)}`
-          : 'Album';
-        const yearLabel = formatYearLabel(alb.release_date, '');
+        const recordType = formatRecordType(alb.record_type);
         return {
           id: `dz-album-${alb.id}`,
           deezerAlbumId: String(alb.id),
@@ -912,7 +1017,8 @@ export async function getCatalogDiscoverFeed(
           title: alb.title.trim(),
           artist: alb.artist?.name?.trim() || fallbackArtist,
           artistId: alb.artist?.id ? String(alb.artist.id) : fallbackArtistId,
-          subtitle: yearLabel ? `${recordType} · ${yearLabel}` : subtitle,
+          subtitle,
+          recordType,
           releaseDate: alb.release_date || undefined,
           trackCount: Number(alb.nb_tracks) || undefined,
           duration: Number(alb.duration) || 0,
@@ -922,15 +1028,42 @@ export async function getCatalogDiscoverFeed(
         };
       };
 
-      // Primary last-played artist's albums (newest first)
+      // Prioritize full albums/EPs first for Albums for you, then singles if needed
+      const preferFullAlbums = (list: RawDeezerAlbum[]) => [
+        ...list.filter((a) => (a.record_type || '').toLowerCase() === 'album'),
+        ...list.filter((a) => (a.record_type || '').toLowerCase() === 'ep'),
+        ...list.filter(
+          (a) =>
+            (a.record_type || '').toLowerCase() !== 'album' &&
+            (a.record_type || '').toLowerCase() !== 'ep'
+        ),
+      ];
+
+      // Related artists' albums first ("Similar to <Seed Artist>")
+      for (const rel of relatedExpansions) {
+        const bucket: DiscoverAlbumItem[] = [];
+        for (const alb of preferFullAlbums(rel.albums)) {
+          const mapped = mapAlbum(
+            alb,
+            rel.artist.name,
+            String(rel.artist.id),
+            primaryDisplayName ? `Similar to ${primaryDisplayName}` : 'Recommended album',
+            primaryDisplayName || null
+          );
+          if (mapped) bucket.push(mapped);
+        }
+        if (bucket.length > 0) albumBuckets.push(bucket);
+      }
+
+      // Primary last-played artist's albums
       if (primaryAlbums.length > 0 && primaryDisplayName) {
         const primaryAlbBucket: DiscoverAlbumItem[] = [];
-        for (const alb of primaryAlbums) {
+        for (const alb of preferFullAlbums(primaryAlbums)) {
           const mapped = mapAlbum(
             alb,
             primaryDisplayName,
             primaryArtist?.id ? String(primaryArtist.id) : undefined,
-            `By ${primaryDisplayName}`,
+            `More from ${primaryDisplayName}`,
             primaryDisplayName
           );
           if (mapped) primaryAlbBucket.push(mapped);
@@ -938,31 +1071,15 @@ export async function getCatalogDiscoverFeed(
         if (primaryAlbBucket.length > 0) albumBuckets.push(primaryAlbBucket);
       }
 
-      // Related artists' albums
-      for (const rel of relatedExpansions) {
-        const bucket: DiscoverAlbumItem[] = [];
-        for (const alb of rel.albums) {
-          const mapped = mapAlbum(
-            alb,
-            rel.artist.name,
-            String(rel.artist.id),
-            `Similar to ${primaryDisplayName}`,
-            primaryDisplayName
-          );
-          if (mapped) bucket.push(mapped);
-        }
-        if (bucket.length > 0) albumBuckets.push(bucket);
-      }
-
       // Secondary recent played artists' albums
       for (const sec of secondaryExpansions) {
         const bucket: DiscoverAlbumItem[] = [];
-        for (const alb of sec.albums) {
+        for (const alb of preferFullAlbums(sec.albums)) {
           const mapped = mapAlbum(
             alb,
             sec.displayName,
-            undefined,
-            `Inspired by ${sec.displayName}`,
+            sec.artistId,
+            `Similar to ${sec.displayName}`,
             sec.displayName
           );
           if (mapped) bucket.push(mapped);
@@ -979,13 +1096,19 @@ export async function getCatalogDiscoverFeed(
         if (idKey) seenAlbums.add(idKey);
         seenAlbums.add(titleKey);
         albumsForYou.push(item);
-        if (albumsForYou.length >= 14) break;
+        if (albumsForYou.length >= 12) break;
       }
 
-      // Fallback to chart albums only if personalized albums are empty or sparse
-      if (albumsForYou.length < 6) {
+      // Fallback to chart albums when personalized albums are under 10
+      if (albumsForYou.length < 10) {
         for (const alb of chart.albums?.data || []) {
-          const mapped = mapAlbum(alb, 'Artist', undefined, 'Featured album', null);
+          const mapped = mapAlbum(
+            alb,
+            'Artist',
+            undefined,
+            primaryDisplayName ? `Similar to ${primaryDisplayName}` : 'Featured album',
+            primaryDisplayName || null
+          );
           if (!mapped) continue;
           const idKey = mapped.deezerAlbumId || '';
           const titleKey = `${normalizeKey(mapped.artist)}::${normalizeKey(mapped.title)}`;
@@ -993,19 +1116,7 @@ export async function getCatalogDiscoverFeed(
           if (idKey) seenAlbums.add(idKey);
           seenAlbums.add(titleKey);
           albumsForYou.push(mapped);
-          if (albumsForYou.length >= 14) break;
-        }
-      }
-
-      // Flag any newReleases whose album has a very recent release date from primary/related albums
-      const recentAlbumIds = new Set(
-        [...primaryAlbums, ...relatedExpansions.flatMap((r) => r.albums)]
-          .filter((a) => isRecentReleaseDate(a.release_date))
-          .map((a) => String(a.id))
-      );
-      for (const item of newReleases) {
-        if (item.albumId && recentAlbumIds.has(item.albumId)) {
-          item.isNew = true;
+          if (albumsForYou.length >= 12) break;
         }
       }
 
@@ -1045,7 +1156,7 @@ export async function getCatalogAlbumDetail(
     throw new Error('Invalid album ID');
   }
 
-  const cacheKey = `deezer:album:v1:${albumId}`;
+  const cacheKey = `deezer:album:v2:${albumId}`;
   const {data, cached} = await withCatalogCache<Omit<DiscoverAlbumDetail, 'cached'>>(
     cacheKey,
     Boolean(options.forceRefresh),
@@ -1060,20 +1171,31 @@ export async function getCatalogAlbumDetail(
       const artistPictureUrl = pickHighResPicture(alb.artist as unknown as Record<string, unknown>);
       const rawTracks = alb.tracks?.data || [];
 
-      const tracks: DiscoverAlbumTrack[] = rawTracks.map((t, index) => ({
-        id: `dz-track-${t.id}`,
-        deezerTrackId: String(t.id),
-        trackNumber: Number(t.track_position) || index + 1,
-        diskNumber: Number(t.disk_number) || 1,
-        title: (t.title || 'Untitled').trim(),
-        artist: t.artist?.name?.trim() || artistName,
-        artistId: t.artist?.id ? String(t.artist.id) : artistId,
-        album: alb.title.trim(),
-        albumId,
-        duration: Number(t.duration) || 0,
-        explicit: Boolean(t.explicit_lyrics),
-        coverUrl,
-      }));
+      const tracks: DiscoverAlbumTrack[] = rawTracks.map((t, index) => {
+        const primaryTrackArtist = t.artist?.name?.trim() || artistName;
+        const contributorNames = (t.contributors || [])
+          .map((c) => (c?.name || '').trim())
+          .filter(Boolean);
+        const uniqueArtists = Array.from(new Set(contributorNames));
+        const featuredArtists =
+          uniqueArtists.length > 1 ? uniqueArtists.join(', ') : primaryTrackArtist;
+
+        return {
+          id: `dz-track-${t.id}`,
+          deezerTrackId: String(t.id),
+          trackNumber: Number(t.track_position) || index + 1,
+          diskNumber: Number(t.disk_number) || 1,
+          title: (t.title || 'Untitled').trim(),
+          artist: primaryTrackArtist,
+          featuredArtists,
+          artistId: t.artist?.id ? String(t.artist.id) : artistId,
+          album: alb.title.trim(),
+          albumId,
+          duration: Number(t.duration) || 0,
+          explicit: Boolean(t.explicit_lyrics),
+          coverUrl,
+        };
+      });
 
       return {
         id: `dz-album-${albumId}`,
@@ -1084,6 +1206,8 @@ export async function getCatalogAlbumDetail(
         artistPictureUrl,
         coverUrl,
         releaseDate: formatYearLabel(alb.release_date, ''),
+        releaseYear: extractReleaseYear(alb.release_date) || undefined,
+        recordType: formatRecordType(alb.record_type),
         label: alb.label?.trim() || '',
         genre: alb.genres?.data?.[0]?.name?.trim() || '',
         trackCount: Number(alb.nb_tracks) || tracks.length,
@@ -1114,20 +1238,20 @@ export async function getCatalogArtistDetail(
     throw new Error('Invalid artist ID');
   }
 
-  const cacheKey = `deezer:artist:v1:${artistId}`;
+  const cacheKey = `deezer:artist:v2:${artistId}`;
   const {data, cached} = await withCatalogCache<Omit<DiscoverArtistDetail, 'cached'>>(
     cacheKey,
     Boolean(options.forceRefresh),
     async () => {
       const [artist, topRes, albumsRes, relatedRes] = await Promise.all([
         fetchDeezerJson<RawDeezerArtist>(`/artist/${artistId}`),
-        fetchDeezerJson<{data?: RawDeezerTrack[]}>(`/artist/${artistId}/top?limit=25`).catch(
+        fetchDeezerJson<{data?: RawDeezerTrack[]}>(`/artist/${artistId}/top?limit=20`).catch(
           () => ({data: []})
         ),
-        fetchDeezerJson<{data?: RawDeezerAlbum[]}>(`/artist/${artistId}/albums?limit=20`).catch(
+        fetchDeezerJson<{data?: RawDeezerAlbum[]}>(`/artist/${artistId}/albums?limit=25`).catch(
           () => ({data: []})
         ),
-        fetchDeezerJson<{data?: RawDeezerArtist[]}>(`/artist/${artistId}/related?limit=10`).catch(
+        fetchDeezerJson<{data?: RawDeezerArtist[]}>(`/artist/${artistId}/related?limit=12`).catch(
           () => ({data: []})
         ),
       ]);
@@ -1142,13 +1266,21 @@ export async function getCatalogArtistDetail(
       const topTracks: DiscoverAlbumTrack[] = (topRes.data || []).map((t, index) => {
         const trackCover =
           pickHighResCover(t.album as unknown as Record<string, unknown>) || pictureUrl;
+        const primaryTrackArtist = t.artist?.name?.trim() || artistName;
+        const contributorNames = (t.contributors || [])
+          .map((c) => (c?.name || '').trim())
+          .filter(Boolean);
+        const uniqueArtists = Array.from(new Set(contributorNames));
+
         return {
           id: `dz-track-${t.id}`,
           deezerTrackId: String(t.id),
           trackNumber: index + 1,
           diskNumber: 1,
           title: (t.title || 'Untitled').trim(),
-          artist: t.artist?.name?.trim() || artistName,
+          artist: primaryTrackArtist,
+          featuredArtists:
+            uniqueArtists.length > 1 ? uniqueArtists.join(', ') : primaryTrackArtist,
           artistId: t.artist?.id ? String(t.artist.id) : artistId,
           album: t.album?.title?.trim() || 'Single',
           albumId: t.album?.id ? String(t.album.id) : '',
@@ -1158,11 +1290,12 @@ export async function getCatalogArtistDetail(
         };
       });
 
+      const sortedAlbums = sortAlbumsNewestFirst(albumsRes.data || []);
       const seenAlbums = new Set<string>();
       const albums: DiscoverArtistAlbumSummary[] = [];
-      for (const alb of albumsRes.data || []) {
+      for (const alb of sortedAlbums) {
         if (!alb?.id || !alb.title) continue;
-        const key = normalizeKey(alb.title);
+        const key = `${normalizeKey(alb.title)}::${(alb.record_type || '').toLowerCase()}`;
         if (seenAlbums.has(key)) continue;
         seenAlbums.add(key);
         albums.push({
@@ -1170,16 +1303,17 @@ export async function getCatalogArtistDetail(
           deezerAlbumId: String(alb.id),
           title: alb.title.trim(),
           releaseDate: formatYearLabel(alb.release_date, ''),
-          recordType: alb.record_type
-            ? `${alb.record_type.charAt(0).toUpperCase()}${alb.record_type.slice(1)}`
-            : 'Album',
+          rawReleaseDate: alb.release_date || undefined,
+          recordType: formatRecordType(alb.record_type),
           coverUrl: pickHighResCover(alb as unknown as Record<string, unknown>),
         });
       }
 
+      const latestRelease = albums.length > 0 ? albums[0] : null;
+
       const relatedArtists: DiscoverArtistItem[] = (relatedRes.data || [])
         .filter((a) => a?.id && a.name)
-        .slice(0, 10)
+        .slice(0, 12)
         .map((a) => {
           const pic = pickHighResPicture(a as unknown as Record<string, unknown>);
           return {
@@ -1201,6 +1335,7 @@ export async function getCatalogArtistDetail(
         pictureUrl,
         fans: Number(artist.nb_fan) || 0,
         albumCount: Number(artist.nb_album) || albums.length,
+        latestRelease,
         topTracks,
         albums,
         relatedArtists,

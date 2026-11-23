@@ -71,7 +71,7 @@ discoverRouter.post('/discover/history', requireAuth, (req: AuthRequest, res) =>
   }
 });
 
-discoverRouter.get('/discover', requireAuth, async (req: AuthRequest, res) => {
+const handleGetDiscoverFeed = async (req: AuthRequest, res: import('express').Response) => {
   try {
     const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
     const forceRefresh = refreshParam === '1' || refreshParam === 'true';
@@ -91,7 +91,10 @@ discoverRouter.get('/discover', requireAuth, async (req: AuthRequest, res) => {
     console.error('[discover]', msg);
     res.status(502).json({error: msg});
   }
-});
+};
+
+discoverRouter.get('/discover', requireAuth, handleGetDiscoverFeed);
+discoverRouter.get('/discover/feed', requireAuth, handleGetDiscoverFeed);
 
 discoverRouter.get('/discover/album/:id', requireAuth, async (req: AuthRequest, res) => {
   const albumId = String(req.params.id || '').trim();

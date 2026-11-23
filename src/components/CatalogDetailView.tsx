@@ -1,14 +1,15 @@
 import {
-  ArrowLeft,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Disc3,
+  Download,
   Loader2,
   Pause,
   Play,
-  Plus,
   RefreshCw,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
 import {
   apiFetch,
@@ -34,7 +35,7 @@ const artistDetailSessionCache = new Map<string, DiscoverArtistDetail>();
 function formatFanCount(fans: number): string {
   if (!fans || fans <= 0) return '';
   if (fans >= 1_000_000) return `${(fans / 1_000_000).toFixed(1)}M fans`;
-  if (fans >= 1_000) return `${Math.round(fans / 1_000)}K fans`;
+  if (fans >= 1_000) return `${(fans / 1_000).toFixed(fans >= 100_000 ? 0 : 1)}K fans`;
   return `${fans.toLocaleString()} fans`;
 }
 
@@ -157,11 +158,65 @@ const ResilientCover: React.FC<ResilientCoverProps> = ({
   );
 };
 
+interface BlurredArtworkBackdropProps {
+  imageUrl?: string;
+  fallbackSeed: string;
+}
+
+const BlurredArtworkBackdrop: React.FC<BlurredArtworkBackdropProps> = ({
+  imageUrl,
+  fallbackSeed,
+}) => {
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [imageUrl]);
+
+  const fallbackTint = useMemo(() => hashTint(fallbackSeed), [fallbackSeed]);
+
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 overflow-hidden select-none"
+      aria-hidden="true"
+    >
+      {imageUrl && !imgError ? (
+        <img
+          src={imageUrl}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => setImgError(true)}
+          className="h-full w-full object-cover object-center scale-125 blur-3xl opacity-45 saturate-150"
+        />
+      ) : (
+        <div
+          className="h-full w-full opacity-55"
+          style={{
+            background: `radial-gradient(ellipse at 30% 20%, ${fallbackTint} 0%, transparent 72%)`,
+          }}
+        />
+      )}
+      <div
+        className="absolute inset-0"
+        style={{
+          background:
+            'linear-gradient(180deg, rgba(0,0,0,0.22) 0%, color-mix(in srgb, var(--bg-primary) 68%, transparent) 60%, var(--bg-primary) 100%)',
+        }}
+      />
+    </div>
+  );
+};
+
 interface CatalogDetailViewProps {
   route: CatalogRoute;
   canDownload: boolean;
   onBack: () => void;
-  onOpenAlbum: (album: {id: string; titleHint?: string; artistHint?: string; coverHint?: string}) => void;
+  onOpenAlbum: (album: {
+    id: string;
+    titleHint?: string;
+    artistHint?: string;
+    coverHint?: string;
+  }) => void;
   onOpenArtist: (artist: {id: string; nameHint?: string; pictureHint?: string}) => void;
   onFlashToast: (msg: string) => void;
 }
@@ -195,6 +250,24 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     return !artistDetailSessionCache.has(route.id);
   });
   const [error, setError] = useState<string | null>(null);
+
+  // Batch "Download Album" state
+  const [albumDownloadState, setAlbumDownloadState] = useState<{
+    albumId: string;
+    active: boolean;
+    done: boolean;
+    queued: number;
+    total: number;
+  } | null>(null);
+  const albumDownloadCancelRef = useRef(false);
+
+  useEffect(() => {
+    albumDownloadCancelRef.current = true;
+    setAlbumDownloadState(null);
+    return () => {
+      albumDownloadCancelRef.current = true;
+    };
+  }, [route.id, route.type]);
 
   const loadDetail = useCallback(
     async (forceRefresh = false) => {
@@ -252,7 +325,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     void loadDetail(false);
   }, [loadDetail]);
 
-  // Background prefetch top 3 tracks whenever an album or artist view opens
+  // Background prefetch top 3 tracks whenever an album or artist detail view loads
   useEffect(() => {
     const tracks = route.type === 'album' ? album?.tracks : artist?.topTracks;
     if (!tracks || tracks.length === 0) return;
@@ -266,8 +339,25 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     );
   }, [album, artist, route.type]);
 
+  // Play clicked track, queue rest of list, and prefetch clicked track + next 2 tracks
   const handlePlayTrackFromList = useCallback(
     (clicked: DiscoverAlbumTrack, list: DiscoverAlbumTrack[]) => {
+      const clickedIdx = Math.max(
+        0,
+        list.findIndex((item) => item.id === clicked.id || item.deezerTrackId === clicked.deezerTrackId)
+      );
+      const prefetchSlice = list.slice(clickedIdx, clickedIdx + 3);
+      if (prefetchSlice.length > 0) {
+        prefetchYouTubeStreams(
+          prefetchSlice.map((t) => ({
+            videoId: t.videoId,
+            artist: t.artist,
+            title: t.title,
+            duration: t.duration,
+          }))
+        );
+      }
+
       const queue = list.map(catalogTrackToPlayerTrack);
       const target = catalogTrackToPlayerTrack(clicked);
       if (
@@ -295,6 +385,65 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     [canDownload, onFlashToast, saveYouTubeTrackToLibrary]
   );
 
+  const handleDownloadAlbum = useCallback(async () => {
+    if (!canDownload || !album || album.tracks.length === 0) return;
+    if (albumDownloadState?.albumId === album.deezerAlbumId && albumDownloadState.active) return;
+
+    albumDownloadCancelRef.current = false;
+    const total = album.tracks.length;
+    setAlbumDownloadState({
+      albumId: album.deezerAlbumId,
+      active: true,
+      done: false,
+      queued: 0,
+      total,
+    });
+
+    let queuedCount = 0;
+    for (const track of album.tracks) {
+      if (albumDownloadCancelRef.current) return;
+      const saveKey = track.videoId ? `yt-${track.videoId}` : track.id;
+      if (getYouTubeSaveStatus(saveKey) === 'saved') {
+        queuedCount += 1;
+        setAlbumDownloadState({
+          albumId: album.deezerAlbumId,
+          active: true,
+          done: false,
+          queued: queuedCount,
+          total,
+        });
+        continue;
+      }
+
+      const res = await saveYouTubeTrackToLibrary(catalogTrackToPlayerTrack(track), 'm4a');
+      if (res.ok) {
+        queuedCount += 1;
+      }
+      if (albumDownloadCancelRef.current) return;
+      setAlbumDownloadState({
+        albumId: album.deezerAlbumId,
+        active: true,
+        done: false,
+        queued: queuedCount,
+        total,
+      });
+    }
+
+    if (albumDownloadCancelRef.current) return;
+    setAlbumDownloadState({
+      albumId: album.deezerAlbumId,
+      active: false,
+      done: queuedCount > 0,
+      queued: queuedCount,
+      total,
+    });
+    onFlashToast(
+      queuedCount > 0
+        ? `Queued ${queuedCount} of ${total} tracks from "${album.title}"`
+        : `Could not queue tracks from "${album.title}"`
+    );
+  }, [album, albumDownloadState, canDownload, getYouTubeSaveStatus, onFlashToast, saveYouTubeTrackToLibrary]);
+
   const isTrackActive = (item: DiscoverAlbumTrack) =>
     Boolean(
       currentTrack &&
@@ -303,48 +452,68 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
           (currentTrack.deezerTrackId && currentTrack.deezerTrackId === item.deezerTrackId))
     );
 
-  const headerTitle =
+  const isAlbumCurrentlyPlaying = useMemo(() => {
+    if (!album || !currentTrack) return false;
+    return album.tracks.some((t) => isTrackActive(t)) && isPlaying && !isBuffering;
+  }, [album, currentTrack, isBuffering, isPlaying]);
+
+  const isArtistCurrentlyPlaying = useMemo(() => {
+    if (!artist || !currentTrack) return false;
+    return artist.topTracks.some((t) => isTrackActive(t)) && isPlaying && !isBuffering;
+  }, [artist, currentTrack, isBuffering, isPlaying]);
+
+  const heroImageUrl =
     route.type === 'album'
-      ? album?.title || route.titleHint || 'Album'
-      : artist?.name || route.nameHint || 'Artist';
+      ? album?.coverUrl || route.coverHint
+      : artist?.pictureUrl || route.pictureHint;
+
+  const heroFallbackSeed =
+    route.type === 'album'
+      ? album?.title || route.titleHint || route.id
+      : artist?.name || route.nameHint || route.id;
+
+  const latestRelease = useMemo(() => {
+    if (!artist) return null;
+    return artist.latestRelease || artist.albums[0] || null;
+  }, [artist]);
+
+  const isAlbumDownloading =
+    albumDownloadState?.albumId === album?.deezerAlbumId && albumDownloadState?.active;
+  const isAlbumQueued =
+    albumDownloadState?.albumId === album?.deezerAlbumId && albumDownloadState?.done;
 
   return (
-    <div className="space-y-6">
-      {/* Compact Sticky Back Bar */}
-      <div className="sticky top-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2.5 bg-[var(--bg-glass)] backdrop-blur-md border-b border-[var(--border-subtle)] flex items-center justify-between gap-3">
-        <button
-          type="button"
-          onClick={onBack}
-          className="inline-flex min-h-[44px] items-center gap-2 rounded-full pr-3 pl-1 text-sm font-semibold text-[var(--text-primary)] hover:text-[var(--accent)] transition-colors whitespace-nowrap shrink-0"
-          aria-label="Back to Discover"
-        >
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
-            <ArrowLeft className="w-4 h-4" />
-          </span>
-          <span>Back</span>
-        </button>
-
-        <p className="text-sm font-semibold text-[var(--text-primary)] truncate min-w-0 flex-1 text-center">
-          {headerTitle}
-        </p>
-
-        <div className="w-[72px] shrink-0" aria-hidden="true" />
-      </div>
-
+    <div className="space-y-7">
       {loading ? (
         <div className="space-y-6">
-          <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5">
-            <div
-              className={`w-44 h-44 sm:w-52 sm:h-52 shrink-0 bg-[var(--bg-elevated)] animate-pulse ${
-                route.type === 'artist' ? 'rounded-full' : 'rounded-2xl'
-              }`}
-            />
-            <div className="space-y-3 w-full max-w-md text-center sm:text-left">
-              <div className="h-7 w-3/4 mx-auto sm:mx-0 rounded bg-[var(--bg-elevated)] animate-pulse" />
-              <div className="h-4 w-1/2 mx-auto sm:mx-0 rounded bg-[var(--bg-secondary)] animate-pulse" />
-              <div className="h-11 w-36 mx-auto sm:mx-0 rounded-full bg-[var(--bg-elevated)] animate-pulse" />
+          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 pt-4 pb-8 overflow-hidden">
+            <BlurredArtworkBackdrop imageUrl={heroImageUrl} fallbackSeed={heroFallbackSeed} />
+            <div className="relative z-10 space-y-6">
+              <button
+                type="button"
+                onClick={onBack}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors"
+                aria-label="Back to Discover"
+              >
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+
+              <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 sm:gap-7">
+                <div
+                  className={`w-40 h-40 sm:w-48 sm:h-48 shrink-0 bg-[var(--bg-elevated)] animate-pulse shadow-2xl ${
+                    route.type === 'artist' ? 'rounded-full' : 'rounded-xl'
+                  }`}
+                />
+                <div className="space-y-3 w-full max-w-md text-center sm:text-left">
+                  <div className="h-3.5 w-20 mx-auto sm:mx-0 rounded bg-[var(--bg-elevated)] animate-pulse" />
+                  <div className="h-9 w-3/4 mx-auto sm:mx-0 rounded bg-[var(--bg-elevated)] animate-pulse" />
+                  <div className="h-4 w-1/2 mx-auto sm:mx-0 rounded bg-[var(--bg-secondary)] animate-pulse" />
+                  <div className="h-11 w-36 mx-auto sm:mx-0 rounded-full bg-[var(--bg-elevated)] animate-pulse" />
+                </div>
+              </div>
             </div>
           </div>
+
           <div className="space-y-2">
             {Array.from({length: 8}).map((_, idx) => (
               <div
@@ -355,97 +524,188 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
           </div>
         </div>
       ) : error ? (
-        <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-3">
-          <p className="text-sm font-semibold text-[var(--text-primary)]">
-            Couldn&apos;t load {route.type === 'album' ? 'album' : 'artist'} details
-          </p>
-          <p className="text-xs text-[var(--text-secondary)] max-w-md mx-auto">{error}</p>
+        <div className="space-y-5">
           <button
             type="button"
-            onClick={() => void loadDetail(true)}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors"
+            onClick={onBack}
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-full pr-4 pl-1.5 text-sm font-semibold text-[var(--text-primary)] hover:text-[var(--accent)] transition-colors"
+            aria-label="Back to Discover"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            Try again
+            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
+              <ChevronLeft className="w-5 h-5" />
+            </span>
+            <span>Back to Discover</span>
           </button>
+
+          <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 text-center space-y-3">
+            <p className="text-base font-semibold text-[var(--text-primary)]">
+              Couldn&apos;t load {route.type === 'album' ? 'album' : 'artist'} details
+            </p>
+            <p className="text-xs text-[var(--text-secondary)] max-w-md mx-auto">{error}</p>
+            <button
+              type="button"
+              onClick={() => void loadDetail(true)}
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Try again
+            </button>
+          </div>
         </div>
       ) : route.type === 'album' && album ? (
         <div className="space-y-6">
-          {/* Album Hero */}
-          <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 sm:gap-6">
-            <div className="w-44 h-44 sm:w-52 sm:h-52 shrink-0 rounded-2xl overflow-hidden shadow-xl bg-[var(--bg-elevated)]">
-              <ResilientCover
-                src={album.coverUrl || route.coverHint}
-                alt={album.title}
-                shape="square"
-                label={album.title}
-              />
-            </div>
+          {/* Album Blurred Cover-Art Hero */}
+          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 -mt-2 px-4 sm:px-6 lg:px-8 pt-4 pb-6 overflow-hidden rounded-b-2xl">
+            <BlurredArtworkBackdrop
+              imageUrl={album.coverUrl || route.coverHint}
+              fallbackSeed={album.title}
+            />
 
-            <div className="min-w-0 flex-1 text-center sm:text-left space-y-2">
-              <p className="text-xs font-medium text-[var(--text-secondary)]">
-                Album
-                {album.genre ? ` · ${album.genre}` : ''}
-              </p>
-              <h1
-                className="font-display text-2xl sm:text-4xl font-extrabold tracking-tight text-[var(--text-primary)] leading-tight"
-                style={{textWrap: 'balance'}}
-              >
-                {album.title}
-              </h1>
-
-              <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-2 gap-y-1 text-sm text-[var(--text-secondary)]">
-                {album.artistId ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onOpenArtist({
-                        id: album.artistId!,
-                        nameHint: album.artist,
-                        pictureHint: album.artistPictureUrl,
-                      })
-                    }
-                    className="font-semibold text-[var(--text-primary)] hover:underline"
-                  >
-                    {album.artist}
-                  </button>
-                ) : (
-                  <span className="font-semibold text-[var(--text-primary)]">{album.artist}</span>
-                )}
-                {album.releaseDate && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span>{album.releaseDate}</span>
-                  </>
-                )}
-                <span aria-hidden="true">·</span>
-                <span className="tabular-nums">
-                  {album.tracks.length} {album.tracks.length === 1 ? 'track' : 'tracks'}
-                </span>
-                {album.duration > 0 && (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span>{formatTotalRuntime(album.duration)}</span>
-                  </>
-                )}
+            <div className="relative z-10 space-y-5">
+              {/* Top Back Button */}
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                  aria-label="Back to Discover"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
               </div>
 
-              {album.tracks.length > 0 && (
-                <div className="pt-2 flex items-center justify-center sm:justify-start gap-3">
-                  <button
-                    type="button"
-                    onClick={() => handlePlayTrackFromList(album.tracks[0], album.tracks)}
-                    className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>Play Album</span>
-                  </button>
+              {/* Cover + Metadata + Actions */}
+              <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 sm:gap-7">
+                <div className="w-44 h-44 sm:w-52 sm:h-52 lg:w-56 lg:h-56 shrink-0 rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 bg-[var(--bg-elevated)]">
+                  <ResilientCover
+                    src={album.coverUrl || route.coverHint}
+                    alt={album.title}
+                    shape="square"
+                    label={album.title}
+                    className="rounded-xl"
+                  />
                 </div>
-              )}
+
+                <div className="min-w-0 flex-1 text-center sm:text-left space-y-2.5">
+                  <p className="text-xs font-semibold text-[var(--text-secondary)]">
+                    {album.recordType || 'Album'}
+                    {album.genre ? ` · ${album.genre}` : ''}
+                  </p>
+                  <h1
+                    className="font-display text-2xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-[var(--text-primary)] leading-[1.1]"
+                    style={{textWrap: 'balance'}}
+                  >
+                    {album.title}
+                  </h1>
+
+                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-2 gap-y-1.5 text-sm text-[var(--text-secondary)]">
+                    {album.artistId ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenArtist({
+                            id: album.artistId!,
+                            nameHint: album.artist,
+                            pictureHint: album.artistPictureUrl,
+                          })
+                        }
+                        className="inline-flex items-center gap-2 font-semibold text-[var(--text-primary)] hover:text-[var(--accent)] hover:underline transition-colors"
+                      >
+                        {album.artistPictureUrl && (
+                          <img
+                            src={album.artistPictureUrl}
+                            alt=""
+                            referrerPolicy="no-referrer"
+                            className="w-5 h-5 rounded-full object-cover ring-1 ring-white/15"
+                          />
+                        )}
+                        <span>{album.artist}</span>
+                      </button>
+                    ) : (
+                      <span className="font-semibold text-[var(--text-primary)]">
+                        {album.artist}
+                      </span>
+                    )}
+                    {(album.releaseYear || album.releaseDate) && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">
+                          {album.releaseYear || album.releaseDate}
+                        </span>
+                      </>
+                    )}
+                    <span aria-hidden="true">·</span>
+                    <span className="tabular-nums">
+                      {album.tracks.length} {album.tracks.length === 1 ? 'track' : 'tracks'}
+                    </span>
+                    {album.duration > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">{formatTotalRuntime(album.duration)}</span>
+                      </>
+                    )}
+                  </div>
+
+                  {album.tracks.length > 0 && (
+                    <div className="pt-2 flex flex-wrap items-center justify-center sm:justify-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isAlbumCurrentlyPlaying) {
+                            togglePlay();
+                          } else {
+                            handlePlayTrackFromList(album.tracks[0], album.tracks);
+                          }
+                        }}
+                        className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] active:scale-[0.98] transition-all whitespace-nowrap shadow-lg"
+                      >
+                        {isAlbumCurrentlyPlaying ? (
+                          <Pause className="w-4 h-4 fill-current" />
+                        ) : (
+                          <Play className="w-4 h-4 fill-current" />
+                        )}
+                        <span>{isAlbumCurrentlyPlaying ? 'Pause' : 'Play All'}</span>
+                      </button>
+
+                      {canDownload && (
+                        <button
+                          type="button"
+                          disabled={isAlbumDownloading}
+                          onClick={() => void handleDownloadAlbum()}
+                          className={`inline-flex min-h-[44px] items-center gap-2 rounded-full border px-5 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
+                            isAlbumQueued
+                              ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                              : 'border-[var(--border-strong)] bg-[var(--bg-secondary)]/85 backdrop-blur-sm text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] hover:border-[var(--accent)]'
+                          }`}
+                        >
+                          {isAlbumDownloading ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <span className="tabular-nums">
+                                Queueing {albumDownloadState?.queued}/{albumDownloadState?.total}...
+                              </span>
+                            </>
+                          ) : isAlbumQueued ? (
+                            <>
+                              <Check className="w-4 h-4 stroke-[2.5]" />
+                              <span>Album Queued</span>
+                            </>
+                          ) : (
+                            <>
+                              <Download className="w-4 h-4" />
+                              <span>Download Album</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Numbered Album Tracklist */}
+          {/* Complete Numbered Album Tracklist */}
           <div className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]">
             {album.tracks.map((track) => {
               const active = isTrackActive(track);
@@ -453,6 +713,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               const buffering = active && isBuffering;
               const saveKey = track.videoId ? `yt-${track.videoId}` : track.id;
               const saveStatus = getYouTubeSaveStatus(saveKey);
+              const subtitleArtists = track.featuredArtists || track.artist;
 
               return (
                 <div
@@ -466,10 +727,8 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                       handlePlayTrackFromList(track, album.tracks);
                     }
                   }}
-                  className={`group flex min-h-[56px] items-center gap-3 px-2.5 sm:px-3 py-2.5 transition-colors cursor-pointer ${
-                    active
-                      ? 'bg-[var(--bg-elevated)]'
-                      : 'hover:bg-[var(--bg-secondary)]'
+                  className={`group flex min-h-[58px] items-center gap-3 px-2.5 sm:px-3.5 py-2.5 transition-colors cursor-pointer rounded-lg ${
+                    active ? 'bg-[var(--bg-elevated)]' : 'hover:bg-[var(--bg-secondary)]'
                   }`}
                 >
                   <div className="w-7 text-center shrink-0">
@@ -500,7 +759,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                       {track.title}
                     </p>
                     <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-                      {track.artist}
+                      {subtitleArtists}
                       {track.explicit ? ' · Explicit' : ''}
                     </p>
                   </div>
@@ -518,9 +777,9 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                         title={
                           saveStatus === 'saved'
                             ? 'Queued for library'
-                            : `Save "${track.title}" to library`
+                            : `Download "${track.title}"`
                         }
-                        aria-label={`Save ${track.title} to library`}
+                        aria-label={`Download ${track.title}`}
                         className={`flex h-10 w-10 items-center justify-center rounded-full border transition-colors ${
                           saveStatus === 'saved'
                             ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
@@ -532,7 +791,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                         ) : saveStatus === 'saved' ? (
                           <Check className="w-4 h-4 stroke-[2.5]" />
                         ) : (
-                          <Plus className="w-4 h-4" />
+                          <Download className="w-4 h-4" />
                         )}
                       </button>
                     )}
@@ -542,66 +801,150 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
             })}
           </div>
 
-          {album.label && (
+          {(album.label || album.releaseDate) && (
             <p className="text-xs text-[var(--text-muted)] pt-1">
-              {album.label}
-              {album.releaseDate ? ` · ${album.releaseDate}` : ''}
+              {[album.releaseDate, album.label].filter(Boolean).join(' · ')}
             </p>
           )}
         </div>
       ) : route.type === 'artist' && artist ? (
         <div className="space-y-8">
-          {/* Artist Hero */}
-          <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 sm:gap-6">
-            <div className="w-36 h-36 sm:w-44 sm:h-44 shrink-0 rounded-full overflow-hidden shadow-xl ring-1 ring-[var(--border-subtle)] bg-[var(--bg-elevated)]">
-              <ResilientCover
-                src={artist.pictureUrl || route.pictureHint}
-                alt={artist.name}
-                shape="circle"
-                label={artist.name}
-              />
-            </div>
+          {/* Artist Blurred Artwork Hero */}
+          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 -mt-2 px-4 sm:px-6 lg:px-8 pt-4 pb-6 overflow-hidden rounded-b-2xl">
+            <BlurredArtworkBackdrop
+              imageUrl={artist.pictureUrl || route.pictureHint}
+              fallbackSeed={artist.name}
+            />
 
-            <div className="min-w-0 flex-1 text-center sm:text-left space-y-2">
-              <p className="text-xs font-medium text-[var(--text-secondary)]">Artist</p>
-              <h1
-                className="font-display text-2xl sm:text-4xl font-extrabold tracking-tight text-[var(--text-primary)] leading-tight"
-                style={{textWrap: 'balance'}}
-              >
-                {artist.name}
-              </h1>
-              <p className="text-sm text-[var(--text-secondary)] tabular-nums">
-                {[
-                  formatFanCount(artist.fans),
-                  artist.albumCount > 0 ? `${artist.albumCount} releases` : '',
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </p>
+            <div className="relative z-10 space-y-5">
+              {/* Top Back Button */}
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                  aria-label="Back to Discover"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+              </div>
 
-              {artist.topTracks.length > 0 && (
-                <div className="pt-2 flex items-center justify-center sm:justify-start gap-3">
-                  <button
-                    type="button"
-                    onClick={() => handlePlayTrackFromList(artist.topTracks[0], artist.topTracks)}
-                    className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>Play Top Tracks</span>
-                  </button>
+              {/* Portrait + Artist Info + Play CTA */}
+              <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 sm:gap-7">
+                <div className="w-36 h-36 sm:w-44 sm:h-44 lg:w-48 lg:h-48 shrink-0 rounded-full overflow-hidden shadow-2xl ring-2 ring-white/15 bg-[var(--bg-elevated)]">
+                  <ResilientCover
+                    src={artist.pictureUrl || route.pictureHint}
+                    alt={artist.name}
+                    shape="circle"
+                    label={artist.name}
+                  />
                 </div>
-              )}
+
+                <div className="min-w-0 flex-1 text-center sm:text-left space-y-2.5">
+                  <div className="inline-flex items-center gap-2 justify-center sm:justify-start">
+                    <span className="rounded-md bg-[var(--accent-soft)] border border-[var(--accent)]/35 px-2 py-0.5 text-[11px] font-semibold tracking-wide text-[var(--accent)]">
+                      Discover
+                    </span>
+                    <span className="text-xs font-medium text-[var(--text-secondary)]">
+                      Artist
+                    </span>
+                  </div>
+
+                  <h1
+                    className="font-display text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-[var(--text-primary)] leading-[1.08]"
+                    style={{textWrap: 'balance'}}
+                  >
+                    {artist.name}
+                  </h1>
+
+                  <p className="text-sm text-[var(--text-secondary)] tabular-nums">
+                    {[
+                      formatFanCount(artist.fans),
+                      artist.albumCount > 0 ? `${artist.albumCount} releases` : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+
+                  {artist.topTracks.length > 0 && (
+                    <div className="pt-1.5 flex items-center justify-center sm:justify-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isArtistCurrentlyPlaying) {
+                            togglePlay();
+                          } else {
+                            handlePlayTrackFromList(artist.topTracks[0], artist.topTracks);
+                          }
+                        }}
+                        className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] active:scale-[0.98] transition-all whitespace-nowrap shadow-lg"
+                      >
+                        {isArtistCurrentlyPlaying ? (
+                          <Pause className="w-4 h-4 fill-current" />
+                        ) : (
+                          <Play className="w-4 h-4 fill-current" />
+                        )}
+                        <span>{isArtistCurrentlyPlaying ? 'Pause' : 'Play Top Tracks'}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
-          {/* Popular Tracks */}
+          {/* Highlighted Latest Release Card */}
+          {latestRelease && (
+            <section className="space-y-3">
+              <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
+                Latest release
+              </h2>
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenAlbum({
+                    id: latestRelease.deezerAlbumId,
+                    titleHint: latestRelease.title,
+                    artistHint: artist.name,
+                    coverHint: latestRelease.coverUrl,
+                  })
+                }
+                className="group w-full max-w-xl flex items-center gap-4 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-3 text-left transition-colors hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+              >
+                <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden shrink-0 bg-[var(--bg-elevated)] shadow-md">
+                  <ResilientCover
+                    src={latestRelease.coverUrl}
+                    alt={latestRelease.title}
+                    shape="square"
+                    label={latestRelease.title}
+                    className="rounded-lg transition-transform duration-200 group-hover:scale-[1.04]"
+                  />
+                </div>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <p className="text-base font-bold text-[var(--text-primary)] truncate group-hover:text-[var(--accent)] transition-colors">
+                    {latestRelease.title}
+                  </p>
+                  <p className="text-xs text-[var(--text-secondary)] truncate">
+                    {[latestRelease.recordType, latestRelease.releaseDate]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                </div>
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] group-hover:translate-x-0.5 transition-all">
+                  <ChevronRight className="w-5 h-5" />
+                </span>
+              </button>
+            </section>
+          )}
+
+          {/* Numbered Top Tracks List (1 to 10+) */}
           {artist.topTracks.length > 0 && (
             <section className="space-y-3">
               <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
-                Popular Tracks
+                Top Tracks
               </h2>
               <div className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]">
-                {artist.topTracks.slice(0, 15).map((track) => {
+                {artist.topTracks.map((track) => {
                   const active = isTrackActive(track);
                   const playing = active && isPlaying && !isBuffering;
                   const buffering = active && isBuffering;
@@ -620,10 +963,8 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                           handlePlayTrackFromList(track, artist.topTracks);
                         }
                       }}
-                      className={`group flex min-h-[58px] items-center gap-3 px-2.5 sm:px-3 py-2 transition-colors cursor-pointer ${
-                        active
-                          ? 'bg-[var(--bg-elevated)]'
-                          : 'hover:bg-[var(--bg-secondary)]'
+                      className={`group flex min-h-[60px] items-center gap-3 px-2.5 sm:px-3.5 py-2 transition-colors cursor-pointer rounded-lg ${
+                        active ? 'bg-[var(--bg-elevated)]' : 'hover:bg-[var(--bg-secondary)]'
                       }`}
                     >
                       <div className="w-6 text-center shrink-0">
@@ -645,13 +986,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                         )}
                       </div>
 
-                      <div className="w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-[var(--bg-elevated)]">
+                      <div className="w-11 h-11 rounded-md overflow-hidden shrink-0 bg-[var(--bg-elevated)] shadow-sm">
                         <ResilientCover
                           src={track.coverUrl}
                           alt={track.album}
                           shape="square"
                           label={track.title}
-                          className="rounded-lg"
+                          className="rounded-md"
                         />
                       </div>
 
@@ -664,8 +1005,8 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                           {track.title}
                         </p>
                         <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-                          {track.album}
-                          {track.explicit ? ' · Explicit' : ''}
+                          {track.featuredArtists || track.artist}
+                          {track.album && track.album !== track.title ? ` · ${track.album}` : ''}
                         </p>
                       </div>
 
@@ -682,9 +1023,9 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                             title={
                               saveStatus === 'saved'
                                 ? 'Queued for library'
-                                : `Save "${track.title}" to library`
+                                : `Download "${track.title}"`
                             }
-                            aria-label={`Save ${track.title} to library`}
+                            aria-label={`Download ${track.title}`}
                             className={`flex h-10 w-10 items-center justify-center rounded-full border transition-colors ${
                               saveStatus === 'saved'
                                 ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
@@ -696,7 +1037,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                             ) : saveStatus === 'saved' ? (
                               <Check className="w-4 h-4 stroke-[2.5]" />
                             ) : (
-                              <Plus className="w-4 h-4" />
+                              <Download className="w-4 h-4" />
                             )}
                           </button>
                         )}
@@ -708,13 +1049,18 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
             </section>
           )}
 
-          {/* Artist Discography */}
+          {/* Discography / Albums */}
           {artist.albums.length > 0 && (
             <section className="space-y-3">
-              <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
-                Albums &amp; Releases
-              </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
+                  Discography
+                </h2>
+                <span className="text-xs text-[var(--text-muted)] tabular-nums">
+                  {artist.albums.length} {artist.albums.length === 1 ? 'release' : 'releases'}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5 sm:gap-3.5">
                 {artist.albums.map((alb) => (
                   <button
                     key={alb.id}
@@ -742,7 +1088,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                       {alb.title}
                     </p>
                     <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-                      {[alb.releaseDate, alb.recordType].filter(Boolean).join(' · ')}
+                      {[alb.recordType, alb.releaseDate].filter(Boolean).join(' · ')}
                     </p>
                   </button>
                 ))}
@@ -756,7 +1102,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
                 Fans Also Like
               </h2>
-              <div className="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar">
+              <div className="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar lg:grid lg:grid-cols-6 xl:grid-cols-8 lg:overflow-visible lg:mx-0 lg:px-0">
                 {artist.relatedArtists.map((rel) => (
                   <button
                     key={rel.id}
@@ -770,7 +1116,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                         });
                       }
                     }}
-                    className="group w-[128px] sm:w-[144px] shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                    className="group w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                   >
                     <div className="aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
                       <ResilientCover

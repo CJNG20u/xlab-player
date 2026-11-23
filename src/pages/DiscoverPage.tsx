@@ -340,12 +340,17 @@ const DiscoverArtwork: React.FC<DiscoverArtworkProps> = ({
   );
 };
 
-interface HorizontalShelfProps {
+interface ResponsiveDiscoverShelfProps {
   title: string;
+  variant: 'square' | 'circle';
   children: React.ReactNode;
 }
 
-const HorizontalShelf: React.FC<HorizontalShelfProps> = ({title, children}) => {
+const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
+  title,
+  variant,
+  children,
+}) => {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
   const scrollShelf = (direction: 'left' | 'right') => {
@@ -358,13 +363,18 @@ const HorizontalShelf: React.FC<HorizontalShelfProps> = ({title, children}) => {
     });
   };
 
+  const desktopGridClasses =
+    variant === 'circle'
+      ? 'lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0'
+      : 'lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 min-[1720px]:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0';
+
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <h2 className="font-display text-lg sm:text-xl font-bold tracking-tight text-[var(--text-primary)]">
           {title}
         </h2>
-        <div className="hidden md:flex items-center gap-1.5 shrink-0">
+        <div className="hidden sm:flex lg:hidden items-center gap-1.5 shrink-0">
           <button
             type="button"
             onClick={() => scrollShelf('left')}
@@ -386,7 +396,7 @@ const HorizontalShelf: React.FC<HorizontalShelfProps> = ({title, children}) => {
 
       <div
         ref={scrollerRef}
-        className="flex gap-2.5 sm:gap-3.5 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar"
+        className={`flex gap-2.5 sm:gap-3.5 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar ${desktopGridClasses}`}
       >
         {children}
       </div>
@@ -399,9 +409,9 @@ const DiscoverSkeletonShelves: React.FC = () => (
     {/* New releases skeleton */}
     <div className="space-y-3">
       <div className="h-6 w-36 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3.5 overflow-hidden">
-        {Array.from({length: 6}).map((_, i) => (
-          <div key={i} className="w-[152px] sm:w-[172px] shrink-0 space-y-2.5 p-2">
+      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+        {Array.from({length: 8}).map((_, i) => (
+          <div key={i} className="w-[144px] sm:w-[164px] lg:w-auto shrink-0 space-y-2.5 p-2">
             <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
             <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
             <div className="h-3 w-3/5 rounded bg-[var(--bg-secondary)] animate-pulse" />
@@ -413,9 +423,12 @@ const DiscoverSkeletonShelves: React.FC = () => (
     {/* Artists to discover skeleton */}
     <div className="space-y-3">
       <div className="h-6 w-44 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3.5 overflow-hidden">
-        {Array.from({length: 6}).map((_, i) => (
-          <div key={i} className="w-[136px] sm:w-[152px] shrink-0 space-y-2.5 p-2 flex flex-col items-center">
+      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
+        {Array.from({length: 10}).map((_, i) => (
+          <div
+            key={i}
+            className="w-[128px] sm:w-[144px] lg:w-auto shrink-0 space-y-2.5 p-2 flex flex-col items-center"
+          >
             <div className="aspect-square w-full rounded-full bg-[var(--bg-elevated)] animate-pulse" />
             <div className="h-3.5 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
             <div className="h-3 w-4/5 rounded bg-[var(--bg-secondary)] animate-pulse" />
@@ -427,9 +440,9 @@ const DiscoverSkeletonShelves: React.FC = () => (
     {/* Albums for you skeleton */}
     <div className="space-y-3">
       <div className="h-6 w-40 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3.5 overflow-hidden">
-        {Array.from({length: 6}).map((_, i) => (
-          <div key={i} className="w-[152px] sm:w-[172px] shrink-0 space-y-2.5 p-2">
+      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+        {Array.from({length: 8}).map((_, i) => (
+          <div key={i} className="w-[144px] sm:w-[164px] lg:w-auto shrink-0 space-y-2.5 p-2">
             <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
             <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
             <div className="h-3 w-2/3 rounded bg-[var(--bg-secondary)] animate-pulse" />
@@ -512,6 +525,7 @@ export const DiscoverPage: React.FC = () => {
     ffmpegInstalled: boolean;
   } | null>(null);
 
+  const pageRootRef = useRef<HTMLDivElement | null>(null);
   const metadataEditorRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
@@ -565,7 +579,7 @@ export const DiscoverPage: React.FC = () => {
         if (lastPlayed?.artist?.trim()) qs.set('seedArtist', lastPlayed.artist.trim());
         if (lastPlayed?.title?.trim()) qs.set('seedTitle', lastPlayed.title.trim());
         const queryString = qs.toString();
-        const endpoint = queryString ? `/api/discover?${queryString}` : '/api/discover';
+        const endpoint = queryString ? `/api/discover/feed?${queryString}` : '/api/discover/feed';
 
         const data = await apiFetch<DiscoverFeedResponse>(endpoint);
         if (discoverRequestIdRef.current !== reqId) return;
@@ -735,8 +749,34 @@ export const DiscoverPage: React.FC = () => {
     [currentTrack?.id, playTrack, togglePlay]
   );
 
+  const scrollStageToTop = useCallback(() => {
+    const mainEl = pageRootRef.current?.closest('main');
+    if (mainEl) {
+      mainEl.scrollTo({top: 0, behavior: 'smooth'});
+    }
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  }, []);
+
   const handlePlayDiscoverRelease = useCallback(
     (item: DiscoverNewReleaseItem) => {
+      const shelf = discoverFeed?.newReleases || [item];
+      const clickedIdx = Math.max(
+        0,
+        shelf.findIndex(
+          (entry) =>
+            (item.id && entry.id === item.id) ||
+            (item.deezerTrackId && entry.deezerTrackId === item.deezerTrackId)
+        )
+      );
+      prefetchYouTubeStreams(
+        shelf.slice(clickedIdx, clickedIdx + 3).map((entry) => ({
+          videoId: entry.videoId,
+          artist: entry.artist,
+          title: entry.title,
+          duration: entry.duration,
+        }))
+      );
+
       const targetTrack = discoverReleaseToTrack(item);
       if (
         currentTrack?.id === targetTrack.id ||
@@ -745,7 +785,6 @@ export const DiscoverPage: React.FC = () => {
         togglePlay();
         return;
       }
-      const shelf = discoverFeed?.newReleases || [item];
       const queue = shelf.map(discoverReleaseToTrack);
       const matched =
         queue.find(
@@ -761,22 +800,39 @@ export const DiscoverPage: React.FC = () => {
   const handleOpenAlbumView = useCallback(
     (album: {id: string; titleHint?: string; artistHint?: string; coverHint?: string}) => {
       setCatalogStack((prev) => [...prev, {type: 'album', ...album}]);
-      window.scrollTo({top: 0, behavior: 'smooth'});
+      scrollStageToTop();
     },
-    []
+    [scrollStageToTop]
   );
 
   const handleOpenArtistView = useCallback(
     (artist: {id: string; nameHint?: string; pictureHint?: string}) => {
       setCatalogStack((prev) => [...prev, {type: 'artist', ...artist}]);
-      window.scrollTo({top: 0, behavior: 'smooth'});
+      scrollStageToTop();
     },
-    []
+    [scrollStageToTop]
   );
 
   const handlePopCatalogView = useCallback(() => {
     setCatalogStack((prev) => prev.slice(0, -1));
-  }, []);
+    scrollStageToTop();
+  }, [scrollStageToTop]);
+
+  const handleOpenDiscoverRelease = useCallback(
+    (item: DiscoverNewReleaseItem) => {
+      if (item.albumId) {
+        handleOpenAlbumView({
+          id: item.albumId,
+          titleHint: item.album || item.title,
+          artistHint: item.artist,
+          coverHint: item.thumbnailUrl,
+        });
+        return;
+      }
+      handlePlayDiscoverRelease(item);
+    },
+    [handleOpenAlbumView, handlePlayDiscoverRelease]
+  );
 
   const handleOpenDiscoverAlbum = useCallback(
     (item: DiscoverAlbumItem) => {
@@ -1154,10 +1210,11 @@ export const DiscoverPage: React.FC = () => {
 
   return (
     <div
-      className="px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto space-y-5 pb-36 md:pb-12"
+      ref={pageRootRef}
+      className="px-4 sm:px-6 lg:px-8 max-w-[1680px] mx-auto space-y-5 pb-36 md:pb-12"
       style={{
         paddingTop: isCatalogDetailOpen
-          ? 'calc(0.5rem + env(safe-area-inset-top, 0px))'
+          ? 'calc(0.25rem + env(safe-area-inset-top, 0px))'
           : 'calc(1.25rem + env(safe-area-inset-top, 0px))',
         paddingBottom: 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
       }}
@@ -1302,7 +1359,7 @@ export const DiscoverPage: React.FC = () => {
             <>
               {/* Shelf 1: New releases */}
               {discoverFeed.newReleases.length > 0 && (
-                <HorizontalShelf title="New releases">
+                <ResponsiveDiscoverShelf title="New releases" variant="square">
                   {discoverFeed.newReleases.map((item) => {
                     const trackKey =
                       item.id ||
@@ -1312,17 +1369,25 @@ export const DiscoverPage: React.FC = () => {
                         ((item.videoId && currentTrack.id === `yt-${item.videoId}`) ||
                           (item.id && currentTrack.id === item.id) ||
                           (item.deezerTrackId &&
-                            currentTrack.deezerTrackId === item.deezerTrackId))
+                            currentTrack.deezerTrackId === item.deezerTrackId) ||
+                          (item.albumId && currentTrack.deezerAlbumId === item.albumId))
                     );
                     const isItemPlaying = isCurrent && isPlaying && !isBuffering;
                     const isItemBuffering = isCurrent && isBuffering;
 
                     return (
-                      <button
+                      <div
                         key={trackKey}
-                        type="button"
-                        onClick={() => handlePlayDiscoverRelease(item)}
-                        className="group w-[152px] sm:w-[172px] shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => handleOpenDiscoverRelease(item)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleOpenDiscoverRelease(item);
+                          }
+                        }}
+                        className="group w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                       >
                         <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
                           <DiscoverArtwork
@@ -1339,11 +1404,19 @@ export const DiscoverPage: React.FC = () => {
                               New
                             </span>
                           )}
-                          <span
-                            className={`absolute bottom-2 right-2 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg transition-all duration-150 ${
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePlayDiscoverRelease(item);
+                            }}
+                            aria-label={
+                              isItemPlaying ? `Pause ${item.title}` : `Play ${item.title}`
+                            }
+                            className={`absolute bottom-2 right-2 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg transition-all duration-150 hover:scale-105 ${
                               isCurrent
                                 ? 'opacity-100 translate-y-0'
-                                : 'opacity-0 translate-y-1.5 group-hover:opacity-100 group-hover:translate-y-0'
+                                : 'opacity-0 translate-y-1.5 group-hover:opacity-100 group-hover:translate-y-0 focus-visible:opacity-100'
                             }`}
                           >
                             {isItemBuffering ? (
@@ -1353,7 +1426,7 @@ export const DiscoverPage: React.FC = () => {
                             ) : (
                               <Play className="w-4 h-4 fill-current ml-0.5" />
                             )}
-                          </span>
+                          </button>
                         </div>
 
                         <div className="mt-2.5 min-w-0 space-y-0.5">
@@ -1364,26 +1437,30 @@ export const DiscoverPage: React.FC = () => {
                           >
                             {item.title}
                           </p>
-                          <p className="text-xs text-[var(--text-secondary)] truncate">
+                          <p className="text-xs font-medium text-[var(--text-secondary)] truncate">
                             {item.artist}
-                            {item.releaseLabel ? ` · ${item.releaseLabel}` : ''}
                           </p>
+                          {item.releaseLabel && (
+                            <p className="text-[11px] text-[var(--text-muted)] truncate">
+                              {item.releaseLabel}
+                            </p>
+                          )}
                         </div>
-                      </button>
+                      </div>
                     );
                   })}
-                </HorizontalShelf>
+                </ResponsiveDiscoverShelf>
               )}
 
               {/* Shelf 2: Artists to discover */}
               {discoverFeed.artistsToDiscover.length > 0 && (
-                <HorizontalShelf title="Artists to discover">
+                <ResponsiveDiscoverShelf title="Artists to discover" variant="circle">
                   {discoverFeed.artistsToDiscover.map((artist) => (
                     <button
                       key={artist.id}
                       type="button"
                       onClick={() => handleSelectArtistToDiscover(artist)}
-                      className="group w-[134px] sm:w-[154px] shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                      className="group w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                     >
                       <div className="relative aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
                         <DiscoverArtwork
@@ -1401,18 +1478,18 @@ export const DiscoverPage: React.FC = () => {
                         <p className="text-sm font-semibold text-[var(--text-primary)] truncate">
                           {artist.name}
                         </p>
-                        <p className="text-xs text-[var(--text-secondary)] truncate">
+                        <p className="text-[11px] text-[var(--text-secondary)] truncate">
                           {artist.subtitle}
                         </p>
                       </div>
                     </button>
                   ))}
-                </HorizontalShelf>
+                </ResponsiveDiscoverShelf>
               )}
 
               {/* Shelf 3: Albums for you */}
               {discoverFeed.albumsForYou.length > 0 && (
-                <HorizontalShelf title="Albums for you">
+                <ResponsiveDiscoverShelf title="Albums for you" variant="square">
                   {discoverFeed.albumsForYou.map((album) => {
                     const albumKey =
                       album.id ||
@@ -1438,7 +1515,7 @@ export const DiscoverPage: React.FC = () => {
                             handleOpenDiscoverAlbum(album);
                           }
                         }}
-                        className="group w-[152px] sm:w-[172px] shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                        className="group w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                       >
                         <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
                           <DiscoverArtwork
@@ -1479,7 +1556,7 @@ export const DiscoverPage: React.FC = () => {
                       </div>
                     );
                   })}
-                </HorizontalShelf>
+                </ResponsiveDiscoverShelf>
               )}
             </>
           ) : (
