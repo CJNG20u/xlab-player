@@ -441,7 +441,7 @@ export const NowPlayingPage: React.FC = () => {
 
           <div className="text-center min-w-0 px-3">
             <p className="text-xs font-medium text-[var(--text-secondary)]">
-              {isYouTubeTrack ? 'Streaming from YouTube' : 'Playing from Library'}
+              {isYouTubeTrack ? 'Streaming Online' : 'Playing from Library'}
             </p>
             <p className="text-xs font-semibold text-[var(--text-primary)] truncate max-w-[200px] sm:max-w-xs">
               {currentTrack.album}
@@ -671,7 +671,7 @@ export const NowPlayingPage: React.FC = () => {
                 </p>
                 {isYouTubeTrack && (
                   <span className="inline-flex items-center rounded border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-[var(--text-secondary)] leading-none">
-                    YouTube
+                    Online
                   </span>
                 )}
               </div>
@@ -683,13 +683,13 @@ export const NowPlayingPage: React.FC = () => {
                   type="button"
                   disabled={ytSaveStatus === 'saving'}
                   onClick={() => void handleSaveToLibrary()}
-                  className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-xs font-semibold transition-colors ${
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors ${
                     ytSaveStatus === 'saved'
                       ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
                       : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
                   }`}
-                  title={ytSaveStatus === 'saved' ? 'Queued for library download' : 'Save to Library'}
-                  aria-label="Save to Library"
+                  title={ytSaveStatus === 'saved' ? 'Saved to library' : 'Save track'}
+                  aria-label="Save track"
                 >
                   {ytSaveStatus === 'saving' ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -698,7 +698,6 @@ export const NowPlayingPage: React.FC = () => {
                   ) : (
                     <Download className="w-4 h-4" />
                   )}
-                  <span>{ytSaveStatus === 'saved' ? 'Saved' : 'Save'}</span>
                 </button>
               ) : null
             ) : (

@@ -231,7 +231,7 @@ export async function downloadTrackOffline(
   }
 
   if (typeof track.id !== 'number') {
-    throw new Error('Save YouTube tracks to your library before caching offline.');
+    throw new Error('Save online tracks to your library before caching offline.');
   }
   const trackId = track.id;
   const streamUrl = getStreamUrl(trackId);

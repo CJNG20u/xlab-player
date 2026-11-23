@@ -378,7 +378,7 @@ export const AppShell: React.FC = () => {
                   )}
                   {isCurrentYouTube && (
                     <span className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] leading-none">
-                      YouTube
+                      Web
                     </span>
                   )}
                 </div>
@@ -644,13 +644,13 @@ export const AppShell: React.FC = () => {
                   </p>
                   {isCurrentYouTube && (
                     <span
-                      className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
                         theme === 'apple-light'
                           ? 'bg-black/[0.07] text-[#6E6E73]'
                           : 'bg-white/15 text-white/85'
                       }`}
                     >
-                      YT
+                      Web
                     </span>
                   )}
                 </div>

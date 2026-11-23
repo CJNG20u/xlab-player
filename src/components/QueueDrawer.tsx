@@ -72,7 +72,7 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                     </p>
                     {currentTrack.isYouTubeStream && (
                       <span className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--bg-secondary)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] leading-none">
-                        YouTube
+                        Online
                       </span>
                     )}
                   </div>
@@ -142,8 +142,8 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                         <div className="flex items-center gap-1.5 min-w-0">
                           <p className="text-sm font-medium text-[var(--text-primary)] truncate">{track.title}</p>
                           {track.isYouTubeStream && (
-                            <span className="shrink-0 rounded border border-[var(--border-subtle)] bg-[var(--bg-primary)] px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-muted)] leading-none">
-                              YT
+                            <span className="shrink-0 rounded border border-[var(--border-subtle)] bg-[var(--bg-primary)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-muted)] leading-none">
+                              Web
                             </span>
                           )}
                         </div>

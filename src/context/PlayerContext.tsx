@@ -1407,7 +1407,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
             delete next[key];
             return next;
           });
-          return {ok: false, message: 'Could not find a matching YouTube stream for this track'};
+          return {ok: false, message: 'Could not find a matching online stream for this track'};
         }
 
         await apiFetch('/api/download/start', {
@@ -1419,7 +1419,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
                 title: track.title || 'Untitled Track',
                 artist: track.artist || 'Unknown Artist',
                 album:
-                  track.album && track.album !== 'YouTube Stream' ? track.album : 'Singles',
+                  track.album &&
+                  track.album !== 'YouTube Stream' &&
+                  track.album !== 'Online Stream'
+                    ? track.album
+                    : 'Singles',
                 format,
                 thumbnail_url: track.coverUrl || '',
               },

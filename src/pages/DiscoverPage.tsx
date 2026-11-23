@@ -135,8 +135,8 @@ function metadataItemToYouTubeTrack(item: MetadataPreviewItem): Track {
     id: `yt-${videoId}`,
     rel_path: '',
     title: item.title,
-    artist: item.channel || item.artist || 'YouTube',
-    album: 'YouTube Stream',
+    artist: item.channel || item.artist || 'Online',
+    album: 'Online Stream',
     track_number: null,
     year: null,
     duration: item.duration || 0,
@@ -886,7 +886,7 @@ export const DiscoverPage: React.FC = () => {
 
       if (offline) {
         setFetchingMeta(false);
-        setMetaError('YouTube search requires an internet connection.');
+        setMetaError('Online search requires an internet connection.');
         return;
       }
 
@@ -931,7 +931,7 @@ export const DiscoverPage: React.FC = () => {
           setSearchResults(res.items || []);
           setLastSearchTerm(term);
           if (!res.items || res.items.length === 0) {
-            setMetaError(`No YouTube results found for "${term}". Try a different query.`);
+            setMetaError(`No online results found for "${term}". Try a different query.`);
           }
         } else {
           setSearchResults([]);
@@ -956,7 +956,7 @@ export const DiscoverPage: React.FC = () => {
           return;
         }
         setSearchResults([]);
-        setMetaError(err instanceof Error ? err.message : 'Could not fetch YouTube results');
+        setMetaError(err instanceof Error ? err.message : 'Could not fetch online results');
       } finally {
         if (searchAbortRef.current === controller) {
           searchAbortRef.current = null;
@@ -1211,30 +1211,6 @@ export const DiscoverPage: React.FC = () => {
     return () => observer.disconnect();
   }, [isCatalogDetailOpen]);
 
-  const discoverSubtitle = useMemo(() => {
-    const feedArtist = extractDisplayArtist(
-      discoverFeed?.lastPlayed?.artist,
-      discoverFeed?.lastPlayed?.title
-    );
-    const feedTitle = (discoverFeed?.lastPlayed?.title || '').trim();
-    const localArtist = extractDisplayArtist(lastPlayed?.artist, lastPlayed?.title);
-    const localTitle = (lastPlayed?.title || '').trim();
-
-    const activeArtist = lastPlayedArtistKey ? localArtist || feedArtist : feedArtist;
-    const activeTitle = lastPlayedArtistKey ? localTitle || feedTitle : feedTitle;
-
-    if (activeArtist && activeTitle) {
-      return `Picked from ${activeArtist} • ${activeTitle}`;
-    }
-    if (activeArtist) {
-      return `Picked from ${activeArtist}`;
-    }
-    if (discoverFeed?.basedOnLibrary && discoverFeed.seeds.length > 0) {
-      return `Picked from ${discoverFeed.seeds.join(', ')}`;
-    }
-    return 'Trending music picks';
-  }, [discoverFeed, lastPlayed?.artist, lastPlayed?.title, lastPlayedArtistKey]);
-
   return (
     <div
       ref={pageRootRef}
@@ -1263,11 +1239,6 @@ export const DiscoverPage: React.FC = () => {
           <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
             Discover
           </h1>
-          {isDiscoverView && (discoverFeed || lastPlayedArtistKey) && (
-            <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-              {discoverSubtitle}
-            </p>
-          )}
         </div>
 
         {isDiscoverView && !offline && (
@@ -1380,7 +1351,7 @@ export const DiscoverPage: React.FC = () => {
               <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
               <p className="text-sm font-medium text-[var(--text-primary)]">Offline Mode</p>
               <p className="text-xs text-[var(--text-secondary)]">
-                Reconnect to search YouTube and browse Discover recommendations. Use Home or Library
+                Reconnect to search online and browse Discover recommendations. Use Home or Library
                 for offline cached tracks.
               </p>
             </div>
@@ -1578,8 +1549,8 @@ export const DiscoverPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={(e) => handleSearchAlbumTracks(e, album)}
-                            title={`Search YouTube for ${album.title}`}
-                            aria-label={`Search YouTube for ${album.title}`}
+                            title={`Search online for ${album.title}`}
+                            aria-label={`Search online for ${album.title}`}
                             className="absolute top-2 right-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/85 transition-opacity"
                           >
                             <Search className="w-3.5 h-3.5" />
@@ -1610,10 +1581,10 @@ export const DiscoverPage: React.FC = () => {
           ) : (
             <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-5 py-8 text-center space-y-2">
               <p className="text-sm font-semibold text-[var(--text-primary)]">
-                Explore tracks across your library and YouTube
+                Explore tracks across your library and online
               </p>
               <p className="text-xs text-[var(--text-secondary)]">
-                Search for any song, artist, album, or paste a YouTube link above to stream or save
+                Search for any song, artist, album, or paste a link above to stream or save
                 it to your library.
               </p>
             </div>
@@ -1726,7 +1697,7 @@ export const DiscoverPage: React.FC = () => {
                 <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
                 <p className="text-sm font-medium text-[var(--text-primary)]">Offline Mode</p>
                 <p className="text-xs text-[var(--text-secondary)]">
-                  Reconnect to search and stream from YouTube. Use Home or Library for offline
+                  Reconnect to search and stream online. Use Home or Library for offline
                   tracks.
                 </p>
               </div>
@@ -1737,8 +1708,8 @@ export const DiscoverPage: React.FC = () => {
                     <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
                     <span>
                       {isUrlInput
-                        ? 'Reading YouTube link...'
-                        : `Searching YouTube for "${trimmedQuery}"...`}
+                        ? 'Reading link...'
+                        : `Searching online for "${trimmedQuery}"...`}
                     </span>
                   </div>
                 )}
@@ -1924,7 +1895,7 @@ export const DiscoverPage: React.FC = () => {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <h3 className="text-sm font-bold text-[var(--text-primary)]">
-                        {playlistTitle ? `Playlist: ${playlistTitle}` : 'YouTube Link Preview'}
+                        {playlistTitle ? `Playlist: ${playlistTitle}` : 'Online Link Preview'}
                       </h3>
                       <div className="flex items-center gap-2">
                         <button
