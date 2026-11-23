@@ -189,11 +189,20 @@ export interface DiscoverAlbumItem {
   subtitle: string;
   recordType?: string;
   releaseDate?: string;
+  releaseYear?: string;
   trackCount?: number;
   duration: number;
   thumbnailUrl: string;
   fallbackThumbnailUrl: string;
   seedArtist: string | null;
+}
+
+export interface DiscoverSearchResponse {
+  query: string;
+  cached: boolean;
+  artists: DiscoverArtistItem[];
+  albums: DiscoverAlbumItem[];
+  tracks: DiscoverAlbumTrack[];
 }
 
 export interface PlayHistoryEntry {

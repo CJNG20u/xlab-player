@@ -60,11 +60,20 @@ export interface DiscoverAlbumItem {
   subtitle: string;
   recordType?: string;
   releaseDate?: string;
+  releaseYear?: string;
   trackCount?: number;
   duration: number;
   thumbnailUrl: string;
   fallbackThumbnailUrl: string;
   seedArtist: string | null;
+}
+
+export interface DiscoverSearchResponse {
+  query: string;
+  cached: boolean;
+  artists: DiscoverArtistItem[];
+  albums: DiscoverAlbumItem[];
+  tracks: DiscoverAlbumTrack[];
 }
 
 export interface DiscoverLastPlayed {
@@ -303,6 +312,31 @@ function pickHighResPicture(obj: Record<string, unknown> | undefined | null): st
     if (url) return url;
   }
   return '';
+}
+
+function pickSearchCover(obj: Record<string, unknown> | undefined | null): string {
+  if (!obj) return '';
+  for (const key of ['cover_big', 'cover_xl', 'cover_medium', 'cover']) {
+    const url = sanitizeCatalogImageUrl(obj[key]);
+    if (url) return url;
+  }
+  return '';
+}
+
+function pickSearchPicture(obj: Record<string, unknown> | undefined | null): string {
+  if (!obj) return '';
+  for (const key of ['picture_big', 'picture_xl', 'picture_medium', 'picture']) {
+    const url = sanitizeCatalogImageUrl(obj[key]);
+    if (url) return url;
+  }
+  return '';
+}
+
+function formatFanCountLabel(fans: number): string {
+  if (!fans || !Number.isFinite(fans) || fans <= 0) return 'Artist';
+  if (fans >= 1_000_000) return `${(fans / 1_000_000).toFixed(1)}M fans`;
+  if (fans >= 1_000) return `${(fans / 1_000).toFixed(fans >= 100_000 ? 0 : 1)}K fans`;
+  return `${Math.round(fans).toLocaleString()} fans`;
 }
 
 function normalizeKey(str: string): string {
@@ -1348,4 +1382,228 @@ export async function getCatalogArtistDetail(
     topTracks: attachCachedVideoIdsToTracks(data.topTracks),
     cached,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 4. Structured Discover Search (GET /api/discover/search?q=...)
+//    Queries Deezer artist, album, and track search APIs in parallel with
+//    in-memory TTL caching and single-flight deduplication.
+// ---------------------------------------------------------------------------
+
+const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const SEARCH_CACHE_MAX_ENTRIES = 150;
+
+const searchMemoryCache = new Map<
+  string,
+  {payload: Omit<DiscoverSearchResponse, 'cached'>; expiresAt: number}
+>();
+const inFlightSearchRequests = new Map<string, Promise<Omit<DiscoverSearchResponse, 'cached'>>>();
+
+function pruneSearchMemoryCache(now: number): void {
+  for (const [k, v] of searchMemoryCache.entries()) {
+    if (v.expiresAt <= now) searchMemoryCache.delete(k);
+  }
+  if (searchMemoryCache.size > SEARCH_CACHE_MAX_ENTRIES) {
+    const excess = searchMemoryCache.size - SEARCH_CACHE_MAX_ENTRIES;
+    let removed = 0;
+    for (const k of searchMemoryCache.keys()) {
+      searchMemoryCache.delete(k);
+      removed += 1;
+      if (removed >= excess) break;
+    }
+  }
+}
+
+export async function searchCatalog(rawQuery: string): Promise<DiscoverSearchResponse> {
+  const query = rawQuery.trim().slice(0, 120);
+  if (!query) {
+    return {
+      query: '',
+      cached: false,
+      artists: [],
+      albums: [],
+      tracks: [],
+    };
+  }
+
+  const cacheKey = normalizeKey(query) || query.toLowerCase();
+  const now = Date.now();
+  const cachedEntry = searchMemoryCache.get(cacheKey);
+  if (cachedEntry && cachedEntry.expiresAt > now) {
+    return {
+      ...cachedEntry.payload,
+      query,
+      tracks: attachCachedVideoIdsToTracks(cachedEntry.payload.tracks),
+      cached: true,
+    };
+  }
+  if (cachedEntry) {
+    searchMemoryCache.delete(cacheKey);
+  }
+
+  const existingInFlight = inFlightSearchRequests.get(cacheKey);
+  if (existingInFlight) {
+    const shared = await existingInFlight;
+    return {
+      ...shared,
+      query,
+      tracks: attachCachedVideoIdsToTracks(shared.tracks),
+      cached: false,
+    };
+  }
+
+  const encoded = encodeURIComponent(query);
+  const promise = (async (): Promise<Omit<DiscoverSearchResponse, 'cached'>> => {
+    const [artistRes, albumRes, trackRes] = await Promise.allSettled([
+      fetchDeezerJson<{data?: RawDeezerArtist[]}>(`/search/artist?q=${encoded}&limit=10`),
+      fetchDeezerJson<{data?: RawDeezerAlbum[]}>(`/search/album?q=${encoded}&limit=12`),
+      fetchDeezerJson<{data?: RawDeezerTrack[]}>(`/search/track?q=${encoded}&limit=10`),
+    ]);
+
+    const allRejected =
+      artistRes.status === 'rejected' &&
+      albumRes.status === 'rejected' &&
+      trackRes.status === 'rejected';
+    if (allRejected) {
+      const firstErr = artistRes.reason;
+      throw new Error(
+        firstErr instanceof Error ? firstErr.message : 'Could not reach music catalog search'
+      );
+    }
+
+    const rawArtists = artistRes.status === 'fulfilled' ? artistRes.value.data || [] : [];
+    const rawAlbums = albumRes.status === 'fulfilled' ? albumRes.value.data || [] : [];
+    const rawTracks = trackRes.status === 'fulfilled' ? trackRes.value.data || [] : [];
+
+    // 1. Structured Artists
+    const seenArtistIds = new Set<string>();
+    const artists: DiscoverArtistItem[] = [];
+    for (const a of rawArtists) {
+      if (!a?.id || !a.name?.trim()) continue;
+      const idStr = String(a.id);
+      const nameNorm = normalizeKey(a.name);
+      if (seenArtistIds.has(idStr) || (nameNorm && seenArtistIds.has(`n:${nameNorm}`))) continue;
+      seenArtistIds.add(idStr);
+      if (nameNorm) seenArtistIds.add(`n:${nameNorm}`);
+
+      const fans = Number(a.nb_fan) || 0;
+      const picture = pickSearchPicture(a as unknown as Record<string, unknown>);
+      artists.push({
+        id: `dz-artist-${idStr}`,
+        deezerArtistId: idStr,
+        name: a.name.trim(),
+        subtitle: formatFanCountLabel(fans),
+        fans: fans > 0 ? fans : undefined,
+        seedArtist: null,
+        thumbnailUrl: picture,
+        fallbackThumbnailUrl: picture,
+      });
+      if (artists.length >= 10) break;
+    }
+
+    // 2. Structured Albums
+    const seenAlbumKeys = new Set<string>();
+    const albums: DiscoverAlbumItem[] = [];
+    for (const alb of rawAlbums) {
+      if (!alb?.id || !alb.title?.trim()) continue;
+      const idStr = String(alb.id);
+      const artistName = alb.artist?.name?.trim() || 'Artist';
+      const titleKey = `${normalizeKey(artistName)}::${normalizeKey(alb.title)}`;
+      if (seenAlbumKeys.has(idStr) || seenAlbumKeys.has(titleKey)) continue;
+      seenAlbumKeys.add(idStr);
+      seenAlbumKeys.add(titleKey);
+
+      const cover = pickSearchCover(alb as unknown as Record<string, unknown>);
+      const recordType = formatRecordType(alb.record_type);
+      const releaseYear = extractReleaseYear(alb.release_date) || undefined;
+      const trackCount = Number(alb.nb_tracks) || undefined;
+      const subtitle = releaseYear
+        ? releaseYear
+        : trackCount
+          ? `${recordType} · ${trackCount} ${trackCount === 1 ? 'track' : 'tracks'}`
+          : recordType;
+
+      albums.push({
+        id: `dz-album-${idStr}`,
+        deezerAlbumId: idStr,
+        url: '',
+        title: alb.title.trim(),
+        artist: artistName,
+        artistId: alb.artist?.id ? String(alb.artist.id) : undefined,
+        subtitle,
+        recordType,
+        releaseDate: alb.release_date || undefined,
+        releaseYear,
+        trackCount,
+        duration: Number(alb.duration) || 0,
+        thumbnailUrl: cover,
+        fallbackThumbnailUrl: cover,
+        seedArtist: null,
+      });
+      if (albums.length >= 12) break;
+    }
+
+    // 3. Structured Songs
+    const seenTrackKeys = new Set<string>();
+    const tracks: DiscoverAlbumTrack[] = [];
+    for (const t of rawTracks) {
+      if (!t?.id || !t.title?.trim()) continue;
+      const idStr = String(t.id);
+      const artistName = t.artist?.name?.trim() || 'Artist';
+      const titleKey = `${normalizeKey(artistName)}::${normalizeKey(t.title)}`;
+      if (seenTrackKeys.has(idStr) || seenTrackKeys.has(titleKey)) continue;
+      seenTrackKeys.add(idStr);
+      seenTrackKeys.add(titleKey);
+
+      const coverUrl =
+        pickSearchCover(t.album as unknown as Record<string, unknown>) ||
+        pickSearchPicture(t.artist as unknown as Record<string, unknown>);
+
+      tracks.push({
+        id: `dz-track-${idStr}`,
+        deezerTrackId: idStr,
+        trackNumber: tracks.length + 1,
+        diskNumber: Number(t.disk_number) || 1,
+        title: t.title.trim(),
+        artist: artistName,
+        artistId: t.artist?.id ? String(t.artist.id) : undefined,
+        album: t.album?.title?.trim() || 'Single',
+        albumId: t.album?.id ? String(t.album.id) : '',
+        duration: Number(t.duration) || 0,
+        explicit: Boolean(t.explicit_lyrics),
+        coverUrl,
+      });
+      if (tracks.length >= 10) break;
+    }
+
+    const payload: Omit<DiscoverSearchResponse, 'cached'> = {
+      query,
+      artists,
+      albums,
+      tracks,
+    };
+
+    const writeTime = Date.now();
+    pruneSearchMemoryCache(writeTime);
+    searchMemoryCache.set(cacheKey, {
+      payload,
+      expiresAt: writeTime + SEARCH_CACHE_TTL_MS,
+    });
+
+    return payload;
+  })();
+
+  inFlightSearchRequests.set(cacheKey, promise);
+  try {
+    const payload = await promise;
+    return {
+      ...payload,
+      tracks: attachCachedVideoIdsToTracks(payload.tracks),
+      cached: false,
+    };
+  } finally {
+    if (inFlightSearchRequests.get(cacheKey) === promise) {
+      inFlightSearchRequests.delete(cacheKey);
+    }
+  }
 }

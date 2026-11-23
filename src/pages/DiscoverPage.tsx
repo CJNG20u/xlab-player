@@ -9,10 +9,10 @@ import {
   Disc3,
   Download,
   Link2,
+  ListPlus,
   Loader2,
   Pause,
   Play,
-  Plus,
   RefreshCw,
   Search,
   Trash2,
@@ -22,7 +22,11 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AlbumArt} from '../components/AlbumArt';
-import {CatalogDetailView, type CatalogRoute} from '../components/CatalogDetailView';
+import {
+  CatalogDetailView,
+  catalogTrackToPlayerTrack,
+  type CatalogRoute,
+} from '../components/CatalogDetailView';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
@@ -36,9 +40,11 @@ import {
 } from '../lib/api';
 import type {
   DiscoverAlbumItem,
+  DiscoverAlbumTrack,
   DiscoverArtistItem,
   DiscoverFeedResponse,
   DiscoverNewReleaseItem,
+  DiscoverSearchResponse,
   DownloadJob,
   DownloadQuality,
   MetadataPreviewItem,
@@ -453,6 +459,156 @@ const DiscoverSkeletonShelves: React.FC = () => (
   </div>
 );
 
+interface DiscoverArtistCardProps {
+  artist: DiscoverArtistItem;
+  onSelect: (artist: DiscoverArtistItem) => void;
+}
+
+const DiscoverArtistCard: React.FC<DiscoverArtistCardProps> = ({artist, onSelect}) => (
+  <button
+    type="button"
+    onClick={() => onSelect(artist)}
+    className="group w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+  >
+    <div className="relative aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
+      <DiscoverArtwork
+        directUrl={artist.thumbnailUrl}
+        videoId={artist.videoId}
+        fallbackUrl={artist.fallbackThumbnailUrl}
+        alt={artist.name}
+        shape="circle"
+        labelForFallback={artist.name}
+        className="transition-transform duration-200 group-hover:scale-[1.04]"
+      />
+    </div>
+
+    <div className="mt-2.5 min-w-0 space-y-0.5">
+      <p className="text-sm font-semibold text-[var(--text-primary)] truncate">{artist.name}</p>
+      <p className="text-[11px] text-[var(--text-secondary)] truncate">{artist.subtitle}</p>
+    </div>
+  </button>
+);
+
+interface DiscoverAlbumCardProps {
+  album: DiscoverAlbumItem;
+  isCurrent: boolean;
+  onOpen: (album: DiscoverAlbumItem) => void;
+  onQuickSearch?: (e: React.MouseEvent, album: DiscoverAlbumItem) => void;
+}
+
+const DiscoverAlbumCard: React.FC<DiscoverAlbumCardProps> = ({
+  album,
+  isCurrent,
+  onOpen,
+  onQuickSearch,
+}) => (
+  <div
+    role="button"
+    tabIndex={0}
+    onClick={() => onOpen(album)}
+    onKeyDown={(e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onOpen(album);
+      }
+    }}
+    className="group w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+  >
+    <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
+      <DiscoverArtwork
+        directUrl={album.thumbnailUrl}
+        videoId={album.videoId}
+        fallbackUrl={album.fallbackThumbnailUrl}
+        alt={album.title}
+        shape="square"
+        labelForFallback={album.title}
+        className="transition-transform duration-200 group-hover:scale-[1.03]"
+      />
+      {onQuickSearch && (
+        <button
+          type="button"
+          onClick={(e) => onQuickSearch(e, album)}
+          title={`Search online for ${album.title}`}
+          aria-label={`Search online for ${album.title}`}
+          className="absolute top-2 right-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/85 transition-opacity"
+        >
+          <Search className="w-3.5 h-3.5" />
+        </button>
+      )}
+    </div>
+
+    <div className="mt-2.5 min-w-0 space-y-0.5">
+      <p
+        className={`text-sm font-semibold truncate ${
+          isCurrent ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
+        }`}
+      >
+        {album.title}
+      </p>
+      <p className="text-xs font-medium text-[var(--text-secondary)] truncate">{album.artist}</p>
+      {(album.releaseYear || album.subtitle) && (
+        <p className="text-[11px] text-[var(--text-muted)] truncate">
+          {album.releaseYear || album.subtitle}
+        </p>
+      )}
+    </div>
+  </div>
+);
+
+const DiscoverSearchSkeleton: React.FC = () => (
+  <div className="space-y-8" aria-label="Searching catalog">
+    {/* Artists skeleton */}
+    <div className="space-y-3">
+      <div className="h-6 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
+      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
+        {Array.from({length: 8}).map((_, i) => (
+          <div
+            key={i}
+            className="w-[128px] sm:w-[144px] lg:w-auto shrink-0 space-y-2.5 p-2 flex flex-col items-center"
+          >
+            <div className="aspect-square w-full rounded-full bg-[var(--bg-elevated)] animate-pulse" />
+            <div className="h-3.5 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
+            <div className="h-3 w-1/2 rounded bg-[var(--bg-secondary)] animate-pulse" />
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {/* Albums skeleton */}
+    <div className="space-y-3">
+      <div className="h-6 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
+      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+        {Array.from({length: 8}).map((_, i) => (
+          <div key={i} className="w-[144px] sm:w-[164px] lg:w-auto shrink-0 space-y-2.5 p-2">
+            <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
+            <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
+            <div className="h-3 w-2/3 rounded bg-[var(--bg-secondary)] animate-pulse" />
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {/* Songs skeleton */}
+    <div className="space-y-3">
+      <div className="h-6 w-20 rounded bg-[var(--bg-elevated)] animate-pulse" />
+      <div className="space-y-2">
+        {Array.from({length: 5}).map((_, i) => (
+          <div
+            key={i}
+            className="flex items-center gap-3 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-2.5"
+          >
+            <div className="w-12 h-12 rounded-lg bg-[var(--bg-elevated)] animate-pulse shrink-0" />
+            <div className="flex-1 space-y-2">
+              <div className="h-3.5 w-2/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3 w-1/4 rounded bg-[var(--bg-elevated)]/70 animate-pulse" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
 export const DiscoverPage: React.FC = () => {
   const {user, isOfflineMode} = useAuth();
   const {
@@ -460,6 +616,9 @@ export const DiscoverPage: React.FC = () => {
     lastPlayed,
     playTrackById,
     playTrack,
+    addToQueue,
+    saveYouTubeTrackToLibrary,
+    getYouTubeSaveStatus,
     bumpLibraryRefresh,
     isPlaying,
     isBuffering,
@@ -503,11 +662,9 @@ export const DiscoverPage: React.FC = () => {
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
 
-  // Automatic YouTube (yt-dlp) search results state
-  const [searchResults, setSearchResults] = useState<MetadataPreviewItem[]>([]);
+  // Structured Deezer catalog search results state (Artists, Albums, Songs)
+  const [structuredSearch, setStructuredSearch] = useState<DiscoverSearchResponse | null>(null);
   const [lastSearchTerm, setLastSearchTerm] = useState<string | null>(null);
-  const [quickQueueingId, setQuickQueueingId] = useState<string | null>(null);
-  const [quickQueuedIds, setQuickQueuedIds] = useState<Set<string>>(new Set());
 
   // Pasted-URL single-track / playlist metadata preview state
   const [previewItems, setPreviewItems] = useState<EditablePreviewItem[]>([]);
@@ -637,14 +794,32 @@ export const DiscoverPage: React.FC = () => {
     );
   }, [discoverFeed, offline]);
 
-  // Background prefetch the top 3 search results as soon as they render so tapping plays near-instantly
+  // Background prefetch the top 3 search song results (or link preview items) so tapping plays near-instantly
   const prefetchedSearchKeyRef = useRef<string>('');
   useEffect(() => {
     if (offline) return;
-    const candidates = searchResults.length > 0 ? searchResults : previewItems;
-    if (candidates.length === 0) return;
+    if (structuredSearch && structuredSearch.tracks.length > 0) {
+      const topThree = structuredSearch.tracks.slice(0, 3);
+      const itemsToPrefetch = topThree
+        .map((track) => ({
+          videoId: track.videoId,
+          artist: track.artist,
+          title: track.title,
+          duration: track.duration,
+        }))
+        .filter((item) => Boolean(item.videoId || item.title));
+      if (itemsToPrefetch.length === 0) return;
 
-    const topThree = candidates.slice(0, 3);
+      const key = itemsToPrefetch.map((i) => i.videoId || `${i.artist}:${i.title}`).join('|');
+      if (prefetchedSearchKeyRef.current === key) return;
+      prefetchedSearchKeyRef.current = key;
+
+      prefetchYouTubeStreams(itemsToPrefetch);
+      return;
+    }
+
+    if (previewItems.length === 0) return;
+    const topThree = previewItems.slice(0, 3);
     const itemsToPrefetch = topThree
       .map((item) => ({
         videoId: extractYouTubeVideoIdFromItem(item),
@@ -660,18 +835,7 @@ export const DiscoverPage: React.FC = () => {
     prefetchedSearchKeyRef.current = key;
 
     prefetchYouTubeStreams(itemsToPrefetch);
-  }, [offline, previewItems, searchResults]);
-
-  // Map active/recent download jobs by URL so YouTube result rows display live progress inline
-  const jobByUrl = useMemo(() => {
-    const map = new Map<string, DownloadJob>();
-    for (const job of jobs) {
-      if (!map.has(job.url)) {
-        map.set(job.url, job);
-      }
-    }
-    return map;
-  }, [jobs]);
+  }, [offline, previewItems, structuredSearch]);
 
   const loadInfo = useCallback(async () => {
     if (offline) return;
@@ -872,7 +1036,7 @@ export const DiscoverPage: React.FC = () => {
     searchRequestIdRef.current += 1;
   }, []);
 
-  const executeYouTubeSearch = useCallback(
+  const executeDiscoverSearch = useCallback(
     async (rawTerm: string) => {
       const term = rawTerm.trim();
       if (!term) return;
@@ -894,47 +1058,42 @@ export const DiscoverPage: React.FC = () => {
       searchAbortRef.current = controller;
       inFlightTermRef.current = term;
       const requestId = searchRequestIdRef.current;
+      const isDirectUrl = /^https?:\/\//i.test(term);
 
       setFetchingMeta(true);
       setMetaError(null);
-      setPreviewItems([]);
-      setIsPlaylistPreview(false);
-      setPlaylistTitle(null);
-      setQuickQueuedIds(new Set());
+      if (isDirectUrl) {
+        setStructuredSearch(null);
+      } else {
+        setPreviewItems([]);
+        setIsPlaylistPreview(false);
+        setPlaylistTitle(null);
+      }
 
       try {
-        const res = await apiFetch<{
-          mode?: 'search' | 'single' | 'playlist';
-          isSearch?: boolean;
-          isPlaylist: boolean;
-          playlistTitle: string | null;
-          items: MetadataPreviewItem[];
-          musicDir: string;
-        }>('/api/download/metadata', {
-          method: 'POST',
-          signal: controller.signal,
-          body: JSON.stringify({query: term, source: 'youtube'}),
-        });
+        if (isDirectUrl) {
+          const res = await apiFetch<{
+            mode?: 'search' | 'single' | 'playlist';
+            isSearch?: boolean;
+            isPlaylist: boolean;
+            playlistTitle: string | null;
+            items: MetadataPreviewItem[];
+            musicDir: string;
+          }>('/api/download/metadata', {
+            method: 'POST',
+            signal: controller.signal,
+            body: JSON.stringify({query: term, source: 'youtube'}),
+          });
 
-        if (controller.signal.aborted || searchRequestIdRef.current !== requestId) {
-          return;
-        }
-
-        if (res.musicDir) {
-          setPublicInfo((prev) => (prev ? {...prev, musicDir: res.musicDir} : prev));
-        }
-
-        const isSearchMode =
-          res.mode === 'search' || res.isSearch || !/^https?:\/\//i.test(term);
-
-        if (isSearchMode) {
-          setSearchResults(res.items || []);
-          setLastSearchTerm(term);
-          if (!res.items || res.items.length === 0) {
-            setMetaError(`No online results found for "${term}". Try a different query.`);
+          if (controller.signal.aborted || searchRequestIdRef.current !== requestId) {
+            return;
           }
-        } else {
-          setSearchResults([]);
+
+          if (res.musicDir) {
+            setPublicInfo((prev) => (prev ? {...prev, musicDir: res.musicDir} : prev));
+          }
+
+          setStructuredSearch(null);
           setLastSearchTerm(term);
           setIsPlaylistPreview(Boolean(res.isPlaylist));
           setPlaylistTitle(res.playlistTitle);
@@ -946,6 +1105,26 @@ export const DiscoverPage: React.FC = () => {
               quality: DEFAULT_DOWNLOAD_QUALITY,
             }))
           );
+          if (!res.items || res.items.length === 0) {
+            setMetaError('Could not read any playable tracks from that link.');
+          }
+        } else {
+          const res = await apiFetch<DiscoverSearchResponse>(
+            `/api/discover/search?q=${encodeURIComponent(term)}`,
+            {signal: controller.signal}
+          );
+
+          if (controller.signal.aborted || searchRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          setStructuredSearch(res);
+          setLastSearchTerm(term);
+          const totalCount =
+            (res.artists?.length || 0) + (res.albums?.length || 0) + (res.tracks?.length || 0);
+          if (totalCount === 0) {
+            setMetaError(`No artists, albums, or songs found for "${term}". Try another search.`);
+          }
         }
       } catch (err) {
         if (
@@ -955,8 +1134,12 @@ export const DiscoverPage: React.FC = () => {
         ) {
           return;
         }
-        setSearchResults([]);
-        setMetaError(err instanceof Error ? err.message : 'Could not fetch online results');
+        if (isDirectUrl) {
+          setPreviewItems([]);
+        } else {
+          setStructuredSearch(null);
+        }
+        setMetaError(err instanceof Error ? err.message : 'Could not fetch search results');
       } finally {
         if (searchAbortRef.current === controller) {
           searchAbortRef.current = null;
@@ -996,7 +1179,7 @@ export const DiscoverPage: React.FC = () => {
 
     const timer = setTimeout(() => {
       searchDebounceRef.current = null;
-      void executeYouTubeSearch(trimmedQuery);
+      void executeDiscoverSearch(trimmedQuery);
     }, SEARCH_DEBOUNCE_MS);
     searchDebounceRef.current = timer;
 
@@ -1006,7 +1189,7 @@ export const DiscoverPage: React.FC = () => {
         searchDebounceRef.current = null;
       }
     };
-  }, [cancelInFlightSearch, executeYouTubeSearch, offline, trimmedQuery]);
+  }, [cancelInFlightSearch, executeDiscoverSearch, offline, trimmedQuery]);
 
   // Abort any in-flight search request on unmount
   useEffect(() => {
@@ -1019,7 +1202,7 @@ export const DiscoverPage: React.FC = () => {
     e.preventDefault();
     if (!trimmedQuery) return;
     skipNextDebounceTermRef.current = trimmedQuery;
-    void executeYouTubeSearch(trimmedQuery);
+    void executeDiscoverSearch(trimmedQuery);
   };
 
   const handleSelectArtistToDiscover = useCallback(
@@ -1034,10 +1217,11 @@ export const DiscoverPage: React.FC = () => {
       }
       const nextTerm = artist.name.trim();
       skipNextDebounceTermRef.current = nextTerm;
+      setCatalogStack([]);
       setQuery(nextTerm);
-      void executeYouTubeSearch(nextTerm);
+      void executeDiscoverSearch(nextTerm);
     },
-    [executeYouTubeSearch, handleOpenArtistView]
+    [executeDiscoverSearch, handleOpenArtistView]
   );
 
   const handleSearchAlbumTracks = useCallback(
@@ -1049,10 +1233,11 @@ export const DiscoverPage: React.FC = () => {
           : `${album.artist} ${album.title}`
       ).trim();
       skipNextDebounceTermRef.current = term;
+      setCatalogStack([]);
       setQuery(term);
-      void executeYouTubeSearch(term);
+      void executeDiscoverSearch(term);
     },
-    [executeYouTubeSearch]
+    [executeDiscoverSearch]
   );
 
   const handleQueryChange = (nextValue: string) => {
@@ -1061,8 +1246,9 @@ export const DiscoverPage: React.FC = () => {
       cancelInFlightSearch();
       skipNextDebounceTermRef.current = null;
       prefetchedSearchKeyRef.current = '';
+      setCatalogStack([]);
       setFetchingMeta(false);
-      setSearchResults([]);
+      setStructuredSearch(null);
       setLastSearchTerm(null);
       setPreviewItems([]);
       setIsPlaylistPreview(false);
@@ -1071,51 +1257,71 @@ export const DiscoverPage: React.FC = () => {
     }
   };
 
-  const handleTapSearchResult = useCallback(
-    (item: MetadataPreviewItem) => {
-      const clickedTrack = metadataItemToYouTubeTrack(item);
-      if (currentTrack?.id === clickedTrack.id) {
+  const isCatalogTrackActive = useCallback(
+    (item: DiscoverAlbumTrack) =>
+      Boolean(
+        currentTrack &&
+          ((item.videoId && currentTrack.id === `yt-${item.videoId}`) ||
+            currentTrack.id === item.id ||
+            (currentTrack.deezerTrackId && currentTrack.deezerTrackId === item.deezerTrackId))
+      ),
+    [currentTrack]
+  );
+
+  const handlePlaySearchTrack = useCallback(
+    (clicked: DiscoverAlbumTrack, list: DiscoverAlbumTrack[]) => {
+      const clickedIdx = Math.max(
+        0,
+        list.findIndex(
+          (entry) => entry.id === clicked.id || entry.deezerTrackId === clicked.deezerTrackId
+        )
+      );
+      const prefetchSlice = list.slice(clickedIdx, clickedIdx + 3);
+      if (prefetchSlice.length > 0) {
+        prefetchYouTubeStreams(
+          prefetchSlice.map((t) => ({
+            videoId: t.videoId,
+            artist: t.artist,
+            title: t.title,
+            duration: t.duration,
+          }))
+        );
+      }
+
+      const target = catalogTrackToPlayerTrack(clicked);
+      if (isCatalogTrackActive(clicked)) {
         togglePlay();
         return;
       }
-      const listToQueue = searchResults.length > 0 ? searchResults : [item];
-      const ytQueue = listToQueue.map(metadataItemToYouTubeTrack);
-      const matched = ytQueue.find((t) => t.id === clickedTrack.id) || clickedTrack;
-      playTrack(matched, ytQueue);
+      const queue = list.map(catalogTrackToPlayerTrack);
+      const matched =
+        queue.find(
+          (q) => q.id === target.id || q.deezerTrackId === clicked.deezerTrackId
+        ) || target;
+      playTrack(matched, queue);
     },
-    [currentTrack?.id, playTrack, searchResults, togglePlay]
+    [isCatalogTrackActive, playTrack, togglePlay]
   );
 
-  const handleQuickDownloadResult = async (e: React.MouseEvent, item: MetadataPreviewItem) => {
-    e.stopPropagation();
-    if (!canDownload || quickQueueingId === item.id) return;
-    setQuickQueueingId(item.id);
-    setMetaError(null);
-    try {
-      await apiFetch('/api/download/start', {
-        method: 'POST',
-        body: JSON.stringify({
-          items: [
-            {
-              url: item.url,
-              title: item.title,
-              artist: item.artist,
-              album: item.album || 'Singles',
-              format: DEFAULT_DOWNLOAD_FORMAT,
-              quality: DEFAULT_DOWNLOAD_QUALITY,
-              thumbnail_url: item.thumbnail_url,
-            },
-          ],
-        }),
-      });
-      setQuickQueuedIds((prev) => new Set(prev).add(item.id));
-      flashToast(`Queued "${item.title}" for download`);
-    } catch (err) {
-      setMetaError(err instanceof Error ? err.message : 'Failed to enqueue download');
-    } finally {
-      setQuickQueueingId(null);
-    }
-  };
+  const handleQueueSearchTrack = useCallback(
+    (e: React.MouseEvent, item: DiscoverAlbumTrack) => {
+      e.stopPropagation();
+      addToQueue(catalogTrackToPlayerTrack(item));
+      flashToast(`Added "${item.title}" to queue`);
+    },
+    [addToQueue, flashToast]
+  );
+
+  const handleDownloadSearchTrack = useCallback(
+    async (e: React.MouseEvent, item: DiscoverAlbumTrack) => {
+      e.stopPropagation();
+      if (!canDownload) return;
+      const trackObj = catalogTrackToPlayerTrack(item);
+      const res = await saveYouTubeTrackToLibrary(trackObj, 'm4a');
+      flashToast(res.message);
+    },
+    [canDownload, flashToast, saveYouTubeTrackToLibrary]
+  );
 
   const updatePreviewItem = (id: string, patch: Partial<EditablePreviewItem>) => {
     setPreviewItems((prev) => prev.map((item) => (item.id === id ? {...item, ...patch} : item)));
@@ -1146,7 +1352,7 @@ export const DiscoverPage: React.FC = () => {
       setPreviewItems([]);
       setIsPlaylistPreview(false);
       setPlaylistTitle(null);
-      if (searchResults.length === 0) {
+      if (!structuredSearch) {
         setQuery('');
       }
       flashToast(
@@ -1184,7 +1390,15 @@ export const DiscoverPage: React.FC = () => {
         discoverFeed.albumsForYou.length > 0)
   );
 
-  const isCatalogDetailOpen = Boolean(isDiscoverView && activeCatalogRoute && !offline);
+  const hasStructuredSearchResults = Boolean(
+    structuredSearch &&
+      (structuredSearch.artists.length > 0 ||
+        structuredSearch.albums.length > 0 ||
+        structuredSearch.tracks.length > 0)
+  );
+
+  // Open Artist/Album detail views from both Discover home shelves AND Search Results
+  const isCatalogDetailOpen = Boolean(activeCatalogRoute && !offline);
 
   useEffect(() => {
     if (isCatalogDetailOpen) {
@@ -1332,19 +1546,21 @@ export const DiscoverPage: React.FC = () => {
         )}
 
       {/* =====================================================================
-          MODE A: PERSONALIZED DISCOVER SHELVES OR INSTANT ALBUM/ARTIST VIEW
+          DETAIL VIEW: INSTANT ALBUM / ARTIST PAGE (FROM HOME OR SEARCH)
          ===================================================================== */}
-      {isDiscoverView ? (
-        activeCatalogRoute && !offline ? (
-          <CatalogDetailView
-            route={activeCatalogRoute}
-            canDownload={canDownload}
-            onBack={handlePopCatalogView}
-            onOpenAlbum={handleOpenAlbumView}
-            onOpenArtist={handleOpenArtistView}
-            onFlashToast={flashToast}
-          />
-        ) : (
+      {isCatalogDetailOpen && activeCatalogRoute ? (
+        <CatalogDetailView
+          route={activeCatalogRoute}
+          canDownload={canDownload}
+          onBack={handlePopCatalogView}
+          onOpenAlbum={handleOpenAlbumView}
+          onOpenArtist={handleOpenArtistView}
+          onFlashToast={flashToast}
+        />
+      ) : isDiscoverView ? (
+        /* =====================================================================
+           MODE A: PERSONALIZED DISCOVER SHELVES
+           ===================================================================== */
         <div className="space-y-8">
           {offline ? (
             <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-2">
@@ -1475,33 +1691,11 @@ export const DiscoverPage: React.FC = () => {
               {discoverFeed.artistsToDiscover.length > 0 && (
                 <ResponsiveDiscoverShelf title="Artists to discover" variant="circle">
                   {discoverFeed.artistsToDiscover.map((artist) => (
-                    <button
+                    <DiscoverArtistCard
                       key={artist.id}
-                      type="button"
-                      onClick={() => handleSelectArtistToDiscover(artist)}
-                      className="group w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                    >
-                      <div className="relative aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
-                        <DiscoverArtwork
-                          directUrl={artist.thumbnailUrl}
-                          videoId={artist.videoId}
-                          fallbackUrl={artist.fallbackThumbnailUrl}
-                          alt={artist.name}
-                          shape="circle"
-                          labelForFallback={artist.name}
-                          className="transition-transform duration-200 group-hover:scale-[1.04]"
-                        />
-                      </div>
-
-                      <div className="mt-2.5 min-w-0 space-y-0.5">
-                        <p className="text-sm font-semibold text-[var(--text-primary)] truncate">
-                          {artist.name}
-                        </p>
-                        <p className="text-[11px] text-[var(--text-secondary)] truncate">
-                          {artist.subtitle}
-                        </p>
-                      </div>
-                    </button>
+                      artist={artist}
+                      onSelect={handleSelectArtistToDiscover}
+                    />
                   ))}
                 </ResponsiveDiscoverShelf>
               )}
@@ -1523,56 +1717,13 @@ export const DiscoverPage: React.FC = () => {
                     );
 
                     return (
-                      <div
+                      <DiscoverAlbumCard
                         key={albumKey}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => handleOpenDiscoverAlbum(album)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            handleOpenDiscoverAlbum(album);
-                          }
-                        }}
-                        className="group w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                      >
-                        <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
-                          <DiscoverArtwork
-                            directUrl={album.thumbnailUrl}
-                            videoId={album.videoId}
-                            fallbackUrl={album.fallbackThumbnailUrl}
-                            alt={album.title}
-                            shape="square"
-                            labelForFallback={album.title}
-                            className="transition-transform duration-200 group-hover:scale-[1.03]"
-                          />
-                          <button
-                            type="button"
-                            onClick={(e) => handleSearchAlbumTracks(e, album)}
-                            title={`Search online for ${album.title}`}
-                            aria-label={`Search online for ${album.title}`}
-                            className="absolute top-2 right-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/85 transition-opacity"
-                          >
-                            <Search className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-
-                        <div className="mt-2.5 min-w-0 space-y-0.5">
-                          <p
-                            className={`text-sm font-semibold truncate ${
-                              isCurrent ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
-                            }`}
-                          >
-                            {album.title}
-                          </p>
-                          <p className="text-xs font-medium text-[var(--text-secondary)] truncate">
-                            {album.artist}
-                          </p>
-                          <p className="text-[11px] text-[var(--text-muted)] truncate">
-                            {album.subtitle}
-                          </p>
-                        </div>
-                      </div>
+                        album={album}
+                        isCurrent={isCurrent}
+                        onOpen={handleOpenDiscoverAlbum}
+                        onQuickSearch={handleSearchAlbumTracks}
+                      />
                     );
                   })}
                 </ResponsiveDiscoverShelf>
@@ -1679,19 +1830,18 @@ export const DiscoverPage: React.FC = () => {
             </section>
           )}
         </div>
-        )
       ) : (
         /* =====================================================================
-           MODE B: AUTOMATIC ONLINE YOUTUBE SEARCH & INSTANT PLAY
+           MODE B: STRUCTURED DISCOVER SEARCH (ARTISTS, ALBUMS, SONGS) & LINK PREVIEW
            ===================================================================== */
-        <div className="space-y-5">
+        <div className="space-y-6">
           {metaError && (
             <div className="rounded-lg bg-[var(--danger-bg)] border border-[var(--danger-border)] px-4 py-3 text-sm text-[var(--danger-text)]">
               {metaError}
             </div>
           )}
 
-          <section className="space-y-3">
+          <section className="space-y-6">
             {offline ? (
               <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-2">
                 <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
@@ -1703,187 +1853,210 @@ export const DiscoverPage: React.FC = () => {
               </div>
             ) : (
               <>
-                {fetchingMeta && searchResults.length === 0 && previewItems.length === 0 && (
-                  <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 flex items-center justify-center gap-3 text-sm text-[var(--text-secondary)]">
-                    <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
-                    <span>
-                      {isUrlInput
-                        ? 'Reading link...'
-                        : `Searching online for "${trimmedQuery}"...`}
-                    </span>
-                  </div>
+                {fetchingMeta && !hasStructuredSearchResults && previewItems.length === 0 && (
+                  isUrlInput ? (
+                    <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 flex items-center justify-center gap-3 text-sm text-[var(--text-secondary)]">
+                      <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
+                      <span>Reading link...</span>
+                    </div>
+                  ) : (
+                    <DiscoverSearchSkeleton />
+                  )
                 )}
 
-                {searchResults.length > 0 && (
-                  <div className="space-y-2.5">
-                    {lastSearchTerm && (
-                      <div className="flex items-center justify-between gap-2 px-0.5">
-                        <p className="text-xs text-[var(--text-muted)] truncate">
-                          Results for &ldquo;{lastSearchTerm}&rdquo;
-                        </p>
-                        {fetchingMeta && (
-                          <span className="inline-flex items-center gap-1.5 text-xs text-[var(--text-secondary)] shrink-0">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
-                            <span>Updating...</span>
-                          </span>
-                        )}
+                {hasStructuredSearchResults && structuredSearch && (
+                  <div
+                    className={`space-y-8 transition-opacity duration-150 ${
+                      fetchingMeta ? 'opacity-65' : 'opacity-100'
+                    }`}
+                  >
+                    {lastSearchTerm && fetchingMeta && (
+                      <div className="flex items-center justify-end gap-1.5 text-xs text-[var(--text-secondary)]">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                        <span>Updating results...</span>
                       </div>
                     )}
 
-                    <div className={`space-y-2 transition-opacity duration-150 ${fetchingMeta ? 'opacity-65' : 'opacity-100'}`}>
-                      {searchResults.map((item) => {
-                        const videoId = extractYouTubeVideoIdFromItem(item);
-                        const ytTrackId = `yt-${videoId}`;
-                        const isCurrentStream = currentTrack?.id === ytTrackId;
-                        const isStreamPlaying = isCurrentStream && isPlaying && !isBuffering;
-                        const isStreamBuffering = isCurrentStream && isBuffering;
-                        const isQuickQueueing = quickQueueingId === item.id;
-                        const matchingJob = jobByUrl.get(item.url);
-                        const isJobActive =
-                          matchingJob?.status === 'queued' ||
-                          matchingJob?.status === 'downloading' ||
-                          matchingJob?.status === 'processing';
-                        const isJobComplete = matchingJob?.status === 'completed';
-                        const isQuickQueued =
-                          quickQueuedIds.has(item.id) || isJobActive || isJobComplete;
+                    {/* Section 1: Artists */}
+                    {structuredSearch.artists.length > 0 && (
+                      <ResponsiveDiscoverShelf title="Artists" variant="circle">
+                        {structuredSearch.artists.map((artist) => (
+                          <DiscoverArtistCard
+                            key={artist.id}
+                            artist={artist}
+                            onSelect={handleSelectArtistToDiscover}
+                          />
+                        ))}
+                      </ResponsiveDiscoverShelf>
+                    )}
 
-                        const subLine =
-                          item.channel &&
-                          item.channel.toLowerCase() !== item.artist.toLowerCase()
-                            ? `${item.artist} · ${item.channel}`
-                            : item.channel || item.artist;
+                    {/* Section 2: Albums */}
+                    {structuredSearch.albums.length > 0 && (
+                      <ResponsiveDiscoverShelf title="Albums" variant="square">
+                        {structuredSearch.albums.map((album) => {
+                          const albumKey =
+                            album.id ||
+                            album.deezerAlbumId ||
+                            `${album.artist}-${album.title}`;
+                          const isCurrent = Boolean(
+                            currentTrack &&
+                              album.deezerAlbumId &&
+                              currentTrack.deezerAlbumId === album.deezerAlbumId
+                          );
+                          return (
+                            <DiscoverAlbumCard
+                              key={albumKey}
+                              album={album}
+                              isCurrent={isCurrent}
+                              onOpen={handleOpenDiscoverAlbum}
+                            />
+                          );
+                        })}
+                      </ResponsiveDiscoverShelf>
+                    )}
 
-                        return (
-                          <div
-                            key={item.id}
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => handleTapSearchResult(item)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                handleTapSearchResult(item);
-                              }
-                            }}
-                            className={`group rounded-lg p-2.5 border transition-colors cursor-pointer space-y-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
-                              isCurrentStream
-                                ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
-                                : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="w-12 h-12 sm:w-14 sm:h-14 rounded overflow-hidden shrink-0">
-                                <DiscoverArtwork
-                                  videoId={videoId}
-                                  fallbackUrl={item.thumbnail_url}
-                                  alt={item.title}
-                                  shape="square"
-                                  labelForFallback={item.title}
-                                />
-                              </div>
+                    {/* Section 3: Songs */}
+                    {structuredSearch.tracks.length > 0 && (
+                      <section className="space-y-3">
+                        <h2 className="font-display text-lg sm:text-xl font-bold tracking-tight text-[var(--text-primary)]">
+                          Songs
+                        </h2>
 
-                              <div className="min-w-0 flex-1">
-                                <p
-                                  className={`text-sm font-semibold truncate ${
-                                    isCurrentStream
-                                      ? 'text-[var(--accent)]'
-                                      : 'text-[var(--text-primary)]'
-                                  }`}
-                                >
-                                  {item.title}
-                                </p>
-                                <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-                                  {subLine}
-                                </p>
-                              </div>
+                        <div className="space-y-2">
+                          {structuredSearch.tracks.map((track) => {
+                            const isCurrentStream = isCatalogTrackActive(track);
+                            const isStreamPlaying = isCurrentStream && isPlaying && !isBuffering;
+                            const isStreamBuffering = isCurrentStream && isBuffering;
+                            const saveKey = track.videoId ? `yt-${track.videoId}` : track.id;
+                            const saveStatus = getYouTubeSaveStatus(saveKey);
 
-                              <div className="flex items-center gap-2 shrink-0">
-                                <span className="hidden sm:inline font-mono text-xs tabular-nums text-[var(--text-muted)] w-11 text-right">
-                                  {item.duration > 0 ? formatDuration(item.duration) : '--:--'}
-                                </span>
-
-                                <button
-                                  type="button"
-                                  onClick={(e) => handlePlayYouTubeItem(e, item, searchResults)}
-                                  title={isStreamPlaying ? 'Pause track' : 'Play in player'}
-                                  aria-label={
-                                    isStreamPlaying
-                                      ? `Pause ${item.title}`
-                                      : `Play ${item.title}`
+                            return (
+                              <div
+                                key={track.id}
+                                role="button"
+                                tabIndex={0}
+                                onClick={() =>
+                                  handlePlaySearchTrack(track, structuredSearch.tracks)
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    handlePlaySearchTrack(track, structuredSearch.tracks);
                                   }
-                                  className={`flex h-10 w-10 items-center justify-center rounded-full border transition-all ${
-                                    isCurrentStream
-                                      ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
-                                      : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
-                                  }`}
-                                >
-                                  {isStreamBuffering ? (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                  ) : isStreamPlaying ? (
-                                    <Pause className="w-4 h-4 fill-current" />
-                                  ) : (
-                                    <Play className="w-4 h-4 fill-current ml-0.5" />
-                                  )}
-                                </button>
+                                }}
+                                className={`group rounded-lg p-2.5 border transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
+                                  isCurrentStream
+                                    ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
+                                    : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg overflow-hidden shrink-0 bg-[var(--bg-elevated)]">
+                                    <DiscoverArtwork
+                                      directUrl={track.coverUrl}
+                                      videoId={track.videoId}
+                                      alt={track.title}
+                                      shape="square"
+                                      labelForFallback={track.title}
+                                    />
+                                  </div>
 
-                                {canDownload &&
-                                  (isJobComplete && matchingJob?.track_id ? (
+                                  <div className="min-w-0 flex-1">
+                                    <p
+                                      className={`text-sm font-semibold truncate ${
+                                        isCurrentStream
+                                          ? 'text-[var(--accent)]'
+                                          : 'text-[var(--text-primary)]'
+                                      }`}
+                                    >
+                                      {track.title}
+                                    </p>
+                                    <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
+                                      {track.artist}
+                                      {track.explicit ? ' · Explicit' : ''}
+                                    </p>
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                                    <span className="hidden sm:inline font-mono text-xs tabular-nums text-[var(--text-muted)] w-11 text-right">
+                                      {track.duration > 0
+                                        ? formatDuration(track.duration)
+                                        : '--:--'}
+                                    </span>
+
                                     <button
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        void playTrackById(matchingJob.track_id!);
+                                        handlePlaySearchTrack(track, structuredSearch.tracks);
                                       }}
-                                      title="Play downloaded track"
-                                      aria-label={`Play ${item.title}`}
-                                      className="flex h-10 px-3 items-center justify-center gap-1 rounded-full bg-[var(--accent)] text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                                    >
-                                      <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                                      <span className="hidden sm:inline">Play</span>
-                                    </button>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      disabled={isQuickQueueing || isJobActive}
-                                      onClick={(e) => void handleQuickDownloadResult(e, item)}
-                                      title="Download track"
-                                      aria-label={`Download ${item.title}`}
+                                      title={isStreamPlaying ? 'Pause track' : 'Play in player'}
+                                      aria-label={
+                                        isStreamPlaying
+                                          ? `Pause ${track.title}`
+                                          : `Play ${track.title}`
+                                      }
                                       className={`flex h-10 w-10 items-center justify-center rounded-full border transition-all ${
-                                        isQuickQueued
-                                          ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
-                                          : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:bg-[var(--accent)] hover:border-[var(--accent)] hover:text-[var(--accent-contrast)]'
+                                        isCurrentStream
+                                          ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
+                                          : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
                                       }`}
                                     >
-                                      {isQuickQueueing || isJobActive ? (
+                                      {isStreamBuffering ? (
                                         <Loader2 className="w-4 h-4 animate-spin" />
-                                      ) : isQuickQueued ? (
-                                        <Check className="w-4 h-4 stroke-[2.5]" />
+                                      ) : isStreamPlaying ? (
+                                        <Pause className="w-4 h-4 fill-current" />
                                       ) : (
-                                        <Plus className="w-4 h-4 stroke-[2.5]" />
+                                        <Play className="w-4 h-4 fill-current ml-0.5" />
                                       )}
                                     </button>
-                                  ))}
-                              </div>
-                            </div>
 
-                            {matchingJob && isJobActive && (
-                              <div className="space-y-1 pt-0.5">
-                                <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--slider-track)]">
-                                  <div
-                                    className="h-full bg-[var(--accent)] transition-[width] duration-200"
-                                    style={{width: `${Math.max(matchingJob.progress, 5)}%`}}
-                                  />
-                                </div>
-                                <div className="flex items-center justify-between text-[11px] font-mono text-[var(--text-secondary)] tabular-nums">
-                                  <span className="truncate">{matchingJob.stage}</span>
-                                  <span>{Math.round(matchingJob.progress)}%</span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => handleQueueSearchTrack(e, track)}
+                                      title={`Add "${track.title}" to queue`}
+                                      aria-label={`Add ${track.title} to queue`}
+                                      className="flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all"
+                                    >
+                                      <ListPlus className="w-4 h-4" />
+                                    </button>
+
+                                    {canDownload && (
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          saveStatus === 'saving' || saveStatus === 'saved'
+                                        }
+                                        onClick={(e) => void handleDownloadSearchTrack(e, track)}
+                                        title={
+                                          saveStatus === 'saved'
+                                            ? 'Queued for library'
+                                            : `Download "${track.title}"`
+                                        }
+                                        aria-label={`Download ${track.title}`}
+                                        className={`flex h-10 w-10 items-center justify-center rounded-full border transition-all ${
+                                          saveStatus === 'saved'
+                                            ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
+                                            : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:bg-[var(--accent)] hover:border-[var(--accent)] hover:text-[var(--accent-contrast)]'
+                                        }`}
+                                      >
+                                        {saveStatus === 'saving' ? (
+                                          <Loader2 className="w-4 h-4 animate-spin" />
+                                        ) : saveStatus === 'saved' ? (
+                                          <Check className="w-4 h-4 stroke-[2.5]" />
+                                        ) : (
+                                          <Download className="w-4 h-4" />
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    )}
                   </div>
                 )}
 

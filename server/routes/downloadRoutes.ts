@@ -9,6 +9,7 @@ import {
   getCatalogArtistDetail,
   getCatalogDiscoverFeed,
   isValidDeezerId,
+  searchCatalog,
 } from '../catalog.ts';
 import {
   cancelDownloadJob,
@@ -95,6 +96,24 @@ const handleGetDiscoverFeed = async (req: AuthRequest, res: import('express').Re
 
 discoverRouter.get('/discover', requireAuth, handleGetDiscoverFeed);
 discoverRouter.get('/discover/feed', requireAuth, handleGetDiscoverFeed);
+
+discoverRouter.get('/discover/search', requireAuth, async (req: AuthRequest, res) => {
+  const rawQuery = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!rawQuery) {
+    res.status(400).json({error: 'Search query parameter q is required'});
+    return;
+  }
+  const safeQuery = rawQuery.slice(0, 120);
+  try {
+    const result = await searchCatalog(safeQuery);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to search catalog';
+    console.error('[discover-search]', safeQuery, msg);
+    res.status(502).json({error: msg});
+  }
+});
 
 discoverRouter.get('/discover/album/:id', requireAuth, async (req: AuthRequest, res) => {
   const albumId = String(req.params.id || '').trim();
