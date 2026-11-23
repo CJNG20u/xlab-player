@@ -121,6 +121,28 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS catalog_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_catalog_cache_expires ON catalog_cache(expires_at);
+
+  CREATE TABLE IF NOT EXISTS track_video_map (
+    match_key TEXT PRIMARY KEY,
+    artist TEXT NOT NULL,
+    title TEXT NOT NULL,
+    duration INTEGER NOT NULL DEFAULT 0,
+    video_id TEXT NOT NULL,
+    matched_title TEXT NOT NULL DEFAULT '',
+    matched_duration INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_track_video_map_updated ON track_video_map(updated_at);
 `);
 
 // Safe incremental migrations for existing databases

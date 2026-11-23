@@ -130,6 +130,51 @@ export function getYouTubeThumbProxyUrl(videoId: string): string {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+export function getCatalogMatchStreamUrl(params: {
+  artist: string;
+  title: string;
+  duration?: number;
+}): string {
+  const qs = new URLSearchParams();
+  if (params.artist) qs.set('artist', params.artist);
+  qs.set('title', params.title);
+  if (params.duration && Number.isFinite(params.duration) && params.duration > 0) {
+    qs.set('duration', String(Math.round(params.duration)));
+  }
+  return `/api/yt-stream/match?${qs.toString()}`;
+}
+
+export interface StreamPrefetchTarget {
+  videoId?: string;
+  artist?: string;
+  title?: string;
+  duration?: number;
+}
+
+export function prefetchYouTubeStreams(items: StreamPrefetchTarget[]): void {
+  if (!items || items.length === 0) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+  const cleaned = items
+    .slice(0, 5)
+    .filter((i) => Boolean(i.videoId?.trim() || i.title?.trim()));
+  if (cleaned.length === 0) return;
+
+  const token = getStoredToken();
+  const headers: Record<string, string> = {'Content-Type': 'application/json'};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  void fetch('/api/yt-stream/prefetch', {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({items: cleaned}),
+    priority: 'low',
+  } as RequestInit).catch(() => {
+    // Best-effort background warmup
+  });
+}
+
 export function getSSEUrl(path: string): string {
   const token = getStoredToken();
   if (!token) return path;

@@ -9,12 +9,15 @@ import {Readable} from 'stream';
 import type {ReadableStream as NodeReadableStream} from 'stream/web';
 import {type AuthRequest, requireAuth} from './server/auth.ts';
 import {
+  enqueueYouTubePrefetch,
   getCachedYouTubeThumbnailUrl,
   invalidateYouTubeAudioStreamCache,
   isAllowedYouTubeMediaUrl,
   isValidYouTubeVideoId,
+  resolveTrackToVideoId,
   resolveYouTubeAudioStreamUrl,
   spawnDirectYouTubeAudioStream,
+  type PrefetchRequestItem,
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
@@ -128,12 +131,12 @@ async function startServer() {
   app.use('/api/admin', adminRouter);
 
   // Authenticated YouTube audio stream proxy with 30-min URL cache and HTTP Range forwarding
-  const handleYouTubeStream = async (
+  const streamYouTubeVideoById = async (
+    videoId: string,
     req: AuthRequest,
     res: express.Response,
     isHead: boolean
   ): Promise<void> => {
-    const videoId = String(req.params.videoId || '').trim();
     if (!isValidYouTubeVideoId(videoId)) {
       res.status(400).json({error: 'Invalid YouTube video ID'});
       return;
@@ -372,12 +375,97 @@ async function startServer() {
     }
   };
 
+  // Non-blocking background stream prefetch endpoint (warms metadata match + direct stream URL cache)
+  app.post('/api/yt-stream/prefetch', requireAuth, (req: AuthRequest, res) => {
+    const rawItems = Array.isArray(req.body?.items)
+      ? req.body.items
+      : req.body && typeof req.body === 'object'
+        ? [req.body]
+        : [];
+    const items: PrefetchRequestItem[] = [];
+    for (const raw of rawItems.slice(0, 5)) {
+      if (!raw || typeof raw !== 'object') continue;
+      const rec = raw as Record<string, unknown>;
+      items.push({
+        videoId: typeof rec.videoId === 'string' ? rec.videoId.trim() : undefined,
+        artist: typeof rec.artist === 'string' ? rec.artist.trim().slice(0, 120) : undefined,
+        title: typeof rec.title === 'string' ? rec.title.trim().slice(0, 160) : undefined,
+        duration:
+          rec.duration !== undefined && Number.isFinite(Number(rec.duration))
+            ? Math.max(0, Number(rec.duration))
+            : undefined,
+      });
+    }
+    const accepted = enqueueYouTubePrefetch(items);
+    res.status(202).json({ok: true, accepted});
+  });
+
+  // Resolve structured track metadata (artist, title, duration) -> cached YouTube videoId
+  app.post('/api/yt-stream/resolve', requireAuth, async (req: AuthRequest, res) => {
+    const artist = typeof req.body?.artist === 'string' ? req.body.artist.trim().slice(0, 120) : '';
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 160) : '';
+    const duration = Number.isFinite(Number(req.body?.duration))
+      ? Math.max(0, Number(req.body.duration))
+      : 0;
+    if (!title) {
+      res.status(400).json({error: 'Track title is required'});
+      return;
+    }
+    try {
+      const matched = await resolveTrackToVideoId({artist, title, duration});
+      res.json({
+        ...matched,
+        url: `https://www.youtube.com/watch?v=${matched.videoId}`,
+        streamUrl: `/api/yt-stream/${encodeURIComponent(matched.videoId)}`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to match audio stream';
+      res.status(502).json({error: msg});
+    }
+  });
+
+  // Stream directly by track metadata (artist, title, duration) so <audio src> stays synchronous on first click
+  const handleYouTubeMatchStream = async (
+    req: AuthRequest,
+    res: express.Response,
+    isHead: boolean
+  ): Promise<void> => {
+    const artist = String(req.query.artist || '').trim().slice(0, 120);
+    const title = String(req.query.title || '').trim().slice(0, 160);
+    const duration = Number.isFinite(Number(req.query.duration))
+      ? Math.max(0, Number(req.query.duration))
+      : 0;
+    if (!title) {
+      res.status(400).json({error: 'Track title query parameter is required'});
+      return;
+    }
+    try {
+      const matched = await resolveTrackToVideoId({artist, title, duration});
+      res.setHeader('X-Resolved-Video-Id', matched.videoId);
+      await streamYouTubeVideoById(matched.videoId, req, res, isHead);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to resolve matching audio stream';
+      console.error('[yt-stream-match]', artist, '-', title, msg);
+      if (!res.headersSent) {
+        res.status(502).json({error: msg});
+      }
+    }
+  };
+
+  app.get('/api/yt-stream/match', requireAuth, (req: AuthRequest, res) => {
+    void handleYouTubeMatchStream(req, res, false);
+  });
+
+  app.head('/api/yt-stream/match', requireAuth, (req: AuthRequest, res) => {
+    void handleYouTubeMatchStream(req, res, true);
+  });
+
   app.get('/api/yt-stream/:videoId', requireAuth, (req: AuthRequest, res) => {
-    void handleYouTubeStream(req, res, false);
+    void streamYouTubeVideoById(String(req.params.videoId || '').trim(), req, res, false);
   });
 
   app.head('/api/yt-stream/:videoId', requireAuth, (req: AuthRequest, res) => {
-    void handleYouTubeStream(req, res, true);
+    void streamYouTubeVideoById(String(req.params.videoId || '').trim(), req, res, true);
   });
 
   // Same-origin thumbnail proxy for CORS-safe dominant color extraction & crisp artwork on YouTube streams

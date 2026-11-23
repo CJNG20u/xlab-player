@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AlbumArt} from '../components/AlbumArt';
+import {CatalogDetailView, type CatalogRoute} from '../components/CatalogDetailView';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
@@ -31,8 +32,10 @@ import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {
   apiFetch,
   formatDuration,
+  getCatalogMatchStreamUrl,
   getSSEUrl,
   getYouTubeThumbProxyUrl,
+  prefetchYouTubeStreams,
 } from '../lib/api';
 import type {
   DiscoverAlbumItem,
@@ -109,12 +112,26 @@ function metadataItemToYouTubeTrack(item: MetadataPreviewItem): Track {
 }
 
 function discoverReleaseToTrack(item: DiscoverNewReleaseItem): Track {
+  const hasVid = Boolean(item.videoId && /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId));
+  const trackId = hasVid
+    ? `yt-${item.videoId}`
+    : item.id || `dz-track-${item.deezerTrackId || `${item.artist}-${item.title}`}`;
+  const coverUrl =
+    item.thumbnailUrl || (hasVid ? getYouTubeThumbProxyUrl(item.videoId!) : undefined);
+  const streamUrl = hasVid
+    ? `/api/yt-stream/${encodeURIComponent(item.videoId!)}`
+    : getCatalogMatchStreamUrl({
+        artist: item.artist,
+        title: item.title,
+        duration: item.duration,
+      });
+
   return {
-    id: `yt-${item.videoId}`,
+    id: trackId,
     rel_path: '',
     title: item.title,
     artist: item.artist,
-    album: item.releaseLabel || 'New Release',
+    album: item.album || item.releaseLabel || 'New Release',
     track_number: null,
     year: null,
     duration: item.duration || 0,
@@ -125,16 +142,31 @@ function discoverReleaseToTrack(item: DiscoverNewReleaseItem): Track {
     dominant_color: '#1f2937',
     added_at: '',
     liked: false,
-    coverUrl: getYouTubeThumbProxyUrl(item.videoId),
-    streamUrl: `/api/yt-stream/${encodeURIComponent(item.videoId)}`,
+    coverUrl,
+    streamUrl,
     isYouTubeStream: true,
-    youtubeUrl: item.url || `https://www.youtube.com/watch?v=${item.videoId}`,
+    youtubeUrl: hasVid ? `https://www.youtube.com/watch?v=${item.videoId}` : undefined,
+    deezerTrackId: item.deezerTrackId,
+    deezerAlbumId: item.albumId,
+    deezerArtistId: item.artistId,
   };
 }
 
 function discoverAlbumToTrack(item: DiscoverAlbumItem): Track {
+  const hasVid = Boolean(item.videoId && /^[A-Za-z0-9_-]{6,20}$/.test(item.videoId));
+  const trackId = hasVid ? `yt-${item.videoId}` : item.id || `dz-album-${item.deezerAlbumId || item.title}`;
+  const coverUrl =
+    item.thumbnailUrl || (hasVid ? getYouTubeThumbProxyUrl(item.videoId!) : undefined);
+  const streamUrl = hasVid
+    ? `/api/yt-stream/${encodeURIComponent(item.videoId!)}`
+    : getCatalogMatchStreamUrl({
+        artist: item.artist,
+        title: item.title,
+        duration: item.duration,
+      });
+
   return {
-    id: `yt-${item.videoId}`,
+    id: trackId,
     rel_path: '',
     title: item.title,
     artist: item.artist,
@@ -149,10 +181,12 @@ function discoverAlbumToTrack(item: DiscoverAlbumItem): Track {
     dominant_color: '#1f2937',
     added_at: '',
     liked: false,
-    coverUrl: getYouTubeThumbProxyUrl(item.videoId),
-    streamUrl: `/api/yt-stream/${encodeURIComponent(item.videoId)}`,
+    coverUrl,
+    streamUrl,
     isYouTubeStream: true,
-    youtubeUrl: item.url || `https://www.youtube.com/watch?v=${item.videoId}`,
+    youtubeUrl: hasVid ? `https://www.youtube.com/watch?v=${item.videoId}` : undefined,
+    deezerAlbumId: item.deezerAlbumId,
+    deezerArtistId: item.artistId,
   };
 }
 
@@ -173,7 +207,8 @@ function hashToTint(seed: string): string {
 }
 
 interface DiscoverArtworkProps {
-  videoId: string;
+  directUrl?: string;
+  videoId?: string;
   fallbackUrl?: string;
   alt: string;
   shape: 'square' | 'circle';
@@ -182,6 +217,7 @@ interface DiscoverArtworkProps {
 }
 
 const DiscoverArtwork: React.FC<DiscoverArtworkProps> = ({
+  directUrl,
   videoId,
   fallbackUrl,
   alt,
@@ -189,24 +225,40 @@ const DiscoverArtwork: React.FC<DiscoverArtworkProps> = ({
   labelForFallback,
   className = '',
 }) => {
-  const primarySrc = useMemo(() => getYouTubeThumbProxyUrl(videoId), [videoId]);
-  const [stage, setStage] = useState<'primary' | 'fallback' | 'empty'>('primary');
+  const primarySrc = useMemo(() => {
+    if (directUrl && /^https?:\/\//i.test(directUrl)) return directUrl;
+    if (videoId) return getYouTubeThumbProxyUrl(videoId);
+    return fallbackUrl || '';
+  }, [directUrl, fallbackUrl, videoId]);
+
+  const secondarySrc = useMemo(() => {
+    if (fallbackUrl && fallbackUrl !== primarySrc) return fallbackUrl;
+    if (videoId) {
+      const ytUrl = getYouTubeThumbProxyUrl(videoId);
+      if (ytUrl !== primarySrc) return ytUrl;
+    }
+    return '';
+  }, [fallbackUrl, primarySrc, videoId]);
+
+  const [stage, setStage] = useState<'primary' | 'fallback' | 'empty'>(
+    primarySrc ? 'primary' : 'empty'
+  );
 
   useEffect(() => {
-    setStage('primary');
-  }, [primarySrc, fallbackUrl]);
+    setStage(primarySrc ? 'primary' : secondarySrc ? 'fallback' : 'empty');
+  }, [primarySrc, secondarySrc]);
 
   const activeSrc =
     stage === 'primary'
       ? primarySrc
-      : stage === 'fallback' && fallbackUrl
-        ? fallbackUrl
+      : stage === 'fallback' && secondarySrc
+        ? secondarySrc
         : null;
 
   const radiusClass = shape === 'circle' ? 'rounded-full' : 'rounded-lg';
 
   if (!activeSrc) {
-    const tint = hashToTint(labelForFallback || alt || videoId);
+    const tint = hashToTint(labelForFallback || alt || videoId || 'music');
     return (
       <div
         className={`w-full h-full flex items-center justify-center select-none ${radiusClass} ${className}`}
@@ -234,7 +286,7 @@ const DiscoverArtwork: React.FC<DiscoverArtworkProps> = ({
       loading="lazy"
       referrerPolicy="no-referrer"
       onError={() => {
-        if (stage === 'primary' && fallbackUrl) {
+        if (stage === 'primary' && secondarySrc) {
           setStage('fallback');
         } else {
           setStage('empty');
@@ -366,7 +418,7 @@ export const DiscoverPage: React.FC = () => {
   const [libraryTracks, setLibraryTracks] = useState<Track[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(true);
 
-  // Personalized Discover feed state
+  // Personalized Discover feed + instant Album/Artist catalog drill-down stack
   const [discoverFeed, setDiscoverFeed] = useState<DiscoverFeedResponse | null>(() =>
     user && sessionDiscoverCache?.userId === user.id ? sessionDiscoverCache.feed : null
   );
@@ -375,6 +427,9 @@ export const DiscoverPage: React.FC = () => {
   );
   const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
+  const [catalogStack, setCatalogStack] = useState<CatalogRoute[]>([]);
+  const activeCatalogRoute =
+    catalogStack.length > 0 ? catalogStack[catalogStack.length - 1] : null;
 
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
@@ -460,6 +515,25 @@ export const DiscoverPage: React.FC = () => {
   useEffect(() => {
     void loadDiscoverFeed(false);
   }, [loadDiscoverFeed]);
+
+  // Background prefetch the top 3 visible Discover tracks once the Discover feed loads
+  const prefetchedDiscoverKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (offline || !discoverFeed || discoverFeed.newReleases.length === 0) return;
+    const topThree = discoverFeed.newReleases.slice(0, 3);
+    const key = topThree.map((i) => i.id || i.videoId || `${i.artist}:${i.title}`).join('|');
+    if (prefetchedDiscoverKeyRef.current === key) return;
+    prefetchedDiscoverKeyRef.current = key;
+
+    prefetchYouTubeStreams(
+      topThree.map((item) => ({
+        videoId: item.videoId,
+        artist: item.artist,
+        title: item.title,
+        duration: item.duration,
+      }))
+    );
+  }, [discoverFeed, offline]);
 
   // Load local /music library (or cached offline tracks when offline) for instant live filtering
   const loadLibrary = useCallback(async () => {
@@ -605,32 +679,68 @@ export const DiscoverPage: React.FC = () => {
 
   const handlePlayDiscoverRelease = useCallback(
     (item: DiscoverNewReleaseItem) => {
-      const trackId = `yt-${item.videoId}`;
-      if (currentTrack?.id === trackId) {
+      const targetTrack = discoverReleaseToTrack(item);
+      if (
+        currentTrack?.id === targetTrack.id ||
+        (item.deezerTrackId && currentTrack?.deezerTrackId === item.deezerTrackId)
+      ) {
         togglePlay();
         return;
       }
       const shelf = discoverFeed?.newReleases || [item];
       const queue = shelf.map(discoverReleaseToTrack);
-      const matched = queue.find((t) => t.id === trackId) || discoverReleaseToTrack(item);
+      const matched =
+        queue.find(
+          (t) =>
+            t.id === targetTrack.id ||
+            (item.deezerTrackId && t.deezerTrackId === item.deezerTrackId)
+        ) || targetTrack;
       playTrack(matched, queue);
     },
-    [currentTrack?.id, discoverFeed?.newReleases, playTrack, togglePlay]
+    [currentTrack?.deezerTrackId, currentTrack?.id, discoverFeed?.newReleases, playTrack, togglePlay]
   );
 
-  const handlePlayDiscoverAlbum = useCallback(
+  const handleOpenAlbumView = useCallback(
+    (album: {id: string; titleHint?: string; artistHint?: string; coverHint?: string}) => {
+      setCatalogStack((prev) => [...prev, {type: 'album', ...album}]);
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    },
+    []
+  );
+
+  const handleOpenArtistView = useCallback(
+    (artist: {id: string; nameHint?: string; pictureHint?: string}) => {
+      setCatalogStack((prev) => [...prev, {type: 'artist', ...artist}]);
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    },
+    []
+  );
+
+  const handlePopCatalogView = useCallback(() => {
+    setCatalogStack((prev) => prev.slice(0, -1));
+  }, []);
+
+  const handleOpenDiscoverAlbum = useCallback(
     (item: DiscoverAlbumItem) => {
-      const trackId = `yt-${item.videoId}`;
-      if (currentTrack?.id === trackId) {
+      if (item.deezerAlbumId) {
+        handleOpenAlbumView({
+          id: item.deezerAlbumId,
+          titleHint: item.title,
+          artistHint: item.artist,
+          coverHint: item.thumbnailUrl,
+        });
+        return;
+      }
+      const target = discoverAlbumToTrack(item);
+      if (currentTrack?.id === target.id) {
         togglePlay();
         return;
       }
       const shelf = discoverFeed?.albumsForYou || [item];
       const queue = shelf.map(discoverAlbumToTrack);
-      const matched = queue.find((t) => t.id === trackId) || discoverAlbumToTrack(item);
-      playTrack(matched, queue);
+      playTrack(target, queue);
     },
-    [currentTrack?.id, discoverFeed?.albumsForYou, playTrack, togglePlay]
+    [currentTrack?.id, discoverFeed?.albumsForYou, handleOpenAlbumView, playTrack, togglePlay]
   );
 
   const handlePlayLocalTrack = useCallback(
@@ -722,10 +832,18 @@ export const DiscoverPage: React.FC = () => {
 
   const handleSelectArtistToDiscover = useCallback(
     (artist: DiscoverArtistItem) => {
+      if (artist.deezerArtistId) {
+        handleOpenArtistView({
+          id: artist.deezerArtistId,
+          nameHint: artist.name,
+          pictureHint: artist.thumbnailUrl,
+        });
+        return;
+      }
       setQuery(artist.name);
       void executeYouTubeSearch(artist.name);
     },
-    [executeYouTubeSearch]
+    [executeYouTubeSearch, handleOpenArtistView]
   );
 
   const handleSearchAlbumTracks = useCallback(
@@ -890,11 +1008,15 @@ export const DiscoverPage: React.FC = () => {
         discoverFeed.albumsForYou.length > 0)
   );
 
+  const isCatalogDetailOpen = Boolean(isDiscoverView && activeCatalogRoute && !offline);
+
   return (
     <div
       className="px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto space-y-5 pb-36 md:pb-12"
       style={{
-        paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))',
+        paddingTop: isCatalogDetailOpen
+          ? 'calc(0.5rem + env(safe-area-inset-top, 0px))'
+          : 'calc(1.25rem + env(safe-area-inset-top, 0px))',
         paddingBottom: 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
       }}
     >
@@ -904,7 +1026,8 @@ export const DiscoverPage: React.FC = () => {
         </div>
       )}
 
-      {/* Compact Single-Row Header */}
+      {/* Compact Single-Row Header (hidden when inspecting an Album/Artist detail view) */}
+      {!isCatalogDetailOpen && (
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
@@ -948,8 +1071,10 @@ export const DiscoverPage: React.FC = () => {
           )}
         </div>
       </div>
+      )}
 
       {/* Pinned Wide Top Search Bar */}
+      {!isCatalogDetailOpen && (
       <div className="sticky top-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2.5 bg-[var(--bg-glass)] backdrop-blur-md">
         <form onSubmit={handleFetchMetadata} className="space-y-2.5">
           <div className="relative">
@@ -1106,6 +1231,7 @@ export const DiscoverPage: React.FC = () => {
           )}
         </form>
       </div>
+      )}
 
       {/* Graceful warning if yt-dlp or ffmpeg is missing */}
       {!offline &&
@@ -1125,9 +1251,19 @@ export const DiscoverPage: React.FC = () => {
         )}
 
       {/* =====================================================================
-          MODE A: PERSONALIZED DISCOVER SHELVES (when search input is empty)
+          MODE A: PERSONALIZED DISCOVER SHELVES OR INSTANT ALBUM/ARTIST VIEW
          ===================================================================== */}
       {isDiscoverView ? (
+        activeCatalogRoute && !offline ? (
+          <CatalogDetailView
+            route={activeCatalogRoute}
+            canDownload={canDownload}
+            onBack={handlePopCatalogView}
+            onOpenAlbum={handleOpenAlbumView}
+            onOpenArtist={handleOpenArtistView}
+            onFlashToast={flashToast}
+          />
+        ) : (
         <div className="space-y-8">
           {offline ? (
             <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-2">
@@ -1163,20 +1299,29 @@ export const DiscoverPage: React.FC = () => {
               {discoverFeed.newReleases.length > 0 && (
                 <HorizontalShelf title="New releases">
                   {discoverFeed.newReleases.map((item) => {
-                    const trackId = `yt-${item.videoId}`;
-                    const isCurrent = currentTrack?.id === trackId;
+                    const trackKey =
+                      item.id ||
+                      (item.videoId ? `yt-${item.videoId}` : `${item.artist}-${item.title}`);
+                    const isCurrent = Boolean(
+                      currentTrack &&
+                        ((item.videoId && currentTrack.id === `yt-${item.videoId}`) ||
+                          (item.id && currentTrack.id === item.id) ||
+                          (item.deezerTrackId &&
+                            currentTrack.deezerTrackId === item.deezerTrackId))
+                    );
                     const isItemPlaying = isCurrent && isPlaying && !isBuffering;
                     const isItemBuffering = isCurrent && isBuffering;
 
                     return (
                       <button
-                        key={item.videoId}
+                        key={trackKey}
                         type="button"
                         onClick={() => handlePlayDiscoverRelease(item)}
                         className="group w-[152px] sm:w-[172px] shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                       >
                         <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
                           <DiscoverArtwork
+                            directUrl={item.thumbnailUrl}
                             videoId={item.videoId}
                             fallbackUrl={item.fallbackThumbnailUrl}
                             alt={item.title}
@@ -1237,6 +1382,7 @@ export const DiscoverPage: React.FC = () => {
                     >
                       <div className="relative aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
                         <DiscoverArtwork
+                          directUrl={artist.thumbnailUrl}
                           videoId={artist.videoId}
                           fallbackUrl={artist.fallbackThumbnailUrl}
                           alt={artist.name}
@@ -1263,27 +1409,35 @@ export const DiscoverPage: React.FC = () => {
               {discoverFeed.albumsForYou.length > 0 && (
                 <HorizontalShelf title="Albums for you">
                   {discoverFeed.albumsForYou.map((album) => {
-                    const trackId = `yt-${album.videoId}`;
-                    const isCurrent = currentTrack?.id === trackId;
-                    const isItemPlaying = isCurrent && isPlaying && !isBuffering;
-                    const isItemBuffering = isCurrent && isBuffering;
+                    const albumKey =
+                      album.id ||
+                      album.deezerAlbumId ||
+                      album.videoId ||
+                      `${album.artist}-${album.title}`;
+                    const isCurrent = Boolean(
+                      currentTrack &&
+                        ((album.videoId && currentTrack.id === `yt-${album.videoId}`) ||
+                          (album.deezerAlbumId &&
+                            currentTrack.deezerAlbumId === album.deezerAlbumId))
+                    );
 
                     return (
                       <div
-                        key={album.videoId}
+                        key={albumKey}
                         role="button"
                         tabIndex={0}
-                        onClick={() => handlePlayDiscoverAlbum(album)}
+                        onClick={() => handleOpenDiscoverAlbum(album)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
-                            handlePlayDiscoverAlbum(album);
+                            handleOpenDiscoverAlbum(album);
                           }
                         }}
                         className="group w-[152px] sm:w-[172px] shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                       >
                         <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
                           <DiscoverArtwork
+                            directUrl={album.thumbnailUrl}
                             videoId={album.videoId}
                             fallbackUrl={album.fallbackThumbnailUrl}
                             alt={album.title}
@@ -1294,27 +1448,12 @@ export const DiscoverPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={(e) => handleSearchAlbumTracks(e, album)}
-                            title={`Search tracks from ${album.title}`}
-                            aria-label={`Search tracks from ${album.title}`}
+                            title={`Search YouTube for ${album.title}`}
+                            aria-label={`Search YouTube for ${album.title}`}
                             className="absolute top-2 right-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/85 transition-opacity"
                           >
                             <Search className="w-3.5 h-3.5" />
                           </button>
-                          <span
-                            className={`absolute bottom-2 right-2 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-lg transition-all duration-150 ${
-                              isCurrent
-                                ? 'opacity-100 translate-y-0'
-                                : 'opacity-0 translate-y-1.5 group-hover:opacity-100 group-hover:translate-y-0'
-                            }`}
-                          >
-                            {isItemBuffering ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : isItemPlaying ? (
-                              <Pause className="w-4 h-4 fill-current" />
-                            ) : (
-                              <Play className="w-4 h-4 fill-current ml-0.5" />
-                            )}
-                          </span>
                         </div>
 
                         <div className="mt-2.5 min-w-0 space-y-0.5">
@@ -1439,6 +1578,7 @@ export const DiscoverPage: React.FC = () => {
             </section>
           )}
         </div>
+        )
       ) : (
         /* =====================================================================
            MODE B: ACTIVE LIVE SEARCH (Local Library + YouTube Results)

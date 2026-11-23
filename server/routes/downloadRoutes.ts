@@ -5,11 +5,16 @@ import path from 'path';
 import {type AuthRequest, requireAuth, requireDownloadPermission} from '../auth.ts';
 import {db, getMusicDir} from '../db.ts';
 import {
+  getCatalogAlbumDetail,
+  getCatalogArtistDetail,
+  getCatalogDiscoverFeed,
+  isValidDeezerId,
+} from '../catalog.ts';
+import {
   cancelDownloadJob,
   downloadEvents,
   enqueueDownloadJob,
   fetchMetadataPreview,
-  getDiscoverFeed,
   getDownloadJobs,
   normalizeDownloadQuality,
   peekTrackMetadata,
@@ -26,13 +31,51 @@ discoverRouter.get('/discover', requireAuth, async (req: AuthRequest, res) => {
   try {
     const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
     const forceRefresh = refreshParam === '1' || refreshParam === 'true';
-    const feed = await getDiscoverFeed(req.user!.id, {forceRefresh});
+    const feed = await getCatalogDiscoverFeed(req.user!.id, {forceRefresh});
     res.setHeader('Cache-Control', 'private, max-age=300');
     res.json(feed);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load Discover recommendations';
     console.error('[discover]', msg);
     res.status(502).json({error: msg});
+  }
+});
+
+discoverRouter.get('/discover/album/:id', requireAuth, async (req: AuthRequest, res) => {
+  const albumId = String(req.params.id || '').trim();
+  if (!isValidDeezerId(albumId)) {
+    res.status(400).json({error: 'Invalid album ID'});
+    return;
+  }
+  try {
+    const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
+    const forceRefresh = refreshParam === '1' || refreshParam === 'true';
+    const album = await getCatalogAlbumDetail(albumId, {forceRefresh});
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.json(album);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load album details';
+    console.error('[discover-album]', albumId, msg);
+    res.status(msg === 'Album not found' ? 404 : 502).json({error: msg});
+  }
+});
+
+discoverRouter.get('/discover/artist/:id', requireAuth, async (req: AuthRequest, res) => {
+  const artistId = String(req.params.id || '').trim();
+  if (!isValidDeezerId(artistId)) {
+    res.status(400).json({error: 'Invalid artist ID'});
+    return;
+  }
+  try {
+    const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
+    const forceRefresh = refreshParam === '1' || refreshParam === 'true';
+    const artist = await getCatalogArtistDetail(artistId, {forceRefresh});
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.json(artist);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load artist details';
+    console.error('[discover-artist]', artistId, msg);
+    res.status(msg === 'Artist not found' ? 404 : 502).json({error: msg});
   }
 });
 

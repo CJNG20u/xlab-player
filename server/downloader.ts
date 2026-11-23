@@ -1600,6 +1600,9 @@ const YT_STREAM_CACHE_TTL_MS = 30 * 60 * 1000;
 const YT_STREAM_CACHE_MAX_ENTRIES = 500;
 const YT_THUMB_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
+const YT_VISITOR_DATA_TTL_MS = 30 * 60 * 1000; // Refresh session visitor_data every 30 min
+const TRACK_VIDEO_MAP_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const TRACK_VIDEO_CACHE_MAX_ENTRIES = 2000;
 
 const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googlevideo.com',
@@ -1655,6 +1658,8 @@ const ytStreamUrlCache = new Map<
 >();
 const ytStreamInFlight = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
 const ytThumbnailCache = new Map<string, {url: string; expiresAt: number}>();
+let ytVisitorDataCache: {value: string; expiresAt: number} | null = null;
+let ytVisitorDataInFlight: Promise<string | null> | null = null;
 
 export function isValidYouTubeVideoId(videoId: string): boolean {
   return YOUTUBE_VIDEO_ID_RE.test(videoId);
@@ -1728,6 +1733,60 @@ function pruneExpiredYtStreamCache(now: number): void {
 
 export function invalidateYouTubeAudioStreamCache(videoId: string): void {
   ytStreamUrlCache.delete(videoId);
+}
+
+export function isYouTubeStreamCached(videoId: string): boolean {
+  const entry = ytStreamUrlCache.get(videoId);
+  return Boolean(entry && entry.expiresAt > Date.now());
+}
+
+async function getSessionVisitorData(): Promise<string | null> {
+  const now = Date.now();
+  if (ytVisitorDataCache && ytVisitorDataCache.expiresAt > now) {
+    return ytVisitorDataCache.value;
+  }
+  if (ytVisitorDataInFlight) {
+    return ytVisitorDataInFlight;
+  }
+
+  ytVisitorDataInFlight = (async (): Promise<string | null> => {
+    try {
+      const resp = await fetch('https://www.youtube.com/sw.js_data', {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Accept: 'application/json, text/plain, */*',
+        },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!resp.ok) return null;
+      const text = (await resp.text()).replace(/^\)\]\}'\s*/, '');
+      const parsed = JSON.parse(text) as unknown;
+      const candidate =
+        Array.isArray(parsed) &&
+        Array.isArray(parsed[0]) &&
+        Array.isArray(parsed[0][2]) &&
+        Array.isArray(parsed[0][2][0]) &&
+        Array.isArray(parsed[0][2][0][0]) &&
+        typeof parsed[0][2][0][0][13] === 'string'
+          ? parsed[0][2][0][0][13].trim()
+          : '';
+      if (candidate && /^[A-Za-z0-9_%-]{10,120}$/.test(candidate)) {
+        ytVisitorDataCache = {
+          value: candidate,
+          expiresAt: Date.now() + YT_VISITOR_DATA_TTL_MS,
+        };
+        return candidate;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      ytVisitorDataInFlight = null;
+    }
+  })();
+
+  return ytVisitorDataInFlight;
 }
 
 function isMuxedVideoFormat(vcodec: unknown): boolean {
@@ -1990,12 +2049,17 @@ export async function resolveYouTubeAudioStreamUrl(
       }> = [];
 
       if (!options.skipFastPath) {
-        // Attempt 1 (Fast Path): android_vr anonymous (fast, direct audio, no PO token required)
+        // Attempt 1 (Fast Path): android_vr + cached 30m visitor_data with player_skip=webpage,configs
+        // to avoid downloading full watch-page HTML on every stream lookup.
+        const visitorData = await getSessionVisitorData();
+        const fastArgs = visitorData
+          ? `youtube:player_client=android_vr;visitor_data=${visitorData};player_skip=webpage,configs`
+          : 'youtube:player_client=android_vr;player_skip=webpage,configs';
         strategies.push({
           strategy: 'fast-path',
-          extractorArgs: 'youtube:player_client=android_vr',
+          extractorArgs: fastArgs,
           useCookies: false,
-          timeoutMs: 14000,
+          timeoutMs: 12000,
         });
       }
 
@@ -2162,6 +2226,383 @@ export function spawnDirectYouTubeAudioStream(videoId: string): {
     cleanup,
     getStderr: () => stderrBuf.trim(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Metadata-to-YouTube Matching & Persistent SQLite Cache + Background Prefetch
+// ---------------------------------------------------------------------------
+
+const trackVideoMapCache = new Map<
+  string,
+  {videoId: string; matchedTitle: string; matchedDuration: number; updatedAt: number}
+>();
+const trackVideoMatchInFlight = new Map<
+  string,
+  Promise<{videoId: string; matchedTitle: string; matchedDuration: number; fromCache: boolean}>
+>();
+
+const getTrackVideoMapStmt = db.prepare(
+  'SELECT video_id, matched_title, matched_duration, updated_at FROM track_video_map WHERE match_key = ?'
+);
+const upsertTrackVideoMapStmt = db.prepare(
+  `INSERT INTO track_video_map (match_key, artist, title, duration, video_id, matched_title, matched_duration, updated_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(match_key) DO UPDATE SET
+     artist = excluded.artist,
+     title = excluded.title,
+     duration = excluded.duration,
+     video_id = excluded.video_id,
+     matched_title = excluded.matched_title,
+     matched_duration = excluded.matched_duration,
+     updated_at = excluded.updated_at`
+);
+
+function normalizeMatchTokenText(raw: string): string {
+  return raw
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s*[\[(](?:feat\.?|ft\.?|with)\s+[^)\]]+[\])]/gi, ' ')
+    .replace(/\b(?:feat\.?|ft\.?)\s+.+$/i, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildTrackMatchKey(artist: string, title: string): string {
+  const a = normalizeMatchTokenText(artist);
+  const t = normalizeMatchTokenText(title);
+  return `${a}::${t}`;
+}
+
+function sanitizeMatchSearchFragment(raw: string): string {
+  return raw
+    .replace(/[\r\n\t\0]/g, ' ')
+    .replace(/["'`$\\;<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+}
+
+function pruneTrackVideoMapMemory(now: number): void {
+  if (trackVideoMapCache.size <= TRACK_VIDEO_CACHE_MAX_ENTRIES) return;
+  for (const [k, v] of trackVideoMapCache.entries()) {
+    if (now - v.updatedAt > TRACK_VIDEO_MAP_TTL_MS) {
+      trackVideoMapCache.delete(k);
+    }
+  }
+  if (trackVideoMapCache.size > TRACK_VIDEO_CACHE_MAX_ENTRIES) {
+    const excess = trackVideoMapCache.size - TRACK_VIDEO_CACHE_MAX_ENTRIES;
+    let removed = 0;
+    for (const k of trackVideoMapCache.keys()) {
+      trackVideoMapCache.delete(k);
+      removed += 1;
+      if (removed >= excess) break;
+    }
+  }
+}
+
+export function getCachedTrackVideoId(artist: string, title: string): string | null {
+  const key = buildTrackMatchKey(artist, title);
+  if (!key || key === '::') return null;
+  const now = Date.now();
+  const mem = trackVideoMapCache.get(key);
+  if (mem && now - mem.updatedAt <= TRACK_VIDEO_MAP_TTL_MS && isValidYouTubeVideoId(mem.videoId)) {
+    return mem.videoId;
+  }
+  try {
+    const row = getTrackVideoMapStmt.get(key) as
+      | {video_id: string; matched_title: string; matched_duration: number; updated_at: number}
+      | undefined;
+    if (
+      row &&
+      now - row.updated_at <= TRACK_VIDEO_MAP_TTL_MS &&
+      isValidYouTubeVideoId(row.video_id)
+    ) {
+      pruneTrackVideoMapMemory(now);
+      trackVideoMapCache.set(key, {
+        videoId: row.video_id,
+        matchedTitle: row.matched_title,
+        matchedDuration: row.matched_duration,
+        updatedAt: row.updated_at,
+      });
+      return row.video_id;
+    }
+  } catch {
+    // ignore DB errors
+  }
+  return null;
+}
+
+function scoreVideoCandidate(
+  entry: Record<string, unknown>,
+  targetArtist: string,
+  targetTitle: string,
+  targetDuration: number
+): number {
+  const rawTitle = String(entry.title || '').trim();
+  const rawChannel = String(entry.channel || entry.uploader || entry.creator || '').trim();
+  const candDuration = Number(entry.duration) || 0;
+
+  let score = 0;
+
+  // 1. Duration accuracy (strongest signal against full albums, 1-hour loops, or 15s shorts)
+  if (targetDuration > 0 && candDuration > 0) {
+    const diff = Math.abs(candDuration - targetDuration);
+    if (diff <= 4) score += 50;
+    else if (diff <= 10) score += 38;
+    else if (diff <= 20) score += 22;
+    else if (diff <= 40) score += 5;
+    else if (diff > 90) score -= 55;
+    else score -= 20;
+  } else if (candDuration > 0 && (candDuration < 30 || candDuration > 900)) {
+    score -= 30;
+  }
+
+  // 2. Title & artist token overlap
+  const targetTitleTokens = normalizeMatchTokenText(targetTitle).split(' ').filter(Boolean);
+  const targetArtistTokens = normalizeMatchTokenText(targetArtist).split(' ').filter(Boolean);
+  const candCombined = normalizeMatchTokenText(`${rawTitle} ${rawChannel}`);
+
+  if (targetTitleTokens.length > 0) {
+    const matchedTitleTokens = targetTitleTokens.filter((tok) => candCombined.includes(tok)).length;
+    score += Math.round((matchedTitleTokens / targetTitleTokens.length) * 30);
+  }
+  if (targetArtistTokens.length > 0) {
+    const matchedArtistTokens = targetArtistTokens.filter((tok) => candCombined.includes(tok)).length;
+    score += Math.round((matchedArtistTokens / targetArtistTokens.length) * 20);
+  }
+
+  // 3. Prefer official audio / Topic uploads; penalize covers, karaoke, slowed/reverb, live unless requested
+  const lowerTitle = rawTitle.toLowerCase();
+  const lowerTarget = targetTitle.toLowerCase();
+  if (/-\s*topic$/i.test(rawChannel)) score += 16;
+  if (/\b(?:official\s+audio|audio)\b/i.test(lowerTitle)) score += 10;
+  if (/\b(?:official\s+music\s+video|official\s+video)\b/i.test(lowerTitle)) score += 4;
+
+  const undesiredModifiers = [
+    'karaoke',
+    'instrumental',
+    'slowed',
+    'reverb',
+    'nightcore',
+    '8d audio',
+    'sped up',
+    'cover',
+    'reaction',
+    'tutorial',
+    'piano version',
+    'live',
+    'remix',
+  ];
+  for (const mod of undesiredModifiers) {
+    if (lowerTitle.includes(mod) && !lowerTarget.includes(mod)) {
+      score -= 32;
+    }
+  }
+
+  return score;
+}
+
+export async function resolveTrackToVideoId(input: {
+  artist: string;
+  title: string;
+  duration?: number;
+  forceRefresh?: boolean;
+}): Promise<{videoId: string; matchedTitle: string; matchedDuration: number; fromCache: boolean}> {
+  const artist = sanitizeMatchSearchFragment(input.artist || '');
+  const title = sanitizeMatchSearchFragment(input.title || '');
+  const targetDuration = Number.isFinite(Number(input.duration))
+    ? Math.max(0, Math.round(Number(input.duration)))
+    : 0;
+
+  if (!title) {
+    throw new Error('Track title is required to resolve audio stream');
+  }
+
+  const key = buildTrackMatchKey(artist, title);
+  const now = Date.now();
+
+  if (!input.forceRefresh) {
+    const cachedVid = getCachedTrackVideoId(artist, title);
+    if (cachedVid) {
+      const mem = trackVideoMapCache.get(key);
+      return {
+        videoId: cachedVid,
+        matchedTitle: mem?.matchedTitle || title,
+        matchedDuration: mem?.matchedDuration || targetDuration,
+        fromCache: true,
+      };
+    }
+
+    const existing = trackVideoMatchInFlight.get(key);
+    if (existing) {
+      return existing;
+    }
+  }
+
+  const searchPromise = (async () => {
+    const searchQuery = artist ? `${artist} - ${title} audio` : `${title} audio`;
+    const entries = await runFlatYtSearch(`ytsearch6:${searchQuery}`, null);
+
+    let bestEntry: Record<string, unknown> | null = null;
+    let bestVideoId = '';
+    let bestScore = -Infinity;
+
+    for (const entry of entries) {
+      const vid = typeof entry.id === 'string' ? entry.id.trim() : '';
+      if (!isValidYouTubeVideoId(vid)) continue;
+      const score = scoreVideoCandidate(entry, artist, title, targetDuration);
+      if (score > bestScore) {
+        bestScore = score;
+        bestVideoId = vid;
+        bestEntry = entry;
+      }
+    }
+
+    if (!bestVideoId || !bestEntry) {
+      throw new Error(`No matching YouTube audio found for "${artist ? `${artist} - ` : ''}${title}"`);
+    }
+
+    const matchedTitle = String(bestEntry.title || title).trim();
+    const matchedDuration = Math.max(0, Math.round(Number(bestEntry.duration) || 0));
+    const thumb = extractThumbnailUrl(bestEntry);
+    if (thumb) {
+      cacheYouTubeThumbnailUrl(bestVideoId, thumb);
+    }
+
+    const updatedAt = Date.now();
+    pruneTrackVideoMapMemory(updatedAt);
+    trackVideoMapCache.set(key, {
+      videoId: bestVideoId,
+      matchedTitle,
+      matchedDuration,
+      updatedAt,
+    });
+    try {
+      upsertTrackVideoMapStmt.run(
+        key,
+        artist,
+        title,
+        targetDuration,
+        bestVideoId,
+        matchedTitle,
+        matchedDuration,
+        updatedAt
+      );
+    } catch {
+      // non-fatal
+    }
+
+    return {
+      videoId: bestVideoId,
+      matchedTitle,
+      matchedDuration,
+      fromCache: false,
+    };
+  })();
+
+  if (!input.forceRefresh) {
+    trackVideoMatchInFlight.set(key, searchPromise);
+  }
+  try {
+    return await searchPromise;
+  } finally {
+    if (trackVideoMatchInFlight.get(key) === searchPromise) {
+      trackVideoMatchInFlight.delete(key);
+    }
+  }
+}
+
+export interface PrefetchRequestItem {
+  videoId?: string;
+  artist?: string;
+  title?: string;
+  duration?: number;
+}
+
+const MAX_PREFETCH_CONCURRENCY = 2;
+const MAX_PREFETCH_QUEUE_SIZE = 24;
+const prefetchQueue: Array<{dedupKey: string; item: PrefetchRequestItem}> = [];
+const prefetchQueuedKeys = new Set<string>();
+let activePrefetchWorkers = 0;
+
+function drainPrefetchQueue(): void {
+  while (activePrefetchWorkers < MAX_PREFETCH_CONCURRENCY && prefetchQueue.length > 0) {
+    const task = prefetchQueue.shift();
+    if (!task) break;
+    activePrefetchWorkers += 1;
+
+    void (async () => {
+      try {
+        let vid = task.item.videoId?.trim() || '';
+        if (!isValidYouTubeVideoId(vid)) {
+          if (!task.item.title?.trim()) return;
+          const matched = await resolveTrackToVideoId({
+            artist: task.item.artist || '',
+            title: task.item.title,
+            duration: task.item.duration,
+          });
+          vid = matched.videoId;
+        }
+        if (isValidYouTubeVideoId(vid) && !isYouTubeStreamCached(vid)) {
+          await resolveYouTubeAudioStreamUrl(vid);
+        }
+      } catch {
+        // Prefetch is strictly best-effort and silent
+      } finally {
+        prefetchQueuedKeys.delete(task.dedupKey);
+        activePrefetchWorkers -= 1;
+        drainPrefetchQueue();
+      }
+    })();
+  }
+}
+
+export function enqueueYouTubePrefetch(items: PrefetchRequestItem[]): number {
+  let accepted = 0;
+  for (const raw of items.slice(0, 5)) {
+    const vid = typeof raw.videoId === 'string' ? raw.videoId.trim() : '';
+    const artist = typeof raw.artist === 'string' ? raw.artist.trim() : '';
+    const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+    const duration = Number.isFinite(Number(raw.duration)) ? Math.max(0, Number(raw.duration)) : 0;
+
+    let dedupKey = '';
+    if (isValidYouTubeVideoId(vid)) {
+      if (isYouTubeStreamCached(vid)) continue;
+      dedupKey = `vid:${vid}`;
+    } else if (title) {
+      const existingVid = getCachedTrackVideoId(artist, title);
+      if (existingVid && isYouTubeStreamCached(existingVid)) continue;
+      dedupKey = existingVid ? `vid:${existingVid}` : `meta:${buildTrackMatchKey(artist, title)}`;
+    } else {
+      continue;
+    }
+
+    if (prefetchQueuedKeys.has(dedupKey)) continue;
+    if (prefetchQueue.length >= MAX_PREFETCH_QUEUE_SIZE) {
+      // Drop oldest queued prefetch in favor of newer user-visible tracks
+      const evicted = prefetchQueue.shift();
+      if (evicted) prefetchQueuedKeys.delete(evicted.dedupKey);
+    }
+
+    prefetchQueuedKeys.add(dedupKey);
+    prefetchQueue.push({
+      dedupKey,
+      item: {
+        videoId: isValidYouTubeVideoId(vid) ? vid : undefined,
+        artist,
+        title,
+        duration,
+      },
+    });
+    accepted += 1;
+  }
+
+  if (accepted > 0) {
+    drainPrefetchQueue();
+  }
+  return accepted;
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import {
   getTrackCoverUrl,
   getTrackStreamUrl,
   getYouTubeVideoId,
+  prefetchYouTubeStreams,
 } from '../lib/api';
 import type {RepeatMode, Track, TrackId} from '../types';
 import {
@@ -337,6 +338,37 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       cancelled = true;
     };
   }, [queue, currentIndex, repeat, offlineStoreVersion]);
+
+  // Immediately prefetch the next streamed track in the queue as soon as a track starts playing
+  // so skipping or auto-advancing starts with zero resolution delay.
+  const lastPrefetchedStreamKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (!currentTrack || currentIndex < 0 || queue.length <= 1) return;
+    if (repeat === 'one' || shuffle) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    let nextItem: Track | null = null;
+    if (currentIndex + 1 < queue.length) {
+      nextItem = queue[currentIndex + 1];
+    } else if (repeat === 'all') {
+      nextItem = queue[0];
+    }
+    if (!nextItem || !nextItem.isYouTubeStream) return;
+
+    const videoId = getYouTubeVideoId(nextItem) || undefined;
+    const dedupKey = `${String(currentTrack.id)}=>${videoId || `${nextItem.artist}::${nextItem.title}`}`;
+    if (lastPrefetchedStreamKeyRef.current === dedupKey) return;
+    lastPrefetchedStreamKeyRef.current = dedupKey;
+
+    prefetchYouTubeStreams([
+      {
+        videoId,
+        artist: nextItem.artist,
+        title: nextItem.title,
+        duration: nextItem.duration,
+      },
+    ]);
+  }, [currentTrack, currentIndex, queue, repeat, shuffle]);
 
   // Silently prefetch the next track in the queue once the current track reaches 50% playback
   // or <= 15 seconds remaining so auto-advance and album-cover swipes start without buffering.
@@ -1288,15 +1320,35 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       if (youtubeSaveStates[key] === 'saving') {
         return {ok: false, message: 'Already saving to library'};
       }
-      const videoId = getYouTubeVideoId(track);
-      const url =
-        track.youtubeUrl || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : '');
-      if (!url) {
-        return {ok: false, message: 'Missing YouTube URL for this track'};
-      }
 
       setYoutubeSaveStates((prev) => ({...prev, [key]: 'saving'}));
       try {
+        const videoId = getYouTubeVideoId(track);
+        let url =
+          track.youtubeUrl || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : '');
+
+        // For Deezer catalog tracks not yet matched to a videoId, resolve on demand first
+        if (!url && track.title) {
+          const resolved = await apiFetch<{videoId: string; url: string}>('/api/yt-stream/resolve', {
+            method: 'POST',
+            body: JSON.stringify({
+              artist: track.artist || '',
+              title: track.title,
+              duration: track.duration || 0,
+            }),
+          });
+          url = resolved.url;
+        }
+
+        if (!url) {
+          setYoutubeSaveStates((prev) => {
+            const next = {...prev};
+            delete next[key];
+            return next;
+          });
+          return {ok: false, message: 'Could not find a matching YouTube stream for this track'};
+        }
+
         await apiFetch('/api/download/start', {
           method: 'POST',
           body: JSON.stringify({
@@ -1305,7 +1357,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
                 url,
                 title: track.title || 'Untitled Track',
                 artist: track.artist || 'Unknown Artist',
-                album: 'Singles',
+                album:
+                  track.album && track.album !== 'YouTube Stream' ? track.album : 'Singles',
                 format,
                 thumbnail_url: track.coverUrl || '',
               },
@@ -1313,7 +1366,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           }),
         });
         setYoutubeSaveStates((prev) => ({...prev, [key]: 'saved'}));
-        return {ok: true, message: `Saving "${track.title}" to library (.${format})`};
+        return {ok: true, message: `Saving "${track.title}" to library`};
       } catch (err) {
         setYoutubeSaveStates((prev) => {
           const next = {...prev};

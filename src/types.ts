@@ -28,6 +28,9 @@ export interface Track {
   streamUrl?: string;
   isYouTubeStream?: boolean;
   youtubeUrl?: string;
+  deezerTrackId?: string;
+  deezerAlbumId?: string;
+  deezerArtistId?: string;
 }
 
 export interface Playlist {
@@ -143,10 +146,15 @@ export interface LrcLine {
 }
 
 export interface DiscoverNewReleaseItem {
-  videoId: string;
+  id?: string;
+  deezerTrackId?: string;
+  videoId?: string;
   url: string;
   title: string;
   artist: string;
+  artistId?: string;
+  album?: string;
+  albumId?: string;
   releaseLabel: string;
   duration: number;
   thumbnailUrl: string;
@@ -157,20 +165,27 @@ export interface DiscoverNewReleaseItem {
 
 export interface DiscoverArtistItem {
   id: string;
+  deezerArtistId?: string;
   name: string;
   subtitle: string;
+  fans?: number;
   seedArtist: string | null;
-  videoId: string;
+  videoId?: string;
   thumbnailUrl: string;
   fallbackThumbnailUrl: string;
 }
 
 export interface DiscoverAlbumItem {
-  videoId: string;
+  id?: string;
+  deezerAlbumId?: string;
+  videoId?: string;
   url: string;
   title: string;
   artist: string;
+  artistId?: string;
   subtitle: string;
+  releaseDate?: string;
+  trackCount?: number;
   duration: number;
   thumbnailUrl: string;
   fallbackThumbnailUrl: string;
@@ -181,9 +196,65 @@ export interface DiscoverFeedResponse {
   seeds: string[];
   basedOnLibrary: boolean;
   cached: boolean;
+  source?: 'deezer' | 'youtube';
   generatedAt: string;
   newReleases: DiscoverNewReleaseItem[];
   artistsToDiscover: DiscoverArtistItem[];
   albumsForYou: DiscoverAlbumItem[];
+}
+
+export interface DiscoverAlbumTrack {
+  id: string;
+  deezerTrackId: string;
+  trackNumber: number;
+  diskNumber: number;
+  title: string;
+  artist: string;
+  artistId?: string;
+  album: string;
+  albumId: string;
+  duration: number;
+  explicit: boolean;
+  coverUrl: string;
+  videoId?: string;
+}
+
+export interface DiscoverAlbumDetail {
+  id: string;
+  deezerAlbumId: string;
+  title: string;
+  artist: string;
+  artistId?: string;
+  artistPictureUrl: string;
+  coverUrl: string;
+  releaseDate: string;
+  label: string;
+  genre: string;
+  trackCount: number;
+  duration: number;
+  tracks: DiscoverAlbumTrack[];
+  cached: boolean;
+}
+
+export interface DiscoverArtistAlbumSummary {
+  id: string;
+  deezerAlbumId: string;
+  title: string;
+  releaseDate: string;
+  recordType: string;
+  coverUrl: string;
+}
+
+export interface DiscoverArtistDetail {
+  id: string;
+  deezerArtistId: string;
+  name: string;
+  pictureUrl: string;
+  fans: number;
+  albumCount: number;
+  topTracks: DiscoverAlbumTrack[];
+  albums: DiscoverArtistAlbumSummary[];
+  relatedArtists: DiscoverArtistItem[];
+  cached: boolean;
 }
 
