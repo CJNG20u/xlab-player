@@ -5,8 +5,27 @@ import path from 'path';
 import {parseFile} from 'music-metadata';
 import {COVERS_DIR, db, getMusicDir} from './db.ts';
 
-export const AUDIO_EXTENSIONS = new Set(['.mp3', '.m4a', '.opus', '.flac', '.ogg', '.wav']);
+export const AUDIO_EXTENSIONS = new Set([
+  '.mp3',
+  '.m4a',
+  '.opus',
+  '.flac',
+  '.ogg',
+  '.wav',
+  '.webm',
+  '.aac',
+]);
 export const PLAYLIST_EXTENSIONS = new Set(['.m3u', '.m3u8']);
+
+export function computeFileSha256(absPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(absPath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
 
 export interface ScanProgress {
   status: 'idle' | 'scanning' | 'done' | 'error';
@@ -167,11 +186,11 @@ function collectMediaFiles(
 const upsertTrackStmt = db.prepare(`
   INSERT INTO tracks (
     rel_path, title, artist, album, track_number, year,
-    duration, format, bitrate, size_bytes, cover_file, dominant_color, lyrics,
+    duration, format, bitrate, size_bytes, cover_file, dominant_color, lyrics, file_hash,
     added_at, updated_at
   ) VALUES (
     @rel_path, @title, @artist, @album, @track_number, @year,
-    @duration, @format, @bitrate, @size_bytes, @cover_file, @dominant_color, @lyrics,
+    @duration, @format, @bitrate, @size_bytes, @cover_file, @dominant_color, @lyrics, @file_hash,
     datetime('now'), datetime('now')
   )
   ON CONFLICT(rel_path) DO UPDATE SET
@@ -184,55 +203,99 @@ const upsertTrackStmt = db.prepare(`
     format = excluded.format,
     bitrate = excluded.bitrate,
     size_bytes = excluded.size_bytes,
-    cover_file = excluded.cover_file,
+    cover_file = COALESCE(excluded.cover_file, tracks.cover_file),
     dominant_color = excluded.dominant_color,
-    lyrics = excluded.lyrics,
+    lyrics = COALESCE(excluded.lyrics, tracks.lyrics),
+    file_hash = COALESCE(excluded.file_hash, tracks.file_hash),
     updated_at = datetime('now')
 `);
 
+export interface IndexSingleFileOverrides {
+  fileHash?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  coverFilePath?: string | null;
+}
+
+const SHA256_BASENAME_RE = /^[a-f0-9]{64}$/i;
+
 export async function indexSingleFile(
   absPath: string,
-  musicDir = getMusicDir()
-): Promise<{id: number; isNew: boolean}> {
+  musicDir = getMusicDir(),
+  overrides: IndexSingleFileOverrides = {}
+): Promise<{id: number; isNew: boolean; fileHash: string | null}> {
   const relPath = path.relative(musicDir, absPath).split(path.sep).join('/');
   const stat = fs.statSync(absPath);
   const existing = db
-    .prepare('SELECT id FROM tracks WHERE rel_path = ?')
-    .get(relPath) as {id: number} | undefined;
+    .prepare(
+      'SELECT id, title, artist, album, cover_file, dominant_color, file_hash FROM tracks WHERE rel_path = ?'
+    )
+    .get(relPath) as
+    | {
+        id: number;
+        title: string;
+        artist: string;
+        album: string;
+        cover_file: string | null;
+        dominant_color: string;
+        file_hash: string | null;
+      }
+    | undefined;
 
   const baseName = path.basename(absPath, path.extname(absPath));
   const ext = path.extname(absPath).replace('.', '').toLowerCase();
+  const isHashNamedFile = SHA256_BASENAME_RE.test(baseName);
 
-  let title = baseName;
-  let artist = 'Unknown Artist';
-  let album = 'Unknown Album';
+  let title =
+    overrides.title?.trim() ||
+    (isHashNamedFile && existing?.title && !SHA256_BASENAME_RE.test(existing.title)
+      ? existing.title
+      : baseName);
+  let artist =
+    overrides.artist?.trim() ||
+    (isHashNamedFile && existing?.artist ? existing.artist : 'Unknown Artist');
+  let album =
+    overrides.album?.trim() ||
+    (isHashNamedFile && existing?.album ? existing.album : 'Unknown Album');
   let trackNumber: number | null = null;
   let year: number | null = null;
   let duration = 0;
   let bitrate = 0;
-  let coverFile: string | null = null;
-  let dominantColor = deterministicColor(relPath);
+  let detectedFormat = ext;
+  let coverFile: string | null = existing?.cover_file || null;
+  let dominantColor = existing?.dominant_color || deterministicColor(relPath);
   let lyrics: string | null = extractSidecarLyrics(absPath);
 
-  const segments = relPath.split('/');
-  if (segments.length >= 3) {
-    artist = segments[segments.length - 3] || artist;
-    album = segments[segments.length - 2] || album;
-  } else if (segments.length === 2 && segments[0].toLowerCase() !== 'uploads') {
-    artist = segments[0] || artist;
+  if (!isHashNamedFile && !overrides.artist) {
+    const segments = relPath.split('/');
+    if (segments.length >= 3) {
+      artist = segments[segments.length - 3] || artist;
+      album = segments[segments.length - 2] || album;
+    } else if (
+      segments.length === 2 &&
+      segments[0].toLowerCase() !== 'uploads' &&
+      segments[0].toLowerCase() !== 'tracks'
+    ) {
+      artist = segments[0] || artist;
+    }
   }
 
+  let hasEmbeddedCover = false;
   try {
     const metadata = await parseFile(absPath, {duration: true});
     const {common, format} = metadata;
-    if (common.title?.trim()) title = common.title.trim();
-    if (common.artist?.trim()) artist = common.artist.trim();
-    else if (common.albumartist?.trim()) artist = common.albumartist.trim();
-    if (common.album?.trim()) album = common.album.trim();
+    if (common.title?.trim() && !overrides.title?.trim()) title = common.title.trim();
+    if (common.artist?.trim() && !overrides.artist?.trim()) artist = common.artist.trim();
+    else if (common.albumartist?.trim() && !overrides.artist?.trim()) artist = common.albumartist.trim();
+    if (common.album?.trim() && !overrides.album?.trim()) album = common.album.trim();
     if (common.track?.no) trackNumber = common.track.no;
     if (common.year) year = common.year;
     if (format.duration) duration = Math.round(format.duration * 100) / 100;
     if (format.bitrate) bitrate = Math.round(format.bitrate / 1000);
+    if (!detectedFormat && format.codec) {
+      detectedFormat = format.codec.toLowerCase().slice(0, 16);
+    }
 
     if (!lyrics) {
       lyrics = extractEmbeddedLyrics(common as Parameters<typeof extractEmbeddedLyrics>[0]);
@@ -253,11 +316,58 @@ export async function indexSingleFile(
       }
       coverFile = fileName;
       dominantColor = deriveTintFromCover(picture.data, `${artist}-${album}`);
-    } else {
-      dominantColor = deterministicColor(`${artist}-${album}`);
+      hasEmbeddedCover = true;
     }
   } catch {
+    // Fall back to overrides / computed values below
+  }
+
+  // Fallback cover ingestion for containers like Opus/WebM that may not carry embedded artwork
+  if (!hasEmbeddedCover && overrides.coverFilePath && fs.existsSync(overrides.coverFilePath)) {
+    try {
+      const coverBytes = fs.readFileSync(overrides.coverFilePath);
+      if (coverBytes.length > 0) {
+        const hash = crypto.createHash('sha1').update(coverBytes).digest('hex');
+        const coverExt = path.extname(overrides.coverFilePath).replace('.', '').toLowerCase();
+        const safeCoverExt =
+          coverExt === 'png' || coverExt === 'webp' || coverExt === 'jpeg' || coverExt === 'jpg'
+            ? coverExt === 'jpeg'
+              ? 'jpg'
+              : coverExt
+            : 'jpg';
+        const fileName = `${hash}.${safeCoverExt}`;
+        const destPath = path.join(COVERS_DIR, fileName);
+        if (!fs.existsSync(destPath)) {
+          fs.writeFileSync(destPath, coverBytes);
+        }
+        coverFile = fileName;
+        dominantColor = deriveTintFromCover(coverBytes, `${artist}-${album}`);
+        hasEmbeddedCover = true;
+      }
+    } catch {
+      // Ignore unreadable external cover
+    }
+  }
+
+  if (!hasEmbeddedCover && !existing?.cover_file) {
     dominantColor = deterministicColor(`${artist}-${album}`);
+  }
+
+  // Estimate bitrate if container metadata omitted it
+  if (!bitrate && duration > 0 && stat.size > 0) {
+    bitrate = Math.round((stat.size * 8) / duration / 1000);
+  }
+
+  let fileHash = overrides.fileHash || existing?.file_hash || null;
+  if (!fileHash && isHashNamedFile) {
+    fileHash = baseName.toLowerCase();
+  }
+  if (!fileHash) {
+    try {
+      fileHash = await computeFileSha256(absPath);
+    } catch {
+      fileHash = null;
+    }
   }
 
   upsertTrackStmt.run({
@@ -268,18 +378,19 @@ export async function indexSingleFile(
     track_number: trackNumber,
     year,
     duration,
-    format: ext,
+    format: detectedFormat || ext,
     bitrate,
     size_bytes: stat.size,
     cover_file: coverFile,
     dominant_color: dominantColor,
     lyrics,
+    file_hash: fileHash,
   });
 
   const row = db
     .prepare('SELECT id FROM tracks WHERE rel_path = ?')
     .get(relPath) as {id: number};
-  return {id: row.id, isNew: !existing};
+  return {id: row.id, isNew: !existing, fileHash};
 }
 
 interface ParsedM3uEntry {

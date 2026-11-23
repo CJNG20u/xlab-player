@@ -44,6 +44,9 @@ export interface Playlist {
   covers: string[];
 }
 
+export type SearchSource = 'youtube' | 'ytmusic';
+export type DownloadQuality = 'standard' | 'high' | 'ultra';
+
 export interface MetadataPreviewItem {
   id: string;
   url: string;
@@ -53,6 +56,7 @@ export interface MetadataPreviewItem {
   album: string;
   duration: number;
   thumbnail_url: string;
+  source?: SearchSource;
   duplicateTrack: {id: number; title: string; artist: string; album: string} | null;
 }
 
@@ -63,7 +67,8 @@ export interface DownloadJob {
   title: string;
   artist: string;
   album: string;
-  format: 'm4a' | 'opus';
+  format: 'm4a' | 'opus' | 'mp3' | string;
+  quality?: DownloadQuality;
   status: 'queued' | 'downloading' | 'processing' | 'completed' | 'error';
   progress: number;
   stage: string;
@@ -125,6 +130,7 @@ export interface AppSettings {
   ytdlp_force_ipv4: string;
   ytdlp_extra_flags: string;
   ytdlp_crop_cover: string;
+  ytdlp_download_quality?: string;
   cookies_status?: string;
   cookies_tested_at?: string;
 }

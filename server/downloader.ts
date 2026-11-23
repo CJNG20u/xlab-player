@@ -1,4 +1,4 @@
-import {execFile, spawn} from 'child_process';
+import {type ChildProcess, execFile, spawn} from 'child_process';
 import crypto from 'crypto';
 import {EventEmitter} from 'events';
 import fs from 'fs';
@@ -14,9 +14,12 @@ import {
   getYtdlpPath,
   setSetting,
 } from './db.ts';
-import {indexSingleFile} from './scanner.ts';
+import {computeFileSha256, indexSingleFile} from './scanner.ts';
 
 const execFileAsync = promisify(execFile);
+
+export type DownloadQuality = 'standard' | 'high' | 'ultra';
+export type SearchSource = 'youtube' | 'ytmusic';
 
 export interface DownloadJobRow {
   id: number;
@@ -26,6 +29,7 @@ export interface DownloadJobRow {
   artist: string;
   album: string;
   format: string;
+  quality?: DownloadQuality;
   status: 'queued' | 'downloading' | 'processing' | 'completed' | 'error';
   progress: number;
   stage: string;
@@ -45,6 +49,7 @@ export interface MetadataPreviewItem {
   album: string;
   duration: number;
   thumbnail_url: string;
+  source?: SearchSource;
   duplicateTrack: {id: number; title: string; artist: string; album: string} | null;
 }
 
@@ -52,6 +57,105 @@ export const downloadEvents = new EventEmitter();
 downloadEvents.setMaxListeners(50);
 
 let isProcessingQueue = false;
+const activeDownloadJobs = new Map<number, {child: ChildProcess | null; canceled: boolean}>();
+
+const RECOVERABLE_COOKIE_ERROR_PATTERNS = [
+  'requested format is not available',
+  'sign in to confirm',
+  'confirm your age',
+  'age-restricted',
+  'age restricted',
+  'http error 403',
+  '403: forbidden',
+  'login required',
+  'cookies',
+  'not a bot',
+  'private video',
+];
+
+function isRecoverableCookieError(errMessage: string): boolean {
+  const lower = (errMessage || '').toLowerCase();
+  return RECOVERABLE_COOKIE_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
+}
+
+function hasConfiguredCookies(): boolean {
+  try {
+    return fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeDownloadQuality(raw?: unknown): DownloadQuality {
+  const val = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (val === 'standard' || val === 'high' || val === 'ultra') return val;
+  const settingVal = getSetting('ytdlp_download_quality', 'ultra').trim().toLowerCase();
+  if (settingVal === 'standard' || settingVal === 'high' || settingVal === 'ultra') {
+    return settingVal;
+  }
+  return 'ultra';
+}
+
+interface YtdlpInvocation {
+  cmd: string;
+  prefixArgs: string[];
+  env: NodeJS.ProcessEnv;
+}
+
+function resolveYtdlpInvocation(forcePythonModule = false): YtdlpInvocation {
+  const env: NodeJS.ProcessEnv = {...process.env, PYTHONUNBUFFERED: '1'};
+  if (forcePythonModule) {
+    return {cmd: 'python3', prefixArgs: ['-u', '-m', 'yt_dlp'], env};
+  }
+  const ytdlpPath = getYtdlpPath();
+  // If the configured yt-dlp path is a Python zipapp/script (e.g. /usr/local/bin/yt-dlp),
+  // invoke via `python3 -u <path>` for unbuffered isolated execution matching `python -u -m yt_dlp`.
+  try {
+    if (path.isAbsolute(ytdlpPath) && fs.existsSync(ytdlpPath)) {
+      const fd = fs.openSync(ytdlpPath, 'r');
+      try {
+        const header = Buffer.alloc(64);
+        const bytesRead = fs.readSync(fd, header, 0, 64, 0);
+        const shebang = header.subarray(0, bytesRead).toString('utf-8');
+        if (shebang.startsWith('#!') && /python/i.test(shebang.split('\n')[0] || '')) {
+          return {cmd: 'python3', prefixArgs: ['-u', ytdlpPath], env};
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+  } catch {
+    // Fall back to direct execution below
+  }
+  return {cmd: ytdlpPath, prefixArgs: [], env};
+}
+
+async function execYtdlp(
+  args: string[],
+  options: {timeout?: number; maxBuffer?: number} = {}
+): Promise<{stdout: string; stderr: string}> {
+  const primary = resolveYtdlpInvocation(false);
+  try {
+    return await execFileAsync(primary.cmd, [...primary.prefixArgs, ...args], {
+      timeout: options.timeout ?? 30000,
+      maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+      env: primary.env,
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT' && primary.cmd !== 'python3') {
+      const fallback = resolveYtdlpInvocation(true);
+      return await execFileAsync(fallback.cmd, [...fallback.prefixArgs, ...args], {
+        timeout: options.timeout ?? 30000,
+        maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+        env: fallback.env,
+      });
+    }
+    throw err;
+  }
+}
 
 export function sanitizeNasSegment(name: string, fallback: string): string {
   const cleaned = (name || '')
@@ -274,11 +378,181 @@ function normalizeMetadataEntry(
   };
 }
 
-export async function fetchMetadataPreview(input: string): Promise<{
+export function extractYouTubeVideoIdFromUrl(raw: string): string | null {
+  const trimmed = (raw || '').trim();
+  if (YOUTUBE_VIDEO_ID_RE.test(trimmed)) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    const v = parsed.searchParams.get('v');
+    if (v && YOUTUBE_VIDEO_ID_RE.test(v)) return v;
+    if (parsed.hostname === 'youtu.be') {
+      const seg = parsed.pathname.replace(/^\//, '').split('/')[0];
+      if (seg && YOUTUBE_VIDEO_ID_RE.test(seg)) return seg;
+    }
+    const shortsMatch = /^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{6,20})/.exec(parsed.pathname);
+    if (shortsMatch) return shortsMatch[1];
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function parseFlatEntriesFromJson(stdout: string): {
+  isPlaylist: boolean;
+  playlistTitle: string | null;
+  entries: Array<Record<string, unknown>>;
+} {
+  const trimmed = stdout.trim();
+  const entries: Array<Record<string, unknown>> = [];
+  let isPlaylist = false;
+  let playlistTitle: string | null = null;
+
+  // Handle both --dump-single-json and newline-delimited --dump-json outputs
+  const firstBrace = trimmed.indexOf('{');
+  if (firstBrace !== -1) {
+    try {
+      const data = JSON.parse(trimmed.slice(firstBrace)) as Record<string, unknown>;
+      if (data._type === 'playlist' && Array.isArray(data.entries)) {
+        isPlaylist = true;
+        playlistTitle = typeof data.title === 'string' ? data.title : null;
+        for (const sub of data.entries) {
+          if (sub && typeof sub === 'object') {
+            entries.push(sub as Record<string, unknown>);
+          }
+        }
+        return {isPlaylist, playlistTitle, entries};
+      }
+      entries.push(data);
+      return {isPlaylist: false, playlistTitle: null, entries};
+    } catch {
+      // Fall through to NDJSON line parser
+    }
+  }
+
+  for (const line of trimmed.split(/\r?\n/)) {
+    const clean = line.trim();
+    if (!clean.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(clean) as Record<string, unknown>;
+      if (parsed._type === 'playlist' && Array.isArray(parsed.entries)) {
+        isPlaylist = true;
+        if (!playlistTitle && typeof parsed.title === 'string') playlistTitle = parsed.title;
+        for (const sub of parsed.entries) {
+          if (sub && typeof sub === 'object') {
+            entries.push(sub as Record<string, unknown>);
+          }
+        }
+      } else {
+        entries.push(parsed);
+      }
+    } catch {
+      // Skip malformed line
+    }
+  }
+
+  return {isPlaylist, playlistTitle, entries};
+}
+
+export async function peekTrackMetadata(urlOrVideoId: string): Promise<{
+  videoId: string | null;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  thumbnail_url: string;
+}> {
+  const trimmed = (urlOrVideoId || '').trim();
+  const videoId = extractYouTubeVideoIdFromUrl(trimmed);
+  const targetUrl = videoId
+    ? `https://www.youtube.com/watch?v=${videoId}`
+    : /^https?:\/\//i.test(trimmed)
+      ? trimmed
+      : '';
+  if (!targetUrl) {
+    throw new Error('Invalid URL or YouTube video ID for metadata peek');
+  }
+
+  const runPeek = async (cookiePath: string | null): Promise<Record<string, unknown>> => {
+    const args = [
+      '--dump-single-json',
+      '--skip-download',
+      '--no-playlist',
+      '--quiet',
+      '--no-warnings',
+      '--js-runtimes',
+      'node',
+      '--force-ipv4',
+    ];
+    if (cookiePath) {
+      args.push('--cookies', cookiePath);
+    }
+    if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+      args.push('--remote-components', 'ejs:github');
+    }
+    args.push('--', targetUrl);
+
+    const {stdout} = await execYtdlp(args, {
+      timeout: 25000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const jsonStart = stdout.indexOf('{');
+    if (jsonStart === -1) {
+      throw new Error('Empty metadata peek response');
+    }
+    return JSON.parse(stdout.slice(jsonStart)) as Record<string, unknown>;
+  };
+
+  let data: Record<string, unknown>;
+  // Anonymous-first metadata peek; retry with cookies.txt only on auth/age/403 errors
+  try {
+    data = await runPeek(null);
+  } catch (anonErr) {
+    const msg = anonErr instanceof Error ? anonErr.message : String(anonErr);
+    if (!isRecoverableCookieError(msg) || !hasConfiguredCookies()) {
+      throw anonErr;
+    }
+    const tempCookiePath = createTempCookiesCopy();
+    try {
+      data = await runPeek(tempCookiePath);
+    } finally {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        try {
+          fs.unlinkSync(tempCookiePath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  const normalized = normalizeMetadataEntry(data, targetUrl, 'Singles');
+  const resolvedId =
+    (typeof data.id === 'string' && YOUTUBE_VIDEO_ID_RE.test(data.id.trim())
+      ? data.id.trim()
+      : videoId) || null;
+  if (resolvedId && normalized.thumbnail_url) {
+    cacheYouTubeThumbnailUrl(resolvedId, normalized.thumbnail_url);
+  }
+
+  return {
+    videoId: resolvedId,
+    title: normalized.title,
+    artist: normalized.artist,
+    album: normalized.album,
+    duration: normalized.duration,
+    thumbnail_url: normalized.thumbnail_url,
+  };
+}
+
+export async function fetchMetadataPreview(
+  input: string,
+  options: {source?: SearchSource; limit?: number} = {}
+): Promise<{
   mode: 'search' | 'single' | 'playlist';
   isSearch: boolean;
   isPlaylist: boolean;
   playlistTitle: string | null;
+  source?: SearchSource;
   items: MetadataPreviewItem[];
 }> {
   const ytdlpPath = getYtdlpPath();
@@ -288,109 +562,159 @@ export async function fetchMetadataPreview(input: string): Promise<{
   }
 
   const isUrl = /^https?:\/\//i.test(trimmed);
-  const tempCookiePath = createTempCookiesCopy();
+  const requestedSource: SearchSource = options.source === 'ytmusic' ? 'ytmusic' : 'youtube';
+  const searchLimit = Math.min(Math.max(Number(options.limit) || 25, 1), 30);
+
+  const runFlatSearch = async (target: string, extraArgs: string[] = []) => {
+    const args = [
+      '--flat-playlist',
+      '--dump-single-json',
+      '--quiet',
+      '--no-warnings',
+      '--no-playlist',
+      '--js-runtimes',
+      'node',
+      '--force-ipv4',
+      ...extraArgs,
+    ];
+    if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+      args.push('--remote-components', 'ejs:github');
+    }
+    args.push('--', target);
+    const {stdout} = await execYtdlp(args, {
+      timeout: 35000,
+      maxBuffer: 15 * 1024 * 1024,
+    });
+    return parseFlatEntriesFromJson(stdout);
+  };
 
   try {
     if (!isUrl) {
-      // Plain-text song/artist search -> yt-dlp --dump-json --flat-playlist "ytsearch25:<query>"
-      const args = [
-        '--dump-json',
-        '--flat-playlist',
-        '--no-warnings',
-        ...buildResilienceArgs(tempCookiePath, {includeSleep: false}),
-        `ytsearch25:${trimmed}`,
-      ];
+      let resolvedSource: SearchSource = requestedSource;
+      let rawEntries: Array<Record<string, unknown>> = [];
 
-      const {stdout} = await execFileAsync(ytdlpPath, args, {
-        timeout: 45000,
-        maxBuffer: 15 * 1024 * 1024,
-      });
-
-      const rawEntries: Array<Record<string, unknown>> = [];
-      for (const line of stdout.split(/\r?\n/)) {
-        const clean = line.trim();
-        if (!clean.startsWith('{')) continue;
+      if (requestedSource === 'ytmusic') {
+        const ytMusicUrl = `https://music.youtube.com/search?q=${encodeURIComponent(trimmed)}#songs`;
         try {
-          const parsed = JSON.parse(clean) as Record<string, unknown>;
-          if (parsed._type === 'playlist' && Array.isArray(parsed.entries)) {
-            for (const sub of parsed.entries) {
-              if (sub && typeof sub === 'object') {
-                rawEntries.push(sub as Record<string, unknown>);
-              }
-            }
-          } else {
-            rawEntries.push(parsed);
-          }
+          const parsed = await runFlatSearch(ytMusicUrl, ['--playlist-end', String(searchLimit)]);
+          rawEntries = parsed.entries.filter((e) => {
+            const id = typeof e.id === 'string' ? e.id.trim() : '';
+            return Boolean(id && YOUTUBE_VIDEO_ID_RE.test(id));
+          });
         } catch {
-          // Skip malformed output lines
+          rawEntries = [];
         }
+        // Seamless fallback to standard ytsearch if YT Music flat search yields no playable songs
+        if (rawEntries.length === 0) {
+          resolvedSource = 'youtube';
+          const parsed = await runFlatSearch(`ytsearch${searchLimit}:${trimmed}`);
+          rawEntries = parsed.entries;
+        }
+      } else {
+        const parsed = await runFlatSearch(`ytsearch${searchLimit}:${trimmed}`);
+        rawEntries = parsed.entries;
       }
 
       const items = rawEntries
         .filter((e) => e && (e.title || e.id))
-        .slice(0, 25)
-        .map((entry) => normalizeMetadataEntry(entry, trimmed, 'Singles'));
+        .slice(0, searchLimit)
+        .map((entry) => {
+          const normalized = normalizeMetadataEntry(entry, trimmed, 'Singles');
+          if (YOUTUBE_VIDEO_ID_RE.test(normalized.id) && normalized.thumbnail_url) {
+            cacheYouTubeThumbnailUrl(normalized.id, normalized.thumbnail_url);
+          }
+          return {...normalized, source: resolvedSource};
+        });
 
       return {
         mode: 'search',
         isSearch: true,
         isPlaylist: false,
         playlistTitle: null,
+        source: resolvedSource,
         items,
       };
     }
 
-    // Direct URL (single video or playlist)
-    const args = [
-      '--dump-single-json',
-      '--flat-playlist',
-      '--no-warnings',
-      ...buildResilienceArgs(tempCookiePath, {includeSleep: false}),
-      trimmed,
-    ];
+    // Direct URL (single video or playlist) — anonymous first, cookies retry only if needed
+    const runDirectUrlInspect = async (cookiePath: string | null) => {
+      const args = [
+        '--dump-single-json',
+        '--flat-playlist',
+        '--quiet',
+        '--no-warnings',
+        '--js-runtimes',
+        'node',
+        '--force-ipv4',
+      ];
+      if (cookiePath) {
+        args.push('--cookies', cookiePath);
+      }
+      if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+        args.push('--remote-components', 'ejs:github');
+      }
+      args.push('--', trimmed);
 
-    const {stdout} = await execFileAsync(ytdlpPath, args, {
-      timeout: 45000,
-      maxBuffer: 15 * 1024 * 1024,
-    });
+      const {stdout} = await execYtdlp(args, {
+        timeout: 45000,
+        maxBuffer: 15 * 1024 * 1024,
+      });
+      return parseFlatEntriesFromJson(stdout);
+    };
 
-    const data = JSON.parse(stdout) as Record<string, unknown>;
-    const isPlaylist = Boolean(data._type === 'playlist' && Array.isArray(data.entries));
-    const playlistTitle = isPlaylist ? String(data.title || 'Playlist') : null;
-    const rawEntries: Array<Record<string, unknown>> = isPlaylist
-      ? (data.entries as Array<Record<string, unknown>>)
-      : [data];
+    let parsed: {
+      isPlaylist: boolean;
+      playlistTitle: string | null;
+      entries: Array<Record<string, unknown>>;
+    };
+    try {
+      parsed = await runDirectUrlInspect(null);
+    } catch (anonErr) {
+      const msg = anonErr instanceof Error ? anonErr.message : String(anonErr);
+      if (!isRecoverableCookieError(msg) || !hasConfiguredCookies()) {
+        throw anonErr;
+      }
+      const tempCookiePath = createTempCookiesCopy();
+      try {
+        parsed = await runDirectUrlInspect(tempCookiePath);
+      } finally {
+        if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+          try {
+            fs.unlinkSync(tempCookiePath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
 
-    const fallbackAlbum = isPlaylist && playlistTitle ? playlistTitle : 'Singles';
-
-    const items = rawEntries
+    const fallbackAlbum = parsed.isPlaylist && parsed.playlistTitle ? parsed.playlistTitle : 'Singles';
+    const items = parsed.entries
       .filter((e) => e && (e.title || e.id))
       .slice(0, 50)
-      .map((entry) => normalizeMetadataEntry(entry, trimmed, fallbackAlbum));
+      .map((entry) => {
+        const normalized = normalizeMetadataEntry(entry, trimmed, fallbackAlbum);
+        if (YOUTUBE_VIDEO_ID_RE.test(normalized.id) && normalized.thumbnail_url) {
+          cacheYouTubeThumbnailUrl(normalized.id, normalized.thumbnail_url);
+        }
+        return normalized;
+      });
 
     return {
-      mode: isPlaylist ? 'playlist' : 'single',
+      mode: parsed.isPlaylist ? 'playlist' : 'single',
       isSearch: false,
-      isPlaylist,
-      playlistTitle,
+      isPlaylist: parsed.isPlaylist,
+      playlistTitle: parsed.playlistTitle,
       items,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('ENOENT')) {
       throw new Error(
-        `yt-dlp binary ("${ytdlpPath}") is not installed on this server. Install yt-dlp in your Proxmox LXC container or use Upload Local Audio Files below.`
+        `yt-dlp binary ("${ytdlpPath}") is not installed on this server.`
       );
     }
     throw new Error(`Failed to fetch metadata: ${msg.slice(0, 320)}`);
-  } finally {
-    if (tempCookiePath && fs.existsSync(tempCookiePath)) {
-      try {
-        fs.unlinkSync(tempCookiePath);
-      } catch {
-        // Ignore cleanup failure
-      }
-    }
   }
 }
 
@@ -411,9 +735,53 @@ function updateJob(id: number, fields: Partial<DownloadJobRow>): DownloadJobRow 
   }
   const updated = db
     .prepare('SELECT * FROM download_jobs WHERE id = ?')
-    .get(id) as DownloadJobRow;
-  downloadEvents.emit('job', updated);
-  return updated;
+    .get(id) as DownloadJobRow | undefined;
+  if (updated) {
+    downloadEvents.emit('job', updated);
+    return updated;
+  }
+  return {
+    id,
+    user_id: null,
+    url: '',
+    title: '',
+    artist: '',
+    album: '',
+    format: 'm4a',
+    quality: 'ultra',
+    status: 'error',
+    progress: 0,
+    stage: 'Canceled',
+    track_id: null,
+    error_log: '',
+    thumbnail_url: '',
+    created_at: '',
+    updated_at: '',
+  };
+}
+
+export function cancelDownloadJob(id: number): void {
+  const active = activeDownloadJobs.get(id);
+  if (active) {
+    active.canceled = true;
+    if (active.child && !active.child.killed) {
+      try {
+        active.child.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
+      const proc = active.child;
+      setTimeout(() => {
+        if (!proc.killed) {
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }
+      }, 2500);
+    }
+  }
 }
 
 export function enqueueDownloadJob(params: {
@@ -422,13 +790,25 @@ export function enqueueDownloadJob(params: {
   title: string;
   artist: string;
   album: string;
-  format: 'm4a' | 'opus';
+  format?: string;
+  quality?: DownloadQuality;
   thumbnailUrl?: string;
 }): DownloadJobRow {
+  const quality = normalizeDownloadQuality(params.quality);
+  const requestedFormat = String(params.format || '').trim().toLowerCase();
+  const storedFormat =
+    quality === 'standard' || quality === 'high'
+      ? 'mp3'
+      : requestedFormat === 'opus'
+        ? 'opus'
+        : requestedFormat === 'mp3'
+          ? 'mp3'
+          : 'm4a';
+
   const result = db
     .prepare(
-      `INSERT INTO download_jobs (user_id, url, title, artist, album, format, status, progress, stage, thumbnail_url)
-       VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, 'Queued', ?)`
+      `INSERT INTO download_jobs (user_id, url, title, artist, album, format, quality, status, progress, stage, thumbnail_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, 'Queued', ?)`
     )
     .run(
       params.userId,
@@ -436,7 +816,8 @@ export function enqueueDownloadJob(params: {
       params.title,
       params.artist,
       params.album,
-      params.format,
+      storedFormat,
+      quality,
       params.thumbnailUrl || ''
     );
   const job = db
@@ -464,59 +845,89 @@ async function processDownloadQueue(): Promise<void> {
   }
 }
 
-async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
-  const ytdlpPath = getYtdlpPath();
-  const ffmpegPath = getFfmpegPath();
-  const cropCover = getSetting('ytdlp_crop_cover', 'true') === 'true';
-  const musicDir = getMusicDir();
+const IMAGE_FILE_RE = /\.(jpg|jpeg|png|webp)$/i;
+const ALLOWED_FINAL_AUDIO_EXTS = new Set(['opus', 'm4a', 'mp3', 'ogg', 'webm', 'flac', 'wav', 'aac']);
 
-  const safeArtist = sanitizeNasSegment(job.artist, 'Unknown Artist');
-  const safeAlbum = sanitizeNasSegment(job.album, 'Singles');
-  const safeTitle = sanitizeNasSegment(job.title, `Track_${job.id}`);
-  const audioExt = job.format === 'opus' ? 'opus' : 'm4a';
+function findUuidDownloadedAudio(tmpWorkDir: string, jobUuid: string): string | null {
+  const files = fs.readdirSync(tmpWorkDir);
+  const match = files.find(
+    (f) =>
+      f.startsWith(`${jobUuid}.`) &&
+      !IMAGE_FILE_RE.test(f) &&
+      !f.endsWith('.part') &&
+      !f.endsWith('.ytdl') &&
+      !f.endsWith('.json') &&
+      !f.endsWith('.tmp')
+  );
+  return match ? path.join(tmpWorkDir, match) : null;
+}
 
-  const destFolder = path.join(musicDir, safeArtist, safeAlbum);
-  const finalAudioPath = path.join(destFolder, `${safeTitle}.${audioExt}`);
+function findUuidDownloadedThumb(tmpWorkDir: string, jobUuid: string): string | null {
+  const files = fs.readdirSync(tmpWorkDir);
+  const match = files.find((f) => f.startsWith(`${jobUuid}.`) && IMAGE_FILE_RE.test(f));
+  return match ? path.join(tmpWorkDir, match) : null;
+}
 
-  const tmpWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlab-dl-'));
-  const tempCookiePath = createTempCookiesCopy();
-
+function cleanUuidTempAudioFiles(tmpWorkDir: string, jobUuid: string): void {
   try {
-    fs.mkdirSync(destFolder, {recursive: true});
-    updateJob(job.id, {status: 'downloading', progress: 2, stage: 'Downloading', error_log: ''});
+    for (const f of fs.readdirSync(tmpWorkDir)) {
+      if (f.startsWith(`${jobUuid}.`) && !IMAGE_FILE_RE.test(f)) {
+        try {
+          fs.unlinkSync(path.join(tmpWorkDir, f));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
 
-    const outTemplate = path.join(tmpWorkDir, 'audio.%(ext)s');
-    const args = [
-      '--newline',
-      '--no-playlist',
-      '--windows-filenames',
-      '--extract-audio',
-      '--audio-format',
-      audioExt,
-      '--audio-quality',
-      '0',
-      '--write-thumbnail',
-      '--convert-thumbnails',
-      'jpg',
-      '--ffmpeg-location',
-      ffmpegPath,
-      ...buildResilienceArgs(tempCookiePath),
-      '-o',
-      outTemplate,
-      job.url,
-    ];
+function spawnYtdlpStage(
+  jobId: number,
+  stageLabel: string,
+  args: string[],
+  progressFloor: number,
+  progressCeiling: number
+): Promise<void> {
+  const state = activeDownloadJobs.get(jobId);
+  if (state?.canceled) {
+    return Promise.reject(new Error('Download canceled'));
+  }
 
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(ytdlpPath, args, {stdio: ['ignore', 'pipe', 'pipe']});
+  const runSpawn = (forcePythonModule: boolean): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const invocation = resolveYtdlpInvocation(forcePythonModule);
+      const child = spawn(invocation.cmd, [...invocation.prefixArgs, ...args], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: invocation.env,
+      });
+
+      const currentState = activeDownloadJobs.get(jobId);
+      if (currentState) {
+        currentState.child = child;
+        if (currentState.canceled) {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            // ignore
+          }
+        }
+      }
+
       let stderrBuf = '';
+      let sawEnoent = false;
 
       child.stdout.on('data', (chunk: Buffer) => {
         const lines = chunk.toString().split('\n');
         for (const line of lines) {
           const match = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
           if (match) {
-            const pct = Math.min(75, Math.round(parseFloat(match[1]) * 0.75));
-            updateJob(job.id, {progress: pct, stage: 'Downloading'});
+            const rawPct = parseFloat(match[1]);
+            const span = progressCeiling - progressFloor;
+            const pct = Math.min(progressCeiling, Math.round(progressFloor + (rawPct / 100) * span));
+            updateJob(jobId, {progress: pct, stage: stageLabel});
           }
         }
       });
@@ -526,29 +937,268 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
       });
 
       child.on('error', (err) => {
-        reject(new Error(`Could not launch ${ytdlpPath}: ${err.message}`));
+        const errCode = (err as NodeJS.ErrnoException).code;
+        if (errCode === 'ENOENT' && !forcePythonModule && invocation.cmd !== 'python3') {
+          sawEnoent = true;
+          runSpawn(true).then(resolve, reject);
+          return;
+        }
+        reject(new Error(`Could not launch yt-dlp: ${err.message}`));
       });
 
       child.on('close', (code) => {
+        if (sawEnoent) return;
+        const latestState = activeDownloadJobs.get(jobId);
+        if (latestState && latestState.child === child) {
+          latestState.child = null;
+        }
+        if (latestState?.canceled) {
+          reject(new Error('Download canceled'));
+          return;
+        }
         if (code === 0) resolve();
         else reject(new Error(stderrBuf.trim() || `yt-dlp exited with code ${code}`));
       });
     });
 
-    // Find downloaded audio file and thumbnail in tmpWorkDir
-    const tmpFiles = fs.readdirSync(tmpWorkDir);
-    const downloadedAudio = tmpFiles.find((f) => f.startsWith('audio.') && !f.endsWith('.jpg') && !f.endsWith('.webp') && !f.endsWith('.png'));
-    if (!downloadedAudio) {
-      throw new Error('Downloaded audio file not found after yt-dlp finished');
-    }
-    const downloadedAudioPath = path.join(tmpWorkDir, downloadedAudio);
-    const thumbFile = tmpFiles.find((f) => /\.(jpg|jpeg|png|webp)$/i.test(f));
-    let coverPath: string | null = thumbFile ? path.join(tmpWorkDir, thumbFile) : null;
+  return runSpawn(false);
+}
 
-    // Stage 2: Crop 1:1 square cover art with FFmpeg
+function needsMetadataRecovery(title: string, artist: string): boolean {
+  const t = (title || '').trim().toLowerCase();
+  const a = (artist || '').trim().toLowerCase();
+  if (!t || t === 'untitled' || t === 'untitled track' || /^https?:\/\//i.test(t)) return true;
+  if (!a || a === 'unknown artist' || a === 'youtube' || a === 'unknown channel') return true;
+  return false;
+}
+
+async function fetchFallbackCoverFile(
+  tmpWorkDir: string,
+  jobUuid: string,
+  videoId: string | null,
+  fallbackUrl: string
+): Promise<string | null> {
+  const candidates: string[] = [];
+  if (videoId) {
+    const cached = getCachedYouTubeThumbnailUrl(videoId);
+    if (cached) candidates.push(cached);
+    candidates.push(`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`);
+    candidates.push(`https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`);
+    candidates.push(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`);
+  }
+  if (fallbackUrl && isAllowedYouTubeMediaUrl(fallbackUrl)) {
+    candidates.push(fallbackUrl);
+  }
+
+  for (const url of candidates) {
+    if (!isAllowedYouTubeMediaUrl(url)) continue;
+    try {
+      const resp = await fetch(url, {
+        headers: {Accept: 'image/*'},
+        redirect: 'follow',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) {
+        await resp.body?.cancel().catch(() => {});
+        continue;
+      }
+      if (resp.url && !isAllowedYouTubeMediaUrl(resp.url)) {
+        await resp.body?.cancel().catch(() => {});
+        continue;
+      }
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length < 512) continue;
+      const outPath = path.join(tmpWorkDir, `${jobUuid}-fallback-cover.jpg`);
+      fs.writeFileSync(outPath, buf);
+      return outPath;
+    } catch {
+      // Try next thumbnail candidate
+    }
+  }
+  return null;
+}
+
+async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
+  const ffmpegPath = getFfmpegPath();
+  const cropCover = getSetting('ytdlp_crop_cover', 'true') === 'true';
+  const musicDir = path.resolve(getMusicDir());
+  const quality = normalizeDownloadQuality(job.quality);
+
+  const jobUuid = crypto.randomUUID();
+  const tmpWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlab-dl-'));
+  let tempCookiePath: string | null = null;
+
+  activeDownloadJobs.set(job.id, {child: null, canceled: false});
+
+  try {
+    let resolvedTitle = job.title;
+    let resolvedArtist = job.artist;
+    let resolvedAlbum = job.album || 'Singles';
+    let resolvedThumbUrl = job.thumbnail_url || '';
+
+    // Recover clean track title & artist via anonymous-first metadata peek when tags are missing/noisy
+    if (needsMetadataRecovery(resolvedTitle, resolvedArtist)) {
+      updateJob(job.id, {status: 'downloading', progress: 2, stage: 'Peeking Metadata', error_log: ''});
+      try {
+        const peeked = await peekTrackMetadata(job.url);
+        if (peeked.title) resolvedTitle = peeked.title;
+        if (peeked.artist) resolvedArtist = peeked.artist;
+        if (peeked.album && (!resolvedAlbum || resolvedAlbum === 'Singles')) {
+          resolvedAlbum = peeked.album;
+        }
+        if (peeked.thumbnail_url && !resolvedThumbUrl) {
+          resolvedThumbUrl = peeked.thumbnail_url;
+        }
+        updateJob(job.id, {
+          title: resolvedTitle,
+          artist: resolvedArtist,
+          album: resolvedAlbum,
+          thumbnail_url: resolvedThumbUrl,
+        });
+      } catch {
+        // Proceed with user-provided metadata if peek fails
+      }
+    }
+
+    const outTemplate = path.join(tmpWorkDir, `${jobUuid}.%(ext)s`);
+    const nativeFormatSelector =
+      job.format === 'opus'
+        ? 'bestaudio[vcodec=none][ext=opus]/bestaudio[vcodec=none][acodec*=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]'
+        : 'bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none][acodec*=opus]/bestaudio[vcodec=none][ext=opus]/bestaudio[vcodec=none]';
+
+    const buildNativeArgs = (cookiePath: string | null): string[] => {
+      const args = [
+        '--newline',
+        '--no-playlist',
+        '--no-warnings',
+        '--js-runtimes',
+        'node',
+        '--force-ipv4',
+        '-f',
+        nativeFormatSelector,
+        '--write-thumbnail',
+        '--convert-thumbnails',
+        'jpg',
+        '--ffmpeg-location',
+        ffmpegPath,
+      ];
+      if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+        args.push('--remote-components', 'ejs:github');
+      }
+      if (cookiePath) {
+        args.push('--cookies', cookiePath);
+      }
+      args.push('-o', outTemplate, '--', job.url);
+      return args;
+    };
+
+    const buildStage3ExtractionArgs = (cookiePath: string | null): string[] => {
+      const args = [
+        '--newline',
+        '--no-playlist',
+        '--no-warnings',
+        '--js-runtimes',
+        'node',
+        '--force-ipv4',
+        '--extract-audio',
+      ];
+      if (quality === 'standard') {
+        args.push('--audio-format', 'mp3', '--audio-quality', '128K');
+      } else if (quality === 'high') {
+        args.push('--audio-format', 'mp3', '--audio-quality', '320K');
+      } else {
+        // Ultra (default): best native codec with bitrate 0 (zero transcoding loss)
+        args.push('--audio-format', 'best', '--audio-quality', '0');
+      }
+      args.push(
+        '--write-thumbnail',
+        '--convert-thumbnails',
+        'jpg',
+        '--ffmpeg-location',
+        ffmpegPath
+      );
+      if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+        args.push('--remote-components', 'ejs:github');
+      }
+      if (cookiePath) {
+        args.push('--cookies', cookiePath);
+      }
+      args.push('-o', outTemplate, '--', job.url);
+      return args;
+    };
+
+    let downloadedAudioPath: string | null = null;
+    let lastStageError = '';
+
+    // STAGE 1: Anonymous native best audio-only stream (convert_to=None, zero re-encoding)
+    updateJob(job.id, {status: 'downloading', progress: 4, stage: 'Downloading Native Audio', error_log: ''});
+    try {
+      await spawnYtdlpStage(job.id, 'Downloading Native Audio', buildNativeArgs(null), 5, 68);
+      downloadedAudioPath = findUuidDownloadedAudio(tmpWorkDir, jobUuid);
+    } catch (stage1Err) {
+      lastStageError = stage1Err instanceof Error ? stage1Err.message : String(stage1Err);
+      if (activeDownloadJobs.get(job.id)?.canceled) throw stage1Err;
+      cleanUuidTempAudioFiles(tmpWorkDir, jobUuid);
+    }
+
+    // STAGE 2: Retry native audio-only with cookies.txt on recoverable auth/403/format errors
+    if (!downloadedAudioPath && hasConfiguredCookies() && isRecoverableCookieError(lastStageError)) {
+      tempCookiePath = createTempCookiesCopy();
+      updateJob(job.id, {status: 'downloading', progress: 8, stage: 'Retrying with Cookies'});
+      try {
+        await spawnYtdlpStage(
+          job.id,
+          'Retrying with Cookies',
+          buildNativeArgs(tempCookiePath),
+          10,
+          70
+        );
+        downloadedAudioPath = findUuidDownloadedAudio(tmpWorkDir, jobUuid);
+      } catch (stage2Err) {
+        lastStageError = stage2Err instanceof Error ? stage2Err.message : String(stage2Err);
+        if (activeDownloadJobs.get(job.id)?.canceled) throw stage2Err;
+        cleanUuidTempAudioFiles(tmpWorkDir, jobUuid);
+      }
+    }
+
+    // STAGE 3: Fallback extraction (`-x --audio-format <codec>`) with configured quality profile
+    if (!downloadedAudioPath) {
+      if (!tempCookiePath && hasConfiguredCookies()) {
+        tempCookiePath = createTempCookiesCopy();
+      }
+      updateJob(job.id, {
+        status: 'downloading',
+        progress: 12,
+        stage: `Fallback Extraction (${quality})`,
+      });
+      try {
+        await spawnYtdlpStage(
+          job.id,
+          `Fallback Extraction (${quality})`,
+          buildStage3ExtractionArgs(tempCookiePath),
+          14,
+          74
+        );
+        downloadedAudioPath = findUuidDownloadedAudio(tmpWorkDir, jobUuid);
+      } catch (stage3Err) {
+        lastStageError = stage3Err instanceof Error ? stage3Err.message : String(stage3Err);
+        if (activeDownloadJobs.get(job.id)?.canceled) throw stage3Err;
+      }
+    }
+
+    if (!downloadedAudioPath || !fs.existsSync(downloadedAudioPath)) {
+      throw new Error(lastStageError || 'Downloaded audio file not found after yt-dlp finished');
+    }
+
+    // Resolve & crop 1:1 square cover art
+    const videoId = extractYouTubeVideoIdFromUrl(job.url);
+    let coverPath =
+      findUuidDownloadedThumb(tmpWorkDir, jobUuid) ||
+      (await fetchFallbackCoverFile(tmpWorkDir, jobUuid, videoId, resolvedThumbUrl));
+
     if (coverPath && cropCover) {
-      updateJob(job.id, {status: 'processing', progress: 82, stage: 'Cropping 1:1 Cover'});
-      const croppedCover = path.join(tmpWorkDir, 'cover_square.jpg');
+      updateJob(job.id, {status: 'processing', progress: 78, stage: 'Cropping 1:1 Cover'});
+      const croppedCover = path.join(tmpWorkDir, `${jobUuid}-cover-square.jpg`);
       try {
         await execFileAsync(
           ffmpegPath,
@@ -572,65 +1222,231 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
       }
     }
 
-    // Stage 3: Embed tags & cover art and write cleanly to NAS destination
-    updateJob(job.id, {status: 'processing', progress: 90, stage: 'Embedding Tags'});
+    // FFmpeg audio-only stream sanitization (`-vn -c:a copy` for ultra/native, MP3 128k/320k for standard/high) + tags
+    updateJob(job.id, {status: 'processing', progress: 86, stage: 'Finalizing Audio & Tags'});
 
-    let ffmpegEmbedded = false;
-    try {
+    const rawExt = path.extname(downloadedAudioPath).replace('.', '').toLowerCase();
+    let finalExt = ALLOWED_FINAL_AUDIO_EXTS.has(rawExt) ? rawExt : 'm4a';
+    let finalizedTempPath = downloadedAudioPath;
+
+    if (quality === 'standard' || quality === 'high') {
+      const targetBitrate = quality === 'standard' ? '128k' : '320k';
+      const mp3Out = path.join(tmpWorkDir, `${jobUuid}-final.mp3`);
       const ffArgs: string[] = ['-y', '-i', downloadedAudioPath];
-      if (coverPath && audioExt === 'm4a') {
+      if (coverPath) {
         ffArgs.push(
           '-i',
           coverPath,
           '-map',
-          '0:a',
+          '0:a:0',
           '-map',
-          '1:v',
+          '1:v:0',
           '-c:a',
-          'copy',
+          rawExt === 'mp3' ? 'copy' : 'libmp3lame',
+          ...(rawExt === 'mp3' ? [] : ['-b:a', targetBitrate]),
           '-c:v',
           'mjpeg',
+          '-id3v2_version',
+          '3',
           '-disposition:v:0',
           'attached_pic'
         );
       } else {
-        ffArgs.push('-c', 'copy');
+        ffArgs.push(
+          '-vn',
+          '-c:a',
+          rawExt === 'mp3' ? 'copy' : 'libmp3lame',
+          ...(rawExt === 'mp3' ? [] : ['-b:a', targetBitrate])
+        );
       }
       ffArgs.push(
         '-metadata',
-        `title=${job.title}`,
+        `title=${resolvedTitle}`,
         '-metadata',
-        `artist=${job.artist}`,
+        `artist=${resolvedArtist}`,
         '-metadata',
-        `album=${job.album}`,
-        finalAudioPath
+        `album=${resolvedAlbum}`,
+        mp3Out
       );
-      await execFileAsync(ffmpegPath, ffArgs, {timeout: 45000});
-      ffmpegEmbedded = fs.existsSync(finalAudioPath);
-    } catch {
-      ffmpegEmbedded = false;
+      await execFileAsync(ffmpegPath, ffArgs, {timeout: 90000});
+      if (fs.existsSync(mp3Out)) {
+        finalizedTempPath = mp3Out;
+        finalExt = 'mp3';
+      }
+    } else {
+      // Ultra (default): zero transcoding loss — strip accidental video streams via `-vn -c:a copy`
+      // If YouTube delivered native Opus inside .webm, cleanly remux into .opus via stream copy
+      const remuxExt = rawExt === 'webm' ? 'opus' : finalExt;
+      const remuxOut = path.join(tmpWorkDir, `${jobUuid}-final.${remuxExt}`);
+      let remuxed = false;
+
+      try {
+        const ffArgs: string[] = ['-y', '-i', downloadedAudioPath];
+        if (coverPath && (remuxExt === 'm4a' || remuxExt === 'mp3')) {
+          ffArgs.push(
+            '-i',
+            coverPath,
+            '-map',
+            '0:a:0',
+            '-map',
+            '1:v:0',
+            '-c:a',
+            'copy',
+            '-c:v',
+            'mjpeg',
+            ...(remuxExt === 'mp3' ? ['-id3v2_version', '3'] : []),
+            '-disposition:v:0',
+            'attached_pic'
+          );
+        } else {
+          ffArgs.push('-vn', '-c:a', 'copy');
+        }
+        ffArgs.push(
+          '-metadata',
+          `title=${resolvedTitle}`,
+          '-metadata',
+          `artist=${resolvedArtist}`,
+          '-metadata',
+          `album=${resolvedAlbum}`,
+          remuxOut
+        );
+        await execFileAsync(ffmpegPath, ffArgs, {timeout: 45000});
+        if (fs.existsSync(remuxOut) && fs.statSync(remuxOut).size > 0) {
+          finalizedTempPath = remuxOut;
+          finalExt = remuxExt;
+          remuxed = true;
+        }
+      } catch {
+        remuxed = false;
+      }
+
+      // If .webm -> .opus copy failed (e.g. non-Opus codec inside webm), strip video keeping original container
+      if (!remuxed) {
+        const safeOut = path.join(tmpWorkDir, `${jobUuid}-stripped.${finalExt}`);
+        try {
+          await execFileAsync(
+            ffmpegPath,
+            [
+              '-y',
+              '-i',
+              downloadedAudioPath,
+              '-vn',
+              '-c:a',
+              'copy',
+              '-metadata',
+              `title=${resolvedTitle}`,
+              '-metadata',
+              `artist=${resolvedArtist}`,
+              '-metadata',
+              `album=${resolvedAlbum}`,
+              safeOut,
+            ],
+            {timeout: 45000}
+          );
+          if (fs.existsSync(safeOut) && fs.statSync(safeOut).size > 0) {
+            finalizedTempPath = safeOut;
+          }
+        } catch {
+          // Keep original downloaded audio if stream copy fails
+        }
+      }
     }
 
-    if (!ffmpegEmbedded) {
-      fs.copyFileSync(downloadedAudioPath, finalAudioPath);
+    if (!ALLOWED_FINAL_AUDIO_EXTS.has(finalExt)) {
+      finalExt = 'm4a';
     }
 
-    // Stage 4: Index into SQLite library
-    const indexed = await indexSingleFile(finalAudioPath, musicDir);
+    // Content-hash deduplication: SHA-256 -> deterministic `tracks/<file_hash>.<ext>`
+    updateJob(job.id, {status: 'processing', progress: 93, stage: 'Hashing & Deduplicating'});
+    const fileHash = await computeFileSha256(finalizedTempPath);
+    if (!/^[a-f0-9]{64}$/.test(fileHash)) {
+      throw new Error('Failed to compute valid SHA-256 content hash');
+    }
+
+    // Check if an identical audio stream is already stored in the library
+    const existingByHash = db
+      .prepare('SELECT id, rel_path FROM tracks WHERE file_hash = ? LIMIT 1')
+      .get(fileHash) as {id: number; rel_path: string} | undefined;
+
+    if (existingByHash) {
+      const existingAbs = path.resolve(musicDir, existingByHash.rel_path);
+      if (
+        existingAbs.startsWith(musicDir + path.sep) &&
+        fs.existsSync(existingAbs) &&
+        fs.statSync(existingAbs).isFile()
+      ) {
+        // Refresh metadata/cover if needed without writing a duplicate file on disk
+        await indexSingleFile(existingAbs, musicDir, {
+          fileHash,
+          title: resolvedTitle,
+          artist: resolvedArtist,
+          album: resolvedAlbum,
+          coverFilePath: coverPath,
+        });
+        updateJob(job.id, {
+          status: 'completed',
+          progress: 100,
+          stage: 'Deduplicated (Already in Library)',
+          format: finalExt,
+          track_id: existingByHash.id,
+        });
+        return;
+      }
+    }
+
+    const tracksDir = path.join(musicDir, 'tracks');
+    fs.mkdirSync(tracksDir, {recursive: true});
+    const finalAudioPath = path.resolve(tracksDir, `${fileHash}.${finalExt}`);
+    if (!finalAudioPath.startsWith(musicDir + path.sep)) {
+      throw new Error('Destination path escaped configured music directory');
+    }
+
+    // Write atomically only if this content-hash file is not already on disk
+    if (!fs.existsSync(finalAudioPath)) {
+      const stagedPath = path.join(tracksDir, `.${fileHash}.${jobUuid}.part`);
+      try {
+        fs.copyFileSync(finalizedTempPath, stagedPath);
+        fs.renameSync(stagedPath, finalAudioPath);
+      } finally {
+        if (fs.existsSync(stagedPath)) {
+          try {
+            fs.unlinkSync(stagedPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    // Index duration, bitrate, codec/format, cover art, and file_hash into SQLite
+    updateJob(job.id, {status: 'processing', progress: 97, stage: 'Indexing Track'});
+    const indexed = await indexSingleFile(finalAudioPath, musicDir, {
+      fileHash,
+      title: resolvedTitle,
+      artist: resolvedArtist,
+      album: resolvedAlbum,
+      coverFilePath: coverPath,
+    });
+
     updateJob(job.id, {
       status: 'completed',
       progress: 100,
       stage: 'Indexed',
+      format: finalExt,
       track_id: indexed.id,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    updateJob(job.id, {
-      status: 'error',
-      stage: 'Failed',
-      error_log: msg.slice(0, 2000),
-    });
+    const wasCanceled = activeDownloadJobs.get(job.id)?.canceled;
+    if (!wasCanceled) {
+      const msg = err instanceof Error ? err.message : String(err);
+      updateJob(job.id, {
+        status: 'error',
+        stage: 'Failed',
+        error_log: msg.slice(0, 2000),
+      });
+    }
   } finally {
+    activeDownloadJobs.delete(job.id);
     if (tempCookiePath && fs.existsSync(tempCookiePath)) {
       try {
         fs.unlinkSync(tempCookiePath);
@@ -798,6 +1614,10 @@ export function spawnAudioPreviewStream(videoUrl: string) {
 const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{6,20}$/;
 const YT_STREAM_CACHE_TTL_MS = 30 * 60 * 1000;
 const YT_STREAM_CACHE_MAX_ENTRIES = 500;
+const YT_THUMB_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
+const YT_VISITOR_DATA_TTL_MS = 6 * 60 * 60 * 1000;
+
 const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googlevideo.com',
   '.youtube.com',
@@ -808,6 +1628,8 @@ const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
 export interface ResolvedYouTubeAudioStream {
   url: string;
   headers: Record<string, string>;
+  strategy: 'fast-path' | 'fallback' | 'fallback-cookies';
+  thumbnailUrl: string;
 }
 
 const HOP_BY_HOP_AND_EXCLUDED_HEADERS = new Set([
@@ -845,9 +1667,12 @@ function sanitizeStreamHeaders(raw: unknown): Record<string, string> {
 
 const ytStreamUrlCache = new Map<
   string,
-  {url: string; headers: Record<string, string>; expiresAt: number}
+  ResolvedYouTubeAudioStream & {expiresAt: number}
 >();
 const ytStreamInFlight = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
+const ytThumbnailCache = new Map<string, {url: string; expiresAt: number}>();
+let ytVisitorDataCache: {value: string; expiresAt: number} | null = null;
+let ytVisitorDataInFlight: Promise<string | null> | null = null;
 
 export function isValidYouTubeVideoId(videoId: string): boolean {
   return YOUTUBE_VIDEO_ID_RE.test(videoId);
@@ -876,6 +1701,81 @@ export function isAllowedYouTubeMediaUrl(rawUrl: string): boolean {
   );
 }
 
+function cacheYouTubeThumbnailUrl(videoId: string, rawUrl: string): void {
+  if (!isValidYouTubeVideoId(videoId) || !isAllowedYouTubeMediaUrl(rawUrl)) return;
+  const now = Date.now();
+  if (ytThumbnailCache.size >= YT_THUMB_CACHE_MAX_ENTRIES) {
+    for (const [k, entry] of ytThumbnailCache.entries()) {
+      if (entry.expiresAt <= now) ytThumbnailCache.delete(k);
+    }
+    if (ytThumbnailCache.size >= YT_THUMB_CACHE_MAX_ENTRIES) {
+      const oldestKey = ytThumbnailCache.keys().next().value;
+      if (oldestKey) ytThumbnailCache.delete(oldestKey);
+    }
+  }
+  ytThumbnailCache.set(videoId, {url: rawUrl, expiresAt: now + YT_THUMB_CACHE_TTL_MS});
+}
+
+export function getCachedYouTubeThumbnailUrl(videoId: string): string | null {
+  if (!isValidYouTubeVideoId(videoId)) return null;
+  const entry = ytThumbnailCache.get(videoId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    ytThumbnailCache.delete(videoId);
+    return null;
+  }
+  return entry.url;
+}
+
+async function getYouTubeVisitorData(): Promise<string | null> {
+  const now = Date.now();
+  if (ytVisitorDataCache && ytVisitorDataCache.expiresAt > now) {
+    return ytVisitorDataCache.value;
+  }
+  if (ytVisitorDataInFlight) {
+    return ytVisitorDataInFlight;
+  }
+
+  ytVisitorDataInFlight = (async (): Promise<string | null> => {
+    try {
+      const resp = await fetch('https://www.youtube.com/sw.js_data', {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Accept: 'application/json, text/plain, */*',
+        },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!resp.ok) return null;
+      const text = (await resp.text()).replace(/^\)\]\}'\s*/, '');
+      const parsed = JSON.parse(text) as unknown;
+      const candidate =
+        Array.isArray(parsed) &&
+        Array.isArray(parsed[0]) &&
+        Array.isArray(parsed[0][2]) &&
+        Array.isArray(parsed[0][2][0]) &&
+        Array.isArray(parsed[0][2][0][0]) &&
+        typeof parsed[0][2][0][0][13] === 'string'
+          ? parsed[0][2][0][0][13].trim()
+          : '';
+      if (candidate && /^[A-Za-z0-9_%-]{10,120}$/.test(candidate)) {
+        ytVisitorDataCache = {
+          value: candidate,
+          expiresAt: Date.now() + YT_VISITOR_DATA_TTL_MS,
+        };
+        return candidate;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      ytVisitorDataInFlight = null;
+    }
+  })();
+
+  return ytVisitorDataInFlight;
+}
+
 function pruneExpiredYtStreamCache(now: number): void {
   for (const [key, entry] of ytStreamUrlCache.entries()) {
     if (entry.expiresAt <= now) {
@@ -897,19 +1797,31 @@ export function invalidateYouTubeAudioStreamCache(videoId: string): void {
   ytStreamUrlCache.delete(videoId);
 }
 
+function isMuxedVideoFormat(vcodec: unknown): boolean {
+  if (typeof vcodec !== 'string') return false;
+  const norm = vcodec.trim().toLowerCase();
+  return norm.length > 0 && norm !== 'none';
+}
+
 export async function resolveYouTubeAudioStreamUrl(
   videoId: string,
-  options: {forceRefresh?: boolean} = {}
-): Promise<{url: string; headers: Record<string, string>; fromCache: boolean}> {
+  options: {forceRefresh?: boolean; skipFastPath?: boolean} = {}
+): Promise<ResolvedYouTubeAudioStream & {fromCache: boolean}> {
   if (!isValidYouTubeVideoId(videoId)) {
     throw new Error('Invalid YouTube video ID');
   }
 
   const now = Date.now();
-  if (!options.forceRefresh) {
+  if (!options.forceRefresh && !options.skipFastPath) {
     const cached = ytStreamUrlCache.get(videoId);
     if (cached && cached.expiresAt > now) {
-      return {url: cached.url, headers: {...cached.headers}, fromCache: true};
+      return {
+        url: cached.url,
+        headers: {...cached.headers},
+        strategy: cached.strategy,
+        thumbnailUrl: cached.thumbnailUrl,
+        fromCache: true,
+      };
     }
     if (cached) {
       ytStreamUrlCache.delete(videoId);
@@ -918,79 +1830,158 @@ export async function resolveYouTubeAudioStreamUrl(
     const existingPromise = ytStreamInFlight.get(videoId);
     if (existingPromise) {
       const resolved = await existingPromise;
-      return {url: resolved.url, headers: {...resolved.headers}, fromCache: false};
+      return {...resolved, headers: {...resolved.headers}, fromCache: false};
     }
   }
 
+  const runExtractionAttempt = async (
+    extractorArgs: string,
+    formatExpr: string,
+    cookiePath: string | null,
+    strategy: ResolvedYouTubeAudioStream['strategy'],
+    timeoutMs: number
+  ): Promise<ResolvedYouTubeAudioStream> => {
+    const args = [
+      '--dump-single-json',
+      '--skip-download',
+      '--no-playlist',
+      '--quiet',
+      '--no-warnings',
+      '--js-runtimes',
+      'node',
+      '--force-ipv4',
+      '--extractor-args',
+      extractorArgs,
+      '-f',
+      formatExpr,
+    ];
+    if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+      args.push('--remote-components', 'ejs:github');
+    }
+    if (cookiePath) {
+      args.push('--cookies', cookiePath);
+    }
+    args.push('--', `https://www.youtube.com/watch?v=${videoId}`);
+
+    const {stdout} = await execYtdlp(args, {
+      timeout: timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    const trimmed = stdout.trim();
+    const jsonStart = trimmed.indexOf('{');
+    if (jsonStart === -1) {
+      throw new Error('Could not parse YouTube stream metadata JSON');
+    }
+    const data = JSON.parse(trimmed.slice(jsonStart)) as Record<string, unknown> & {
+      url?: unknown;
+      vcodec?: unknown;
+      http_headers?: unknown;
+      requested_formats?: Array<{url?: unknown; vcodec?: unknown; http_headers?: unknown}>;
+    };
+
+    // Capture & cache thumbnail URL during stream extraction so cover art survives stream expiry
+    const extractedThumb = extractThumbnailUrl(data);
+    if (extractedThumb) {
+      cacheYouTubeThumbnailUrl(videoId, extractedThumb);
+    }
+
+    const primaryFormat =
+      typeof data.url === 'string' && data.url.trim()
+        ? data
+        : Array.isArray(data.requested_formats) && data.requested_formats.length > 0
+          ? data.requested_formats.find((f) => !isMuxedVideoFormat(f.vcodec)) ||
+            data.requested_formats[0]
+          : null;
+
+    if (!primaryFormat) {
+      throw new Error('No audio format returned by yt-dlp');
+    }
+
+    // Explicitly reject muxed video formats (vcodec != "none")
+    if (isMuxedVideoFormat(primaryFormat.vcodec)) {
+      throw new Error(`Rejected muxed video format (vcodec=${String(primaryFormat.vcodec)})`);
+    }
+
+    const directUrl = typeof primaryFormat.url === 'string' ? primaryFormat.url.trim() : '';
+    if (!directUrl || !isAllowedYouTubeMediaUrl(directUrl)) {
+      throw new Error('Could not resolve a valid YouTube audio stream URL');
+    }
+
+    const headers = sanitizeStreamHeaders(primaryFormat.http_headers ?? data.http_headers);
+    return {
+      url: directUrl,
+      headers,
+      strategy,
+      thumbnailUrl: extractedThumb || getCachedYouTubeThumbnailUrl(videoId) || '',
+    };
+  };
+
   const resolvePromise = (async (): Promise<ResolvedYouTubeAudioStream> => {
-    const ytdlpPath = getYtdlpPath();
-    const tempCookiePath = createTempCookiesCopy();
+    let tempCookiePath: string | null = null;
     try {
-      const configuredPlayerClient = getSetting('ytdlp_player_client', '').trim();
-      const hasCustomOverride =
-        configuredPlayerClient.length > 0 && configuredPlayerClient !== 'web,mweb,android_vr';
-      const rawStreamPlayerClient = hasCustomOverride ? configuredPlayerClient : 'tv,android_vr';
-      const streamPlayerClient = /^[A-Za-z0-9_,+-]+$/.test(rawStreamPlayerClient)
-        ? rawStreamPlayerClient
-        : 'tv,android_vr';
+      let resolved: ResolvedYouTubeAudioStream | null = null;
+      let lastError: unknown = null;
 
-      const args = [
-        ...buildResilienceArgs(tempCookiePath, {
-          includeSleep: false,
-          includePlayerClient: false,
-          forceIpv4: true,
-        }),
-        '--extractor-args',
-        `youtube:player_client=${streamPlayerClient}`,
-        '-f',
-        'bestaudio[ext=m4a]/bestaudio',
-        '--dump-single-json',
-        '--no-playlist',
-        '--no-warnings',
-        '--',
-        `https://www.youtube.com/watch?v=${videoId}`,
-      ];
-
-      const {stdout} = await execFileAsync(ytdlpPath, args, {
-        timeout: 30000,
-        maxBuffer: 10 * 1024 * 1024,
-      });
-
-      const trimmed = stdout.trim();
-      const jsonStart = trimmed.indexOf('{');
-      if (jsonStart === -1) {
-        throw new Error('Could not parse YouTube stream metadata JSON');
-      }
-      const data = JSON.parse(trimmed.slice(jsonStart)) as {
-        url?: unknown;
-        http_headers?: unknown;
-        requested_formats?: Array<{url?: unknown; http_headers?: unknown}>;
-      };
-
-      const primaryFormat =
-        typeof data.url === 'string' && data.url.trim()
-          ? data
-          : Array.isArray(data.requested_formats) && data.requested_formats.length > 0
-            ? data.requested_formats[0]
-            : null;
-
-      const directUrl =
-        primaryFormat && typeof primaryFormat.url === 'string' ? primaryFormat.url.trim() : '';
-
-      if (!directUrl || !isAllowedYouTubeMediaUrl(directUrl)) {
-        throw new Error('Could not resolve a valid YouTube audio stream URL');
+      // Attempt 1 (Fast Path): player_client=android_vr + cached visitor_data, rejecting muxed formats
+      if (!options.skipFastPath) {
+        try {
+          const visitorData = await getYouTubeVisitorData();
+          const fastExtractorArgs = visitorData
+            ? `youtube:player_client=android_vr;visitor_data=${visitorData}`
+            : 'youtube:player_client=android_vr';
+          resolved = await runExtractionAttempt(
+            fastExtractorArgs,
+            'bestaudio[acodec!=none][vcodec=none]/bestaudio[vcodec=none]',
+            null,
+            'fast-path',
+            18000
+          );
+        } catch (err) {
+          lastError = err;
+        }
       }
 
-      const headers = sanitizeStreamHeaders(primaryFormat?.http_headers ?? data.http_headers);
+      // Attempt 2 (Fallback): player_client=default,android,ios anonymously
+      if (!resolved) {
+        try {
+          resolved = await runExtractionAttempt(
+            'youtube:player_client=default,android,ios',
+            'bestaudio[acodec!=none][vcodec=none]/bestaudio[vcodec=none]',
+            null,
+            'fallback',
+            28000
+          );
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      // Attempt 3 (Cookie Fallback): player_client=default,android,ios with cookies.txt if configured
+      if (!resolved && hasConfiguredCookies()) {
+        tempCookiePath = createTempCookiesCopy();
+        resolved = await runExtractionAttempt(
+          'youtube:player_client=default,android,ios',
+          'bestaudio[acodec!=none][vcodec=none]/bestaudio[vcodec=none]',
+          tempCookiePath,
+          'fallback-cookies',
+          30000
+        );
+      }
+
+      if (!resolved) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error('Could not resolve a playable YouTube audio-only stream');
+      }
 
       const resolvedAt = Date.now();
       pruneExpiredYtStreamCache(resolvedAt);
       ytStreamUrlCache.set(videoId, {
-        url: directUrl,
-        headers,
+        ...resolved,
         expiresAt: resolvedAt + YT_STREAM_CACHE_TTL_MS,
       });
-      return {url: directUrl, headers};
+      return resolved;
     } finally {
       if (tempCookiePath && fs.existsSync(tempCookiePath)) {
         try {
@@ -1002,13 +1993,13 @@ export async function resolveYouTubeAudioStreamUrl(
     }
   })();
 
-  if (!options.forceRefresh) {
+  if (!options.forceRefresh && !options.skipFastPath) {
     ytStreamInFlight.set(videoId, resolvePromise);
   }
 
   try {
     const resolved = await resolvePromise;
-    return {url: resolved.url, headers: {...resolved.headers}, fromCache: false};
+    return {...resolved, headers: {...resolved.headers}, fromCache: false};
   } finally {
     if (ytStreamInFlight.get(videoId) === resolvePromise) {
       ytStreamInFlight.delete(videoId);
@@ -1281,11 +2272,12 @@ async function runFlatYtSearch(
   searchSpec: string,
   tempCookiePath: string | null
 ): Promise<Array<Record<string, unknown>>> {
-  const ytdlpPath = getYtdlpPath();
   const args = [
     '--flat-playlist',
     '--dump-single-json',
+    '--quiet',
     '--no-warnings',
+    '--no-playlist',
     '--js-runtimes',
     'node',
     '--force-ipv4',
@@ -1298,7 +2290,7 @@ async function runFlatYtSearch(
   }
   args.push('--', searchSpec);
 
-  const {stdout} = await execFileAsync(ytdlpPath, args, {
+  const {stdout} = await execYtdlp(args, {
     timeout: 25000,
     maxBuffer: 10 * 1024 * 1024,
   });

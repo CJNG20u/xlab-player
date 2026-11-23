@@ -9,6 +9,7 @@ import {Readable} from 'stream';
 import type {ReadableStream as NodeReadableStream} from 'stream/web';
 import {type AuthRequest, requireAuth} from './server/auth.ts';
 import {
+  getCachedYouTubeThumbnailUrl,
   invalidateYouTubeAudioStreamCache,
   isAllowedYouTubeMediaUrl,
   isValidYouTubeVideoId,
@@ -172,15 +173,22 @@ async function startServer() {
       let resolved = await resolveYouTubeAudioStreamUrl(videoId);
       let upstream = await fetchUpstream(resolved.url, resolved.headers);
 
-      // If a cached signed YouTube URL expired early, refresh once transparently
-      if (resolved.fromCache && (upstream.status === 403 || upstream.status === 410)) {
+      // If a cached signed URL expired OR the android_vr fast-path was rejected with 403/410,
+      // transparently fall back to player_client=default,android,ios (+ optional cookies).
+      if (
+        (upstream.status === 403 || upstream.status === 410) &&
+        (resolved.fromCache || resolved.strategy === 'fast-path')
+      ) {
         try {
           await upstream.body?.cancel();
         } catch {
           // ignore
         }
         invalidateYouTubeAudioStreamCache(videoId);
-        resolved = await resolveYouTubeAudioStreamUrl(videoId, {forceRefresh: true});
+        resolved = await resolveYouTubeAudioStreamUrl(videoId, {
+          forceRefresh: true,
+          skipFastPath: true,
+        });
         upstream = await fetchUpstream(resolved.url, resolved.headers);
       }
 
@@ -276,11 +284,16 @@ async function startServer() {
       return;
     }
 
-    // Prefer 16:9 thumbnails (maxresdefault, mqdefault) to avoid 4:3 black letterbox bars on square/circular covers
-    const candidateVariants = ['maxresdefault.jpg', 'mqdefault.jpg', 'hqdefault.jpg'];
+    // Prefer 16:9 thumbnails (maxresdefault, mqdefault) and cached stream artwork so covers survive stream URL expiry
+    const cachedThumb = getCachedYouTubeThumbnailUrl(videoId);
+    const candidateUrls = [
+      `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+      `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+      ...(cachedThumb && isAllowedYouTubeMediaUrl(cachedThumb) ? [cachedThumb] : []),
+      `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    ];
     try {
-      for (const variant of candidateVariants) {
-        const thumbUrl = `https://i.ytimg.com/vi/${videoId}/${variant}`;
+      for (const thumbUrl of candidateUrls) {
         const upstream = await fetch(thumbUrl, {
           headers: {Accept: 'image/*'},
           redirect: 'follow',

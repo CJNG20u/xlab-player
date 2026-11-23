@@ -13,6 +13,8 @@ const MIME_MAP: Record<string, string> = {
   '.mp4': 'audio/mp4',
   '.opus': 'audio/ogg; codecs=opus',
   '.ogg': 'audio/ogg',
+  '.webm': 'audio/webm; codecs=opus',
+  '.aac': 'audio/aac',
   '.flac': 'audio/flac',
   '.wav': 'audio/wav',
 };

@@ -5,11 +5,14 @@ import path from 'path';
 import {type AuthRequest, requireAuth, requireDownloadPermission} from '../auth.ts';
 import {db, getMusicDir} from '../db.ts';
 import {
+  cancelDownloadJob,
   downloadEvents,
   enqueueDownloadJob,
   fetchMetadataPreview,
   getDiscoverFeed,
   getDownloadJobs,
+  normalizeDownloadQuality,
+  peekTrackMetadata,
   sanitizeNasSegment,
   spawnAudioPreviewStream,
   type DownloadJobRow,
@@ -77,7 +80,8 @@ downloadRouter.get("/preview-audio", requireDownloadPermission, (req, res) => { 
 downloadRouter.post('/metadata', requireAuth, async (req, res) => {
   try {
     const query = String(req.body?.query || '');
-    const preview = await fetchMetadataPreview(query);
+    const source = req.body?.source === 'ytmusic' ? 'ytmusic' : 'youtube';
+    const preview = await fetchMetadataPreview(query, {source});
     res.json({
       ...preview,
       musicDir: getMusicDir(),
@@ -89,19 +93,43 @@ downloadRouter.post('/metadata', requireAuth, async (req, res) => {
   }
 });
 
+downloadRouter.post('/peek', requireAuth, async (req, res) => {
+  try {
+    const target = String(req.body?.url || req.body?.videoId || '').trim();
+    if (!target || (!/^https?:\/\//i.test(target) && !/^[A-Za-z0-9_-]{6,20}$/.test(target))) {
+      res.status(400).json({error: 'A valid http(s) URL or YouTube videoId is required'});
+      return;
+    }
+    const meta = await peekTrackMetadata(target);
+    res.json(meta);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Failed to peek track metadata',
+    });
+  }
+});
+
 downloadRouter.post('/start', requireDownloadPermission, (req: AuthRequest, res) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : [req.body];
   const created: DownloadJobRow[] = [];
 
   for (const item of items) {
-    if (!item?.url) continue;
+    const rawUrl = typeof item?.url === 'string' ? item.url.trim() : '';
+    if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) continue;
+    const quality = normalizeDownloadQuality(item.quality ?? req.body?.quality);
     const job = enqueueDownloadJob({
       userId: req.user!.id,
-      url: String(item.url),
+      url: rawUrl,
       title: String(item.title || 'Untitled').trim(),
       artist: String(item.artist || 'Unknown Artist').trim(),
       album: String(item.album || 'Singles').trim(),
-      format: item.format === 'opus' ? 'opus' : 'm4a',
+      format:
+        item.format === 'opus'
+          ? 'opus'
+          : item.format === 'mp3'
+            ? 'mp3'
+            : 'm4a',
+      quality,
       thumbnailUrl: String(item.thumbnail_url || item.thumbnailUrl || ''),
     });
     created.push(job);
@@ -121,6 +149,11 @@ downloadRouter.get('/jobs', requireDownloadPermission, (_req, res) => {
 
 downloadRouter.delete('/jobs/:id', requireDownloadPermission, (req, res) => {
   const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({error: 'Invalid download job ID'});
+    return;
+  }
+  cancelDownloadJob(id);
   db.prepare('DELETE FROM download_jobs WHERE id = ?').run(id);
   downloadEvents.emit('deleted', {id});
   res.json({ok: true});

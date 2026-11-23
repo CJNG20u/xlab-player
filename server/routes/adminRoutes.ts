@@ -90,6 +90,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
   'ytdlp_force_ipv4',
   'ytdlp_extra_flags',
   'ytdlp_crop_cover',
+  'ytdlp_download_quality',
 ]);
 
 adminRouter.put('/settings', requireAdmin, (req, res) => {

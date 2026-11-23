@@ -398,6 +398,7 @@ export const SettingsPage: React.FC = () => {
           ytdlp_max_sleep_interval: settings.ytdlp_max_sleep_interval,
           ytdlp_force_ipv4: settings.ytdlp_force_ipv4,
           ytdlp_crop_cover: settings.ytdlp_crop_cover,
+          ytdlp_download_quality: settings.ytdlp_download_quality || 'ultra',
           ytdlp_extra_flags: settings.ytdlp_extra_flags,
         }),
       });
@@ -1581,6 +1582,29 @@ export const SettingsPage: React.FC = () => {
                   </p>
                 </div>
               </label>
+
+              <div className="pt-2 border-t border-[var(--border-subtle)]">
+                <label className="block text-sm font-medium text-[var(--text-primary)] mb-1">
+                  Default Download Quality Profile
+                </label>
+                <select
+                  value={settings.ytdlp_download_quality || 'ultra'}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      ytdlp_download_quality: e.target.value,
+                    })
+                  }
+                  className="w-full sm:w-72 rounded bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
+                >
+                  <option value="ultra">Ultra — Best Native Audio (Opus / AAC)</option>
+                  <option value="high">High — 320 kbps MP3</option>
+                  <option value="standard">Standard — 128 kbps MP3</option>
+                </select>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">
+                  Ultra preserves the native audio stream with zero transcoding loss; High and Standard transcode to MP3.
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center justify-between gap-4">

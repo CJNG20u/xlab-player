@@ -136,6 +136,23 @@ db.exec(
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_m3u_path ON playlists(m3u_path) WHERE m3u_path IS NOT NULL'
 );
 
+const trackColumns = db.prepare('PRAGMA table_info(tracks)').all() as Array<{name: string}>;
+const trackColNames = new Set(trackColumns.map((c) => c.name));
+if (!trackColNames.has('file_hash')) {
+  db.exec('ALTER TABLE tracks ADD COLUMN file_hash TEXT');
+}
+db.exec(
+  'CREATE INDEX IF NOT EXISTS idx_tracks_file_hash ON tracks(file_hash) WHERE file_hash IS NOT NULL'
+);
+
+const downloadJobColumns = db
+  .prepare('PRAGMA table_info(download_jobs)')
+  .all() as Array<{name: string}>;
+const downloadJobColNames = new Set(downloadJobColumns.map((c) => c.name));
+if (!downloadJobColNames.has('quality')) {
+  db.exec("ALTER TABLE download_jobs ADD COLUMN quality TEXT NOT NULL DEFAULT 'ultra'");
+}
+
 // Seed default settings on first boot
 const defaultSettings: Record<string, string> = {
   music_dir: DEFAULT_MUSIC_DIR,
@@ -148,6 +165,7 @@ const defaultSettings: Record<string, string> = {
   ytdlp_force_ipv4: 'true',
   ytdlp_extra_flags: '',
   ytdlp_crop_cover: 'true',
+  ytdlp_download_quality: 'ultra',
   cookies_status: 'missing',
   cookies_tested_at: '',
   jwt_secret:
