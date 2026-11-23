@@ -28,6 +28,10 @@ import {
   sendListeningEvent,
 } from '../lib/listeningLearning';
 import {playbackClock} from '../lib/playbackClock';
+import {
+  recordTransitionDiagnostic,
+  updateTransitionDiagnostic,
+} from '../lib/playbackDiagnostics';
 import {useAuth} from './AuthContext';
 import {
   getCachedCanvasArtwork,
@@ -138,6 +142,27 @@ const PREFETCH_PROGRESS_THRESHOLD = 0.5;
 const PREFETCH_REMAINING_SECONDS = 15;
 const MAX_FULL_PREFETCH_BYTES = 25 * 1024 * 1024; // 25 MB full blob prefetch cap
 const PARTIAL_PREFETCH_BYTES = 2 * 1024 * 1024; // 2 MB Range warm-up for large FLAC files
+const MAX_STREAM_PREWARM_BYTES = 40 * 1024 * 1024; // 40 MB cap for streamed track Blob prewarm
+const SLOW_TRANSITION_TIMEOUT_MS = 6000;
+const MAX_SLOW_TRANSITION_RETRIES = 2;
+
+type PrewarmTrackKey = number | string;
+
+function getStreamedTrackCacheKey(track: Track | null | undefined): string | null {
+  if (!track || !track.isYouTubeStream) return null;
+  const videoId = getYouTubeVideoId(track);
+  if (videoId) return `yt:${videoId}`;
+  if (typeof track.id === 'string' && track.id.trim()) return track.id.trim();
+  return String(track.id);
+}
+
+function getTrackDiagnosticKey(track: Track | null | undefined): string | null {
+  if (!track) return null;
+  if (track.isYouTubeStream) {
+    return getYouTubeVideoId(track) || String(track.id);
+  }
+  return String(track.id);
+}
 
 function getPersistentAudioElement(): HTMLAudioElement | null {
   if (typeof document === 'undefined') return null;
@@ -434,12 +459,16 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const artworkResolutionAttemptedKeyRef = useRef<string | null>(null);
   const metadataArtworkReqIdRef = useRef(0);
   const cachedTrackIdsRef = useRef<Set<number>>(new Set());
-  const prewarmedObjectUrlsRef = useRef<Map<number, string>>(new Map());
-  const prefetchedObjectUrlsRef = useRef<Map<number, string>>(new Map());
-  const prefetchedTrackIdsRef = useRef<Set<number>>(new Set());
+  const prewarmedObjectUrlsRef = useRef<Map<PrewarmTrackKey, string>>(new Map());
+  const prefetchedObjectUrlsRef = useRef<Map<PrewarmTrackKey, string>>(new Map());
+  const prefetchedTrackIdsRef = useRef<Set<PrewarmTrackKey>>(new Set());
   const prefetchAbortRef = useRef<AbortController | null>(null);
-  const prefetchInFlightIdRef = useRef<number | null>(null);
+  const prefetchInFlightIdRef = useRef<PrewarmTrackKey | null>(null);
   const loadRequestIdRef = useRef(0);
+  const lastLoadUsedPrewarmedRef = useRef(false);
+  const pendingTransitionRef = useRef<{id: number; endedAt: number} | null>(null);
+  const slowTransitionTimerRef = useRef<number | null>(null);
+  const slowTransitionRetriesRef = useRef(0);
   const lastRecordedPlayRef = useRef<{key: string; at: number} | null>(null);
 
   // Autoplay / radio single-flight & cancellation refs
@@ -534,7 +563,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       // Revoke any prewarmed ObjectURL whose track was evicted from offline storage
       const activeAudioSrc = audioRef.current?.getAttribute('src') || '';
       for (const [trackId, blobUrl] of prewarmedObjectUrlsRef.current.entries()) {
-        if (!ids.has(trackId) && blobUrl !== activeAudioSrc) {
+        if (typeof trackId === 'number' && !ids.has(trackId) && blobUrl !== activeAudioSrc) {
           URL.revokeObjectURL(blobUrl);
           prewarmedObjectUrlsRef.current.delete(trackId);
         }
@@ -557,47 +586,65 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   useEffect(() => {
     let cancelled = false;
     const keepIds = new Set<number>();
+    const keepStreamKeys = new Set<string>();
+    let nextStreamKey: string | null = null;
     const addIfLocal = (t: Track | undefined) => {
       if (t && !t.isYouTubeStream && typeof t.id === 'number') {
         keepIds.add(t.id);
       }
     };
+    const addIfStream = (t: Track | undefined): string | null => {
+      const key = getStreamedTrackCacheKey(t);
+      if (key) keepStreamKeys.add(key);
+      return key;
+    };
 
     if (currentIndex >= 0 && currentIndex < queue.length) {
       addIfLocal(queue[currentIndex]);
+      addIfStream(queue[currentIndex]);
       if (currentIndex + 1 < queue.length) {
         addIfLocal(queue[currentIndex + 1]);
+        if (!shuffle && repeat !== 'one') {
+          nextStreamKey = addIfStream(queue[currentIndex + 1]);
+        }
       } else if (repeat === 'all' && queue.length > 0) {
         addIfLocal(queue[0]);
+        if (!shuffle) {
+          nextStreamKey = addIfStream(queue[0]);
+        }
       }
       if (currentIndex - 1 >= 0) {
         addIfLocal(queue[currentIndex - 1]);
       }
     }
 
+    const shouldKeepKey = (key: PrewarmTrackKey): boolean =>
+      typeof key === 'number' ? keepIds.has(key) : keepStreamKeys.has(key);
+
     const activeAudioSrc = audioRef.current?.getAttribute('src') || '';
-    for (const [trackId, blobUrl] of prewarmedObjectUrlsRef.current.entries()) {
-      if (!keepIds.has(trackId) && blobUrl !== activeAudioSrc) {
+    for (const [trackKey, blobUrl] of prewarmedObjectUrlsRef.current.entries()) {
+      if (!shouldKeepKey(trackKey) && blobUrl !== activeAudioSrc) {
         URL.revokeObjectURL(blobUrl);
-        prewarmedObjectUrlsRef.current.delete(trackId);
+        prewarmedObjectUrlsRef.current.delete(trackKey);
       }
     }
 
     // Also evict stale next-track prefetched ObjectURLs outside the active/adjacent window
-    for (const [trackId, blobUrl] of prefetchedObjectUrlsRef.current.entries()) {
-      if (!keepIds.has(trackId) && blobUrl !== activeAudioSrc) {
+    for (const [trackKey, blobUrl] of prefetchedObjectUrlsRef.current.entries()) {
+      if (!shouldKeepKey(trackKey) && blobUrl !== activeAudioSrc) {
         URL.revokeObjectURL(blobUrl);
-        prefetchedObjectUrlsRef.current.delete(trackId);
+        prefetchedObjectUrlsRef.current.delete(trackKey);
       }
     }
-    for (const trackId of Array.from(prefetchedTrackIdsRef.current)) {
-      if (!keepIds.has(trackId)) {
-        prefetchedTrackIdsRef.current.delete(trackId);
+    for (const trackKey of Array.from(prefetchedTrackIdsRef.current)) {
+      if (!shouldKeepKey(trackKey)) {
+        prefetchedTrackIdsRef.current.delete(trackKey);
       }
     }
+    const inFlightKey = prefetchInFlightIdRef.current;
     if (
-      prefetchInFlightIdRef.current !== null &&
-      !keepIds.has(prefetchInFlightIdRef.current)
+      inFlightKey !== null &&
+      (typeof inFlightKey === 'number' ? !keepIds.has(inFlightKey) : inFlightKey !== nextStreamKey)
     ) {
       prefetchAbortRef.current?.abort();
       prefetchAbortRef.current = null;
@@ -621,7 +668,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     return () => {
       cancelled = true;
     };
-  }, [queue, currentIndex, repeat, offlineStoreVersion]);
+  }, [queue, currentIndex, repeat, shuffle, offlineStoreVersion]);
 
   // Immediately prefetch the next 1-2 queued online tracks when a track starts playing
   // so ad-gate polling and disk cache warm-up complete before auto-advance or Skip.
@@ -719,8 +766,132 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       void resolveGuaranteedMediaArtwork(nextItem);
     }
 
-    // Skip full-blob audio prefetching for streamed YouTube tracks (handled by server URL cache)
-    if (nextItem.isYouTubeStream || typeof nextItem.id !== 'number') {
+    // Prewarm streamed YouTube/"Online" tracks into an in-memory Blob URL so lock-screen `ended`
+    // transitions swap `audio.src` synchronously without waiting on server resolution/ad-gate.
+    if (nextItem.isYouTubeStream) {
+      const streamKey = getStreamedTrackCacheKey(nextItem);
+      const videoId = getYouTubeVideoId(nextItem);
+      const streamUrl = videoId
+        ? `/api/yt-stream/${encodeURIComponent(videoId)}`
+        : nextItem.streamUrl && nextItem.streamUrl.startsWith('/api/yt-stream/')
+          ? nextItem.streamUrl
+          : null;
+      if (!streamKey || !streamUrl) return;
+
+      if (
+        prewarmedObjectUrlsRef.current.has(streamKey) ||
+        prefetchedTrackIdsRef.current.has(streamKey) ||
+        prefetchInFlightIdRef.current === streamKey
+      ) {
+        return;
+      }
+
+      if (prefetchAbortRef.current) {
+        prefetchAbortRef.current.abort();
+        prefetchAbortRef.current = null;
+      }
+
+      const controller = new AbortController();
+      prefetchAbortRef.current = controller;
+      prefetchInFlightIdRef.current = streamKey;
+
+      const token = getStoredToken();
+      const headers = new Headers();
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+
+      const fetchInit = {
+        method: 'GET',
+        headers,
+        credentials: 'include',
+        signal: controller.signal,
+        priority: 'low',
+      } as RequestInit;
+
+      void fetch(streamUrl, fetchInit)
+        .then(async (res) => {
+          if (controller.signal.aborted) return;
+          if (!res.ok) {
+            prefetchedTrackIdsRef.current.add(streamKey);
+            return;
+          }
+
+          const contentType = (res.headers.get('content-type') || '').toLowerCase().trim();
+          if (!contentType.startsWith('audio/')) {
+            controller.abort();
+            prefetchedTrackIdsRef.current.add(streamKey);
+            return;
+          }
+
+          const contentLenHeader = res.headers.get('content-length');
+          const declaredLen = contentLenHeader ? parseInt(contentLenHeader, 10) : NaN;
+          if (Number.isFinite(declaredLen) && declaredLen > MAX_STREAM_PREWARM_BYTES) {
+            controller.abort();
+            prefetchedTrackIdsRef.current.add(streamKey);
+            return;
+          }
+
+          let blob: Blob;
+          if (res.body && typeof res.body.getReader === 'function') {
+            const reader = res.body.getReader();
+            const chunks: BlobPart[] = [];
+            let totalBytes = 0;
+            try {
+              while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                if (controller.signal.aborted) {
+                  await reader.cancel().catch(() => {});
+                  return;
+                }
+                if (value) {
+                  totalBytes += value.byteLength;
+                  if (totalBytes > MAX_STREAM_PREWARM_BYTES) {
+                    controller.abort();
+                    await reader.cancel().catch(() => {});
+                    prefetchedTrackIdsRef.current.add(streamKey);
+                    return;
+                  }
+                  chunks.push(value as unknown as BlobPart);
+                }
+              }
+            } catch {
+              await reader.cancel().catch(() => {});
+              return;
+            }
+            if (controller.signal.aborted || totalBytes === 0) return;
+            blob = new Blob(chunks, {type: contentType.split(';')[0] || 'audio/mp4'});
+          } else {
+            const rawBlob = await res.blob();
+            if (controller.signal.aborted || rawBlob.size === 0) return;
+            if (rawBlob.size > MAX_STREAM_PREWARM_BYTES) {
+              prefetchedTrackIdsRef.current.add(streamKey);
+              return;
+            }
+            blob = rawBlob;
+          }
+
+          if (!controller.signal.aborted && !prewarmedObjectUrlsRef.current.has(streamKey)) {
+            prewarmedObjectUrlsRef.current.set(streamKey, URL.createObjectURL(blob));
+          }
+          prefetchedTrackIdsRef.current.add(streamKey);
+        })
+        .catch(() => {
+          // Ignore AbortError or transient network/offline failures; fall back to streaming on ended
+        })
+        .finally(() => {
+          if (prefetchInFlightIdRef.current === streamKey) {
+            prefetchInFlightIdRef.current = null;
+          }
+          if (prefetchAbortRef.current === controller) {
+            prefetchAbortRef.current = null;
+          }
+        });
+      return;
+    }
+
+    if (typeof nextItem.id !== 'number') {
       return;
     }
 
@@ -812,6 +983,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     if (recoveryTimerRef.current !== null) {
       window.clearTimeout(recoveryTimerRef.current);
       recoveryTimerRef.current = null;
+    }
+  }, []);
+
+  const clearSlowTransitionTimer = useCallback(() => {
+    if (slowTransitionTimerRef.current !== null) {
+      window.clearTimeout(slowTransitionTimerRef.current);
+      slowTransitionTimerRef.current = null;
     }
   }, []);
 
@@ -1042,8 +1220,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       stateRef.current.isPlaying = true;
       stateRef.current.currentTrack = track;
       clearRecoveryTimer();
+      clearSlowTransitionTimer();
       clearVisibilityResumeTimers();
       recoveryAttemptsRef.current = 0;
+      slowTransitionRetriesRef.current = 0;
+      pendingTransitionRef.current = null;
 
       // Immediately register MediaSession handlers, metadata & playbackState = 'playing'
       activateMediaSessionForPlayback(track, true);
@@ -1055,7 +1236,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           playPromise.catch((err: unknown) => {
             // Ignore AbortError caused by rapid track switching
             if (err instanceof DOMException && err.name === 'AbortError') return;
+            if (pendingTransitionRef.current) {
+              const msg = err instanceof Error ? err.message : String(err);
+              updateTransitionDiagnostic(pendingTransitionRef.current.id, {error: msg});
+              pendingTransitionRef.current = null;
+            }
             endTrackTransition();
+            clearSlowTransitionTimer();
             wantPlayingRef.current = false;
             stateRef.current.isPlaying = false;
             setIsPlaying(false);
@@ -1066,6 +1253,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       };
 
       if (isSameLoadedTrack) {
+        lastLoadUsedPrewarmedRef.current = Boolean(audio.getAttribute('src')?.startsWith('blob:'));
         if (options.resetIfSame) {
           audio.currentTime = 0;
         }
@@ -1073,11 +1261,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       } else {
         const localTrackId =
           !track.isYouTubeStream && typeof track.id === 'number' ? track.id : null;
+        const streamTrackKey = track.isYouTubeStream ? getStreamedTrackCacheKey(track) : null;
         const prewarmedBlobUrl =
           localTrackId !== null
             ? (prewarmedObjectUrlsRef.current.get(localTrackId) ??
               prefetchedObjectUrlsRef.current.get(localTrackId))
-            : undefined;
+            : streamTrackKey !== null
+              ? prewarmedObjectUrlsRef.current.get(streamTrackKey)
+              : undefined;
+        lastLoadUsedPrewarmedRef.current = Boolean(prewarmedBlobUrl);
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         const shouldUseOfflineCache =
           localTrackId !== null &&
@@ -1146,6 +1338,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       activateMediaSessionForPlayback,
       beginTrackTransition,
       clearRecoveryTimer,
+      clearSlowTransitionTimer,
       clearVisibilityResumeTimers,
       endTrackTransition,
       recordTrackPlay,
@@ -1216,7 +1409,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     if (currentTrackId === null) {
       endTrackTransition();
       clearRecoveryTimer();
+      clearSlowTransitionTimer();
       clearVisibilityResumeTimers();
+      slowTransitionRetriesRef.current = 0;
+      pendingTransitionRef.current = null;
       userPausedRef.current = true;
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
@@ -1238,6 +1434,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     }
   }, [
     clearRecoveryTimer,
+    clearSlowTransitionTimer,
     clearVisibilityResumeTimers,
     currentTrackId,
     endTrackTransition,
@@ -1335,6 +1532,47 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     syncMediaSessionPositionState,
   ]);
 
+  // Watchdog for slow `ended` -> `playing` transitions while the screen is locked / document hidden
+  const scheduleSlowTransitionWatchdog = useCallback(() => {
+    clearSlowTransitionTimer();
+    slowTransitionTimerRef.current = window.setTimeout(() => {
+      slowTransitionTimerRef.current = null;
+      const audio = audioRef.current;
+      const activeTrack = stateRef.current.currentTrack;
+      if (
+        !audio ||
+        !activeTrack ||
+        !wantPlayingRef.current ||
+        userPausedRef.current ||
+        audio.ended
+      ) {
+        return;
+      }
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return;
+      if (slowTransitionRetriesRef.current >= MAX_SLOW_TRANSITION_RETRIES) return;
+
+      slowTransitionRetriesRef.current += 1;
+      activateMediaSessionForPlayback(activeTrack, false);
+      syncMediaSessionPositionState(audio);
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          if (pendingTransitionRef.current) {
+            const msg = err instanceof Error ? err.message : String(err);
+            updateTransitionDiagnostic(pendingTransitionRef.current.id, {
+              error: `retry-${slowTransitionRetriesRef.current}: ${msg}`,
+            });
+          }
+        });
+      }
+
+      if (slowTransitionRetriesRef.current < MAX_SLOW_TRANSITION_RETRIES) {
+        scheduleSlowTransitionWatchdog();
+      }
+    }, SLOW_TRANSITION_TIMEOUT_MS);
+  }, [activateMediaSessionForPlayback, clearSlowTransitionTimer, syncMediaSessionPositionState]);
+
   // Synchronous next-track transition shared by native `ended` event, MediaSession `nexttrack`, and UI button
   const advanceToNextTrack = useCallback(
     (fromEndedEvent: boolean) => {
@@ -1342,16 +1580,41 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       const {queue: q, currentIndex: idx, shuffle: isShuf, repeat: rep} = stateRef.current;
       if (!audio || q.length === 0) return;
 
+      const fromTrack = q[idx] ?? stateRef.current.currentTrack;
+      const visibilityAtEnded: DocumentVisibilityState | 'unknown' =
+        typeof document !== 'undefined' ? document.visibilityState : 'unknown';
+
       if (rep === 'one') {
-        const activeTrack = q[idx] ?? stateRef.current.currentTrack;
+        const activeTrack = fromTrack;
         userPausedRef.current = false;
         wantPlayingRef.current = true;
         lockAutoResumeAttemptsRef.current = 0;
+        slowTransitionRetriesRef.current = 0;
+        clearSlowTransitionTimer();
         stateRef.current.isPlaying = true;
         audio.currentTime = 0;
         activateMediaSessionForPlayback(activeTrack, false);
+        if (fromEndedEvent) {
+          const entryId = recordTransitionDiagnostic({
+            timestamp: new Date().toISOString(),
+            from: getTrackDiagnosticKey(fromTrack),
+            to: getTrackDiagnosticKey(activeTrack),
+            visibilityAtEnded,
+            prewarmed: Boolean(audio.getAttribute('src')?.startsWith('blob:')),
+            msToPlaying: null,
+            error: null,
+          });
+          pendingTransitionRef.current = {id: entryId, endedAt: Date.now()};
+          scheduleSlowTransitionWatchdog();
+        }
         audio.play().catch((err: unknown) => {
           if (err instanceof DOMException && err.name === 'AbortError') return;
+          if (pendingTransitionRef.current) {
+            const msg = err instanceof Error ? err.message : String(err);
+            updateTransitionDiagnostic(pendingTransitionRef.current.id, {error: msg});
+            pendingTransitionRef.current = null;
+          }
+          clearSlowTransitionTimer();
           wantPlayingRef.current = false;
           stateRef.current.isPlaying = false;
           setIsPlaying(false);
@@ -1364,7 +1627,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
 
       if (!fromEndedEvent) {
-        const skippedTrack = q[idx] ?? stateRef.current.currentTrack;
+        const skippedTrack = fromTrack;
         const dur =
           Number.isFinite(audio.duration) && audio.duration > 0
             ? audio.duration
@@ -1387,7 +1650,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       if (nextIdx < 0 || !q[nextIdx]) {
         endTrackTransition();
         clearRecoveryTimer();
+        clearSlowTransitionTimer();
         clearVisibilityResumeTimers();
+        slowTransitionRetriesRef.current = 0;
+        pendingTransitionRef.current = null;
         userPausedRef.current = true;
         wantPlayingRef.current = false;
         stateRef.current.isPlaying = false;
@@ -1405,14 +1671,29 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       // Immediately assign audio.src and invoke audio.play() inside this synchronous tick
       loadAndPlayTrackSync(nextItem, {resetIfSame: true});
+      if (fromEndedEvent) {
+        const entryId = recordTransitionDiagnostic({
+          timestamp: new Date().toISOString(),
+          from: getTrackDiagnosticKey(fromTrack),
+          to: getTrackDiagnosticKey(nextItem),
+          visibilityAtEnded,
+          prewarmed: lastLoadUsedPrewarmedRef.current,
+          msToPlaying: null,
+          error: null,
+        });
+        pendingTransitionRef.current = {id: entryId, endedAt: Date.now()};
+        scheduleSlowTransitionWatchdog();
+      }
       setCurrentIndex(nextIdx);
     },
     [
       activateMediaSessionForPlayback,
       clearRecoveryTimer,
+      clearSlowTransitionTimer,
       clearVisibilityResumeTimers,
       endTrackTransition,
       loadAndPlayTrackSync,
+      scheduleSlowTransitionWatchdog,
       setMediaSessionPlaybackState,
       syncMediaSessionPositionState,
     ]
@@ -2258,6 +2539,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const lifecycleRef = useRef({
     advanceToNextTrack,
     clearRecoveryTimer,
+    clearSlowTransitionTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
     prefetchNextTrackIfReady,
@@ -2271,6 +2553,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   lifecycleRef.current = {
     advanceToNextTrack,
     clearRecoveryTimer,
+    clearSlowTransitionTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
     prefetchNextTrackIfReady,
@@ -2306,9 +2589,16 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     const handlePlaying = () => {
       lifecycleRef.current.endTrackTransition();
       lifecycleRef.current.clearRecoveryTimer();
+      lifecycleRef.current.clearSlowTransitionTimer();
       lifecycleRef.current.clearVisibilityResumeTimers();
       recoveryAttemptsRef.current = 0;
       lockAutoResumeAttemptsRef.current = 0;
+      slowTransitionRetriesRef.current = 0;
+      if (pendingTransitionRef.current) {
+        const msToPlaying = Math.max(0, Date.now() - pendingTransitionRef.current.endedAt);
+        updateTransitionDiagnostic(pendingTransitionRef.current.id, {msToPlaying});
+        pendingTransitionRef.current = null;
+      }
       setIsBuffering(false);
       userPausedRef.current = false;
       wantPlayingRef.current = true;
@@ -2350,6 +2640,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
 
       lifecycleRef.current.clearRecoveryTimer();
+      lifecycleRef.current.clearSlowTransitionTimer();
       wantPlayingRef.current = false;
       stateRef.current.isPlaying = false;
       setIsPlaying(false);
@@ -2456,6 +2747,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     const handleError = () => {
       lifecycleRef.current.endTrackTransition();
       setIsBuffering(false);
+      if (pendingTransitionRef.current) {
+        const mediaErr = audio.error;
+        const msg =
+          mediaErr?.message ||
+          (mediaErr ? `MediaError code ${mediaErr.code}` : 'Audio playback error');
+        updateTransitionDiagnostic(pendingTransitionRef.current.id, {error: msg});
+      }
       if (
         wantPlayingRef.current &&
         !userPausedRef.current &&
@@ -2572,7 +2870,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       // Pause cleanly if PlayerProvider unmounts (e.g. user logs out), while keeping singleton element intact
       lifecycleRef.current.endTrackTransition();
       lifecycleRef.current.clearRecoveryTimer();
+      lifecycleRef.current.clearSlowTransitionTimer();
       lifecycleRef.current.clearVisibilityResumeTimers();
+      slowTransitionRetriesRef.current = 0;
+      pendingTransitionRef.current = null;
       userPausedRef.current = true;
       wantPlayingRef.current = false;
       audio.pause();

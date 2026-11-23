@@ -4,6 +4,7 @@ import {
   Check,
   CheckCircle2,
   Cookie,
+  Copy,
   Download,
   FolderSearch,
   HardDrive,
@@ -44,6 +45,11 @@ import {
   getListeningLearningEnabled,
   setListeningLearningEnabled,
 } from '../lib/listeningLearning';
+import {
+  getTransitionDiagnostics,
+  subscribeTransitionDiagnostics,
+  type TransitionDiagnosticEntry,
+} from '../lib/playbackDiagnostics';
 import {useScrollReady} from '../lib/scrollHistory';
 import type {AppSettings, MountHealth, ScanProgress, SystemStatus, User} from '../types';
 import {
@@ -62,6 +68,40 @@ export const SettingsPage: React.FC = () => {
   const {theme, setTheme} = useTheme();
   const {isInstallable, isInstalled, isIOS, install} = usePWAInstall();
   const isAdmin = user?.role === 'admin' && !offline;
+
+  const [transitionLog, setTransitionLog] = useState<TransitionDiagnosticEntry[]>(() =>
+    getTransitionDiagnostics()
+  );
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
+
+  useEffect(() => {
+    setTransitionLog(getTransitionDiagnostics());
+    return subscribeTransitionDiagnostics(() => {
+      setTransitionLog(getTransitionDiagnostics());
+    });
+  }, []);
+
+  const handleCopyDiagnostics = useCallback(async () => {
+    const payload = JSON.stringify(transitionLog, null, 2);
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(payload);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = payload;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setDiagnosticsCopied(true);
+      window.setTimeout(() => setDiagnosticsCopied(false), 2000);
+    } catch {
+      // Ignore clipboard permission errors
+    }
+  }, [transitionLog]);
 
   // Admin: Settings & System Status
   const [adminDataLoaded, setAdminDataLoaded] = useState(!isAdmin);
@@ -1916,6 +1956,51 @@ export const SettingsPage: React.FC = () => {
             <span>Sign Out</span>
           </button>
         </div>
+      </section>
+
+      {/* Playback diagnostics (read-only) */}
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
+              Playback diagnostics
+            </h2>
+            <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
+              Last {transitionLog.length} of 30 track transitions (read-only)
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={transitionLog.length === 0}
+            onClick={() => void handleCopyDiagnostics()}
+            className="inline-flex items-center gap-1.5 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] px-3.5 py-1.5 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-40 transition-colors shrink-0"
+          >
+            {diagnosticsCopied ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-[var(--accent)]" />
+                <span>Copied</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {transitionLog.length === 0 ? (
+          <p className="text-xs text-[var(--text-muted)]">No track transitions recorded yet.</p>
+        ) : (
+          <pre className="max-h-60 overflow-auto rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)] p-3 font-mono text-[11px] leading-relaxed text-[var(--text-secondary)] select-text whitespace-pre-wrap break-all">
+            {transitionLog
+              .map(
+                (item) =>
+                  `${item.timestamp}  ${item.from ?? '-'} -> ${item.to ?? '-'}  vis=${item.visibilityAtEnded}  prewarmed: ${item.prewarmed}  ms=${item.msToPlaying ?? '-'}${item.error ? `  err=${item.error}` : ''}`
+              )
+              .join('\n')}
+          </pre>
+        )}
       </section>
 
       {/* Directory Browser Modal */}
