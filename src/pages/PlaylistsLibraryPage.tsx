@@ -4,8 +4,6 @@ import {
   CheckCircle2,
   CheckSquare,
   Clock,
-  Disc3,
-  Download,
   FileDown,
   HardDriveDownload,
   Heart,
@@ -29,6 +27,7 @@ import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
 import {ConfirmDeleteModal} from '../components/ConfirmDeleteModal';
 import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
+import {PlaylistsHubView, recordRecentPlaylistId} from '../components/PlaylistsHubView';
 import {TrackTable} from '../components/TrackTable';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
@@ -180,8 +179,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [batchDeleteError, setBatchDeleteError] = useState<string | null>(null);
 
-  // Playlist context menus, offline batch download & toast
-  const [playlistMenuId, setPlaylistMenuId] = useState<number | null>(null);
+  // Playlist detail menu, offline batch download & toast
   const [detailMenuOpen, setDetailMenuOpen] = useState(false);
   const [exportingPlaylistId, setExportingPlaylistId] = useState<number | null>(null);
   const [playlistDownloadProgress, setPlaylistDownloadProgress] = useState<{
@@ -191,7 +189,6 @@ export const PlaylistsLibraryPage: React.FC = () => {
   } | null>(null);
   const playlistDownloadAbortRef = useRef<AbortController | null>(null);
   const [pageToast, setPageToast] = useState<string | null>(null);
-  const playlistMenuRef = useRef<HTMLDivElement | null>(null);
   const detailMenuRef = useRef<HTMLDivElement | null>(null);
 
   const flashToast = useCallback((msg: string) => {
@@ -201,9 +198,6 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
-      if (playlistMenuRef.current && !playlistMenuRef.current.contains(e.target as Node)) {
-        setPlaylistMenuId(null);
-      }
       if (detailMenuRef.current && !detailMenuRef.current.contains(e.target as Node)) {
         setDetailMenuOpen(false);
       }
@@ -234,12 +228,17 @@ export const PlaylistsLibraryPage: React.FC = () => {
     };
   }, []);
 
-  // Reset multi-select when switching views or tabs
+  // Reset multi-select when switching views or tabs and track recently viewed playlists
   useEffect(() => {
     setSelectionMode(false);
     setSelectedIds(new Set());
-    setPlaylistMenuId(null);
     setDetailMenuOpen(false);
+    if (playlistIdParam) {
+      const numericId = Number(playlistIdParam);
+      if (Number.isFinite(numericId) && numericId > 0) {
+        recordRecentPlaylistId(numericId);
+      }
+    }
   }, [playlistIdParam, activeTab, artistFilter]);
 
   const loadPlaylists = useCallback(async () => {
@@ -410,33 +409,52 @@ export const PlaylistsLibraryPage: React.FC = () => {
     }
   };
 
-  const handleQuickPlayPlaylist = async (e: React.MouseEvent, plId: number) => {
-    e.stopPropagation();
-    if (offline) {
-      const cached = await getOfflinePlaylistTracks(plId);
-      if (cached && cached.tracks.length > 0) {
-        playTrack(cached.tracks[0], cached.tracks);
+  const handlePlayTrackCollection = useCallback(
+    (trackList: Track[], shufflePlay = false) => {
+      if (trackList.length === 0) return;
+      if (shufflePlay) {
+        if (!shuffle) {
+          toggleShuffle();
+        }
+        const randomTrack = trackList[Math.floor(Math.random() * trackList.length)];
+        playTrack(randomTrack, trackList);
       } else {
-        navigate(`/playlists/${plId}`);
+        playTrack(trackList[0], trackList);
       }
-      return;
-    }
-    try {
-      const res = await apiFetch<{tracks: Track[]}>(`/api/playlists/${plId}`);
-      if (res.tracks && res.tracks.length > 0) {
-        playTrack(res.tracks[0], res.tracks);
-      } else {
-        navigate(`/playlists/${plId}`);
+    },
+    [playTrack, shuffle, toggleShuffle]
+  );
+
+  const handlePlayPlaylistById = useCallback(
+    async (plId: number, shufflePlay = false) => {
+      recordRecentPlaylistId(plId);
+      if (offline) {
+        const cached = await getOfflinePlaylistTracks(plId);
+        if (cached && cached.tracks.length > 0) {
+          handlePlayTrackCollection(cached.tracks, shufflePlay);
+        } else {
+          navigate(`/playlists/${plId}`);
+        }
+        return;
       }
-    } catch {
-      const cached = await getOfflinePlaylistTracks(plId);
-      if (cached && cached.tracks.length > 0) {
-        playTrack(cached.tracks[0], cached.tracks);
-      } else {
-        navigate(`/playlists/${plId}`);
+      try {
+        const res = await apiFetch<{tracks: Track[]}>(`/api/playlists/${plId}`);
+        if (res.tracks && res.tracks.length > 0) {
+          handlePlayTrackCollection(res.tracks, shufflePlay);
+        } else {
+          navigate(`/playlists/${plId}`);
+        }
+      } catch {
+        const cached = await getOfflinePlaylistTracks(plId);
+        if (cached && cached.tracks.length > 0) {
+          handlePlayTrackCollection(cached.tracks, shufflePlay);
+        } else {
+          navigate(`/playlists/${plId}`);
+        }
       }
-    }
-  };
+    },
+    [handlePlayTrackCollection, navigate, offline]
+  );
 
   const playlistAllTracksCached = useMemo(() => {
     if (!activePlaylist || tracks.length === 0) return false;
@@ -536,7 +554,6 @@ export const PlaylistsLibraryPage: React.FC = () => {
     try {
       await apiFetch(`/api/playlists/${targetPlaylistId}`, {method: 'DELETE'});
       setPlaylists((prev) => prev.filter((p) => p.id !== targetPlaylistId));
-      setPlaylistMenuId(null);
       setDetailMenuOpen(false);
       bumpLibraryRefresh();
       flashToast('Playlist deleted');
@@ -550,7 +567,6 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
   const handleExportM3u = async (pl: Playlist) => {
     setExportingPlaylistId(pl.id);
-    setPlaylistMenuId(null);
     setDetailMenuOpen(false);
     try {
       const res = await apiFetch<{
@@ -1435,171 +1451,34 @@ export const PlaylistsLibraryPage: React.FC = () => {
               </div>
             </div>
           ) : (
-            /* PLAYLISTS TAB HEADER (/playlists) */
-            <div
-              className="px-4 sm:px-6 lg:px-8 pb-4 max-w-7xl mx-auto"
-              style={{paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))'}}
-            >
-              <div className="flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)] truncate">
-                    {offline ? 'Offline Playlists' : 'Your Playlists'}
-                  </h1>
-                  <p className="mt-0.5 text-xs sm:text-sm text-[var(--text-secondary)]">
-                    <span className="font-mono tabular-nums">{playlists.length}</span>{' '}
-                    {playlists.length === 1 ? 'playlist' : 'playlists'}
-                    {!offline && (
-                      <>
-                        <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
-                        <span className="font-mono tabular-nums">{stats.totalTracks}</span>{' '}
-                        {stats.totalTracks === 1 ? 'track' : 'tracks'}
-                      </>
-                    )}
-                  </p>
-                </div>
-
-                {!offline && (
-                  <button
-                    type="button"
-                    onClick={() => setCreateOpen(true)}
-                    className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-4 sm:px-5 py-2 sm:py-2.5 text-xs sm:text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap shrink-0"
-                  >
-                    <Plus className="w-4 h-4 stroke-[2.5]" />
-                    Create Playlist
-                  </button>
-                )}
-              </div>
-            </div>
+            /* IMMERSIVE FULL-BLEED PLAYLISTS HUB (/playlists) */
+            <PlaylistsHubView
+              playlists={playlists}
+              tracks={tracks}
+              currentTrack={currentTrack}
+              totalTrackCount={stats.totalTracks}
+              cachedTrackIds={cachedTrackIds}
+              offline={offline}
+              loading={loading}
+              exportingPlaylistId={exportingPlaylistId}
+              onOpenPlaylist={(id) => navigate(`/playlists/${id}`)}
+              onPlayPlaylist={handlePlayPlaylistById}
+              onPlayTracks={handlePlayTrackCollection}
+              onOpenCreatePlaylist={() => setCreateOpen(true)}
+              onExportM3u={handleExportM3u}
+              onDeletePlaylist={handleDeletePlaylist}
+              onNavigateHomeTab={(tab) => {
+                setSearchParams({});
+                setActiveTab(tab);
+                navigate('/');
+              }}
+            />
           )}
 
-          {/* Content Stage (Starts Immediately Below Hero Action Bar) */}
+          {/* Content Stage for Home Views (Starts Immediately Below Home Hero Action Bar) */}
+          {isHomeView && (
           <div className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
-            {activeTab === 'playlists' ? (
-              playlists.length === 0 ? (
-                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-12 text-center">
-                  <Disc3 className="w-10 h-10 text-[var(--text-muted)] mx-auto mb-3" />
-                  <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
-                    {offline ? 'No offline playlists cached' : 'No playlists created yet'}
-                  </h2>
-                  <p className="mt-1 text-sm text-[var(--text-secondary)] max-w-md mx-auto">
-                    {offline
-                      ? 'When back online, open any playlist and tap Download Playlist Offline to listen in Airplane Mode.'
-                      : 'Organize your NAS tracks into custom collections, or place .m3u / .m3u8 files inside your music folder and run a library scan.'}
-                  </p>
-                  {!offline && (
-                    <button
-                      type="button"
-                      onClick={() => setCreateOpen(true)}
-                      className="mt-5 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                    >
-                      Create First Playlist
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
-                  {playlists.map((pl) => {
-                    const isPlMenuOpen = playlistMenuId === pl.id;
-                    return (
-                      <div
-                        key={pl.id}
-                        onClick={() => navigate(`/playlists/${pl.id}`)}
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') navigate(`/playlists/${pl.id}`);
-                        }}
-                        className="group relative rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-4 hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer"
-                      >
-                        <div className="relative mb-3.5">
-                          <PlaylistMosaic
-                            covers={pl.covers || []}
-                            alt={pl.name}
-                            className="w-full aspect-square rounded-md"
-                          />
-
-                          {pl.source === 'm3u' && (
-                            <span className="absolute top-2 left-2 font-mono text-[10px] font-bold tracking-wide text-[var(--accent)] bg-black/75 border border-[var(--accent)]/40 rounded px-1.5 py-0.5 leading-none backdrop-blur-xs">
-                              M3U
-                            </span>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={(e) => void handleQuickPlayPlaylist(e, pl.id)}
-                            className="absolute bottom-2.5 right-2.5 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 hover:bg-[var(--accent-hover)] hover:scale-105 transition-all"
-                            aria-label={`Play ${pl.name}`}
-                          >
-                            <Play className="w-5 h-5 fill-current ml-0.5" />
-                          </button>
-                        </div>
-
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-bold text-[var(--text-primary)] truncate">
-                              {pl.name}
-                            </p>
-                            <p className="mt-1 text-xs text-[var(--text-secondary)] truncate">
-                              {pl.description ||
-                                `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`}
-                            </p>
-                          </div>
-
-                          {!offline && (
-                            <div
-                              className="relative shrink-0"
-                              ref={isPlMenuOpen ? playlistMenuRef : null}
-                            >
-                              <button
-                                type="button"
-                                disabled={exportingPlaylistId === pl.id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPlaylistMenuId(isPlMenuOpen ? null : pl.id);
-                                }}
-                                className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] transition-colors"
-                                aria-label={`Options for ${pl.name}`}
-                              >
-                                {exportingPlaylistId === pl.id ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
-                                ) : (
-                                  <MoreHorizontal className="w-4 h-4" />
-                                )}
-                              </button>
-
-                              {isPlMenuOpen && (
-                                <div
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="absolute right-0 bottom-9 z-40 w-48 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border-subtle)] p-1.5 shadow-2xl"
-                                >
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleExportM3u(pl)}
-                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-                                  >
-                                    <FileDown className="w-3.5 h-3.5 text-[var(--accent)]" />
-                                    Export as .m3u
-                                  </button>
-                                  <div className="my-1 border-t border-[var(--border-subtle)]" />
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleDeletePlaylist(pl.id)}
-                                    className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs font-medium text-[var(--danger-text)] hover:bg-[var(--bg-hover)]"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    Delete Playlist
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )
-            ) : loading ? (
+            {loading ? (
               <div className="flex items-center justify-center py-16 text-[var(--text-secondary)] gap-2">
                 <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
                 <span className="text-sm">Loading tracks...</span>
@@ -1682,6 +1561,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               />
             )}
           </div>
+          )}
         </div>
       )}
 

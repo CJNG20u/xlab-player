@@ -40,7 +40,6 @@ export function getUnifiedPageHeaderGradient(
 
 export function isUnifiedHeaderPath(pathname: string): boolean {
   return (
-    pathname === '/playlists' ||
     pathname.startsWith('/playlists/') ||
     pathname === '/discover' ||
     pathname === '/search' ||

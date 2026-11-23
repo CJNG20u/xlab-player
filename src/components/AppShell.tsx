@@ -143,7 +143,8 @@ export const AppShell: React.FC = () => {
     flashShellToast(res.message);
   }, [currentTrack, flashShellToast, saveYouTubeTrackToLibrary]);
 
-  const usesUnifiedHeader = !isNowPlayingPage && !isHomePage;
+  const isPlaylistsRootPage = location.pathname === '/playlists';
+  const usesUnifiedHeader = !isNowPlayingPage && !isHomePage && !isPlaylistsRootPage;
   const unifiedHeaderTopHex = getUnifiedPageHeaderTopHex(theme);
   const unifiedHeaderGradient = getUnifiedPageHeaderGradient(theme);
 
