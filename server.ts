@@ -444,6 +444,7 @@ async function startServer() {
               videoId,
               strategy: failedStrategy,
               fromCache: resolved.fromCache,
+              cacheAgeMs: resolved.cacheAgeMs,
               status: failedStatus,
               ipFamily: failedIpFamily,
               serverHeader: failedServer,
