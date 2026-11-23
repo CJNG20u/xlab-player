@@ -159,6 +159,21 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_play_history_user_time ON play_history(user_id, played_at DESC);
+
+  CREATE TABLE IF NOT EXISTS lyrics_cache (
+    cache_key TEXT PRIMARY KEY,
+    artist TEXT NOT NULL,
+    title TEXT NOT NULL,
+    album TEXT NOT NULL DEFAULT '',
+    duration REAL NOT NULL DEFAULT 0,
+    synced_lyrics TEXT,
+    plain_lyrics TEXT,
+    instrumental INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'lrclib',
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lyrics_cache_updated ON lyrics_cache(updated_at);
 `);
 
 // Safe incremental migrations for existing databases

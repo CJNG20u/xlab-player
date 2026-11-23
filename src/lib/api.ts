@@ -273,8 +273,8 @@ export function parseLrc(raw: string): {isSynced: boolean; lines: LrcLine[]} {
   for (const line of rawLines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    // Skip LRC metadata tags like [ar:...], [ti:...], [al:...]
-    if (/^\[(ar|ti|al|by|offset|re|ve):/i.test(trimmed)) continue;
+    // Skip LRC metadata tags like [ar:...], [ti:...], [al:...], [length:...]
+    if (/^\[(ar|ti|al|by|offset|re|ve|length|la|id|au):/i.test(trimmed)) continue;
 
     const matches = Array.from(trimmed.matchAll(timeRe));
     if (matches.length > 0) {

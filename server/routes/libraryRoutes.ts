@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import {type AuthRequest, requireAuth} from '../auth.ts';
 import {COVERS_DIR, db, getMusicDir} from '../db.ts';
-import {readTrackLyricsLive} from '../scanner.ts';
+import {resolveTrackLyrics} from '../lyrics.ts';
 
 export const libraryRouter = Router();
 
@@ -339,19 +339,55 @@ libraryRouter.get('/tracks/:id', requireAuth, (req: AuthRequest, res) => {
   res.json({track: {...row, liked: Boolean(row.liked)}});
 });
 
-libraryRouter.get('/tracks/:id/lyrics', requireAuth, (req, res) => {
-  const id = Number(req.params.id);
-  const row = db
-    .prepare('SELECT rel_path, lyrics FROM tracks WHERE id = ?')
-    .get(id) as {rel_path: string; lyrics: string | null} | undefined;
+libraryRouter.get('/lyrics', requireAuth, async (req, res) => {
+  const rawTrackId = req.query.trackId ? Number(req.query.trackId) : null;
+  const trackId =
+    rawTrackId !== null && Number.isInteger(rawTrackId) && rawTrackId > 0 ? rawTrackId : null;
+  const title = typeof req.query.title === 'string' ? req.query.title : '';
+  const artist = typeof req.query.artist === 'string' ? req.query.artist : '';
+  const album = typeof req.query.album === 'string' ? req.query.album : '';
+  const rawDuration = req.query.duration ? Number(req.query.duration) : 0;
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
 
-  if (!row) {
+  try {
+    const result = await resolveTrackLyrics({trackId, title, artist, album, duration});
+    res.json(result);
+  } catch {
+    res.json({
+      lyrics: null,
+      syncedLyrics: null,
+      plainLyrics: null,
+      instrumental: false,
+      source: 'none',
+    });
+  }
+});
+
+libraryRouter.get('/tracks/:id/lyrics', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({error: 'Invalid track ID'});
+    return;
+  }
+
+  const exists = db.prepare('SELECT id FROM tracks WHERE id = ?').get(id);
+  if (!exists) {
     res.status(404).json({error: 'Track not found'});
     return;
   }
 
-  const lyrics = readTrackLyricsLive(row.rel_path, row.lyrics);
-  res.json({lyrics: lyrics || null});
+  try {
+    const result = await resolveTrackLyrics({trackId: id});
+    res.json(result);
+  } catch {
+    res.json({
+      lyrics: null,
+      syncedLyrics: null,
+      plainLyrics: null,
+      instrumental: false,
+      source: 'none',
+    });
+  }
 });
 
 libraryRouter.post('/tracks/:id/like', requireAuth, (req: AuthRequest, res) => {

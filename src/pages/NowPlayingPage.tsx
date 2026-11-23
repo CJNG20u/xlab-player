@@ -17,7 +17,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useLayoutEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {AlbumArt} from '../components/AlbumArt';
 import {useAuth} from '../context/AuthContext';
@@ -42,6 +42,24 @@ import {
   setDocumentThemeColor,
 } from '../lib/themeColor';
 import {getOfflineCoverBlobUrl, getOfflineTrackLyrics} from '../utils/offlineStore';
+
+interface LyricsResponsePayload {
+  lyrics: string | null;
+  syncedLyrics: string | null;
+  plainLyrics: string | null;
+  instrumental: boolean;
+  source: 'local' | 'cache' | 'lrclib' | 'offline' | 'none';
+}
+
+const sessionLyricsCache = new Map<string, LyricsResponsePayload>();
+
+function getSessionLyricsKey(track: {
+  id: number | string;
+  title?: string;
+  artist?: string;
+}): string {
+  return `${track.id}|${(track.artist || '').trim().toLowerCase()}|${(track.title || '').trim().toLowerCase()}`;
+}
 
 export const NowPlayingPage: React.FC = () => {
   const navigate = useNavigate();
@@ -75,11 +93,16 @@ export const NowPlayingPage: React.FC = () => {
     getYouTubeSaveStatus,
   } = usePlayer();
 
-  const [rawLyrics, setRawLyrics] = useState<string | null>(null);
+  const [lyricsData, setLyricsData] = useState<LyricsResponsePayload | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [offlineCoverBackdrop, setOfflineCoverBackdrop] = useState<string | null>(null);
   const [sampledDominantColor, setSampledDominantColor] = useState<string | null>(null);
   const [actionToast, setActionToast] = useState<string | null>(null);
+
+  const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
+  const lyricLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const userScrollPauseUntilRef = useRef<number>(0);
+  const justOpenedLyricsRef = useRef<boolean>(false);
 
   const flashToast = useCallback((msg: string) => {
     setActionToast(msg);
@@ -178,40 +201,118 @@ export const NowPlayingPage: React.FC = () => {
     }
   }, [coverFile]);
 
+  const trackTitle = currentTrack?.title ?? '';
+  const trackArtist = currentTrack?.artist ?? '';
+  const trackAlbum = currentTrack?.album ?? '';
+  const trackMetaDuration = currentTrack?.duration ?? 0;
+  const trackIsYouTube = Boolean(currentTrack?.isYouTubeStream);
+
+  // Unified lyrics fetch for BOTH local library tracks and Discover/YouTube streams
+  // via GET /api/lyrics (local tags/.lrc -> SQLite lyrics_cache -> LRCLIB API),
+  // with IndexedDB offline fallback when disconnected.
   useEffect(() => {
-    if (!trackId || typeof trackId !== 'number' || currentTrack?.isYouTubeStream) {
-      setRawLyrics(null);
+    if (!currentTrack || (!trackTitle.trim() && typeof trackId !== 'number')) {
+      setLyricsData(null);
       setLyricsLoading(false);
       return;
     }
+
+    const cacheKey = getSessionLyricsKey(currentTrack);
+    const cachedSession = sessionLyricsCache.get(cacheKey);
+    if (cachedSession) {
+      setLyricsData(cachedSession);
+      setLyricsLoading(false);
+      return;
+    }
+
     let cancelled = false;
+    const controller = new AbortController();
+    setLyricsData(null);
     setLyricsLoading(true);
+    lyricLineRefs.current = [];
+    userScrollPauseUntilRef.current = 0;
+
     const loadLyrics = async () => {
+      const localNumericId = !trackIsYouTube && typeof trackId === 'number' ? trackId : null;
+
       try {
         if (typeof navigator !== 'undefined' && !navigator.onLine) {
-          const cached = await getOfflineTrackLyrics(trackId);
-          if (!cancelled) setRawLyrics(cached);
+          if (localNumericId !== null) {
+            const cachedOffline = await getOfflineTrackLyrics(localNumericId);
+            if (!cancelled) {
+              const payload: LyricsResponsePayload = {
+                lyrics: cachedOffline,
+                syncedLyrics: null,
+                plainLyrics: cachedOffline,
+                instrumental: false,
+                source: cachedOffline ? 'offline' : 'none',
+              };
+              setLyricsData(payload);
+            }
+          }
           return;
         }
-        const res = await apiFetch<{lyrics: string | null}>(`/api/tracks/${trackId}/lyrics`);
-        if (!cancelled) setRawLyrics(res.lyrics);
-      } catch {
-        const cached = await getOfflineTrackLyrics(trackId);
-        if (!cancelled) setRawLyrics(cached);
+
+        const qs = new URLSearchParams();
+        if (localNumericId !== null) qs.set('trackId', String(localNumericId));
+        if (trackTitle.trim()) qs.set('title', trackTitle.trim());
+        if (trackArtist.trim()) qs.set('artist', trackArtist.trim());
+        if (trackAlbum.trim()) qs.set('album', trackAlbum.trim());
+        if (Number.isFinite(trackMetaDuration) && trackMetaDuration > 0) {
+          qs.set('duration', String(Math.round(trackMetaDuration)));
+        }
+
+        const res = await apiFetch<LyricsResponsePayload>(`/api/lyrics?${qs.toString()}`, {
+          signal: controller.signal,
+        });
+        if (cancelled) return;
+
+        const normalized: LyricsResponsePayload = {
+          lyrics: res.syncedLyrics || res.lyrics || res.plainLyrics || null,
+          syncedLyrics: res.syncedLyrics || null,
+          plainLyrics: res.plainLyrics || null,
+          instrumental: Boolean(res.instrumental),
+          source: res.source || 'none',
+        };
+        sessionLyricsCache.set(cacheKey, normalized);
+        setLyricsData(normalized);
+      } catch (err) {
+        if (cancelled || (err instanceof DOMException && err.name === 'AbortError')) return;
+        if (localNumericId !== null) {
+          const cachedOffline = await getOfflineTrackLyrics(localNumericId);
+          if (!cancelled) {
+            setLyricsData({
+              lyrics: cachedOffline,
+              syncedLyrics: null,
+              plainLyrics: cachedOffline,
+              instrumental: false,
+              source: cachedOffline ? 'offline' : 'none',
+            });
+          }
+        } else if (!cancelled) {
+          setLyricsData(null);
+        }
       } finally {
         if (!cancelled) setLyricsLoading(false);
       }
     };
+
     void loadLyrics();
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [currentTrack?.isYouTubeStream, trackId]);
+  }, [currentTrack, trackAlbum, trackArtist, trackId, trackIsYouTube, trackMetaDuration, trackTitle]);
+
+  const rawLyricsText = useMemo(() => {
+    if (!lyricsData) return null;
+    return lyricsData.syncedLyrics || lyricsData.lyrics || lyricsData.plainLyrics || null;
+  }, [lyricsData]);
 
   const parsedLyrics = useMemo(() => {
-    if (!rawLyrics) return null;
-    return parseLrc(rawLyrics);
-  }, [rawLyrics]);
+    if (!rawLyricsText) return null;
+    return parseLrc(rawLyricsText);
+  }, [rawLyricsText]);
 
   const activeLyricIndex = useMemo(() => {
     if (!parsedLyrics?.isSynced) return -1;
@@ -224,6 +325,33 @@ export const NowPlayingPage: React.FC = () => {
     }
     return active;
   }, [parsedLyrics, currentTime]);
+
+  useEffect(() => {
+    if (lyricsOpen) {
+      justOpenedLyricsRef.current = true;
+      userScrollPauseUntilRef.current = 0;
+    }
+  }, [lyricsOpen, trackId]);
+
+  // Smoothly auto-scroll the square lyrics container to keep the active lyric line centered
+  useEffect(() => {
+    if (!lyricsOpen || !parsedLyrics?.isSynced || activeLyricIndex < 0) return;
+    if (Date.now() < userScrollPauseUntilRef.current) return;
+
+    const container = lyricsScrollRef.current;
+    const activeEl = lyricLineRefs.current[activeLyricIndex];
+    if (!container || !activeEl) return;
+
+    const targetScrollTop =
+      activeEl.offsetTop - container.clientHeight / 2 + activeEl.clientHeight / 2;
+    const behavior: ScrollBehavior = justOpenedLyricsRef.current ? 'auto' : 'smooth';
+    justOpenedLyricsRef.current = false;
+
+    container.scrollTo({
+      top: Math.max(0, targetScrollTop),
+      behavior,
+    });
+  }, [activeLyricIndex, lyricsOpen, parsedLyrics?.isSynced]);
 
   if (!currentTrack) {
     return (
@@ -324,9 +452,10 @@ export const NowPlayingPage: React.FC = () => {
             <button
               type="button"
               onClick={() => setLyricsOpen(!lyricsOpen)}
+              aria-pressed={lyricsOpen}
               className={`flex h-11 px-3.5 items-center gap-2 rounded-full text-xs font-semibold transition-colors ${
                 lyricsOpen
-                  ? 'bg-[var(--accent)] text-[var(--accent-contrast)]'
+                  ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-md'
                   : isLight
                     ? 'bg-white/75 backdrop-blur-md border border-black/[0.08] text-[#1C1C1E] hover:bg-white'
                     : 'bg-black/30 text-white hover:bg-black/50'
@@ -353,29 +482,162 @@ export const NowPlayingPage: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Content Split (Artwork + Controls | Optional Lyrics Drawer) */}
-      <div className="relative z-10 flex-1 flex flex-col lg:flex-row items-center justify-center gap-8 lg:gap-12 px-6 sm:px-10 py-6 pb-safe max-w-6xl mx-auto w-full">
-        {/* Artwork + Info + Transport */}
+      {/* Main Centered Player Stack (Cover Art swaps directly into Live-Synced Lyrics on toggle) */}
+      <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-6 sm:px-10 py-6 pb-safe max-w-2xl mx-auto w-full">
+        {/* Artwork / Swappable Lyrics Card + Info + Transport */}
         <div className="flex flex-col items-center w-full max-w-md">
-          <div
-            {...artworkSwipe.handlers}
-            style={artworkSwipe.style}
-            className="w-full max-w-[340px] sm:max-w-[380px] aspect-square select-none cursor-grab active:cursor-grabbing"
-            aria-label="Swipe left for next track or right for previous track"
-          >
-            <AlbumArt
-              coverFile={currentTrack.cover_file}
-              externalUrl={currentTrack.coverUrl}
-              alt={currentTrack.title}
-              color={currentTrack.dominant_color}
-              className={`w-full h-full rounded-2xl pointer-events-none select-none ${
+          {lyricsOpen ? (
+            <section
+              aria-label="Song lyrics"
+              className={`w-full max-w-[340px] sm:max-w-[380px] aspect-square rounded-2xl backdrop-blur-xl border overflow-hidden flex flex-col ${
                 isLight
-                  ? 'shadow-[0_24px_56px_rgba(0,0,0,0.22)] ring-1 ring-black/[0.06]'
-                  : 'shadow-2xl'
+                  ? 'bg-white/80 border-black/[0.08] shadow-[0_24px_56px_rgba(0,0,0,0.14)]'
+                  : 'bg-black/45 border-white/12 shadow-2xl'
               }`}
-              iconSize={72}
-            />
-          </div>
+            >
+              {/* Compact Lyrics Header Bar */}
+              <div
+                className={`flex items-center justify-between px-4 py-2.5 border-b shrink-0 ${
+                  isLight ? 'border-black/[0.06]' : 'border-white/10'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Mic2 className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                  <span className="font-display text-xs font-bold tracking-wide text-[var(--text-primary)]">
+                    Lyrics
+                  </span>
+                </div>
+                {parsedLyrics?.isSynced ? (
+                  <span className="text-[11px] font-semibold text-[var(--accent)]">Synced</span>
+                ) : lyricsData?.instrumental ? (
+                  <span className="text-[11px] font-medium text-[var(--text-secondary)]">
+                    Instrumental
+                  </span>
+                ) : parsedLyrics && parsedLyrics.lines.length > 0 ? (
+                  <span className="text-[11px] font-medium text-[var(--text-secondary)]">
+                    Plain text
+                  </span>
+                ) : null}
+              </div>
+
+              {/* Scrollable Live Lyrics Body */}
+              <div
+                ref={lyricsScrollRef}
+                onWheel={() => {
+                  userScrollPauseUntilRef.current = Date.now() + 3000;
+                }}
+                onTouchStart={() => {
+                  userScrollPauseUntilRef.current = Date.now() + 3000;
+                }}
+                className="relative flex-1 overflow-y-auto no-scrollbar px-5"
+                style={{
+                  WebkitMaskImage:
+                    'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
+                  maskImage:
+                    'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
+                }}
+              >
+                {lyricsLoading ? (
+                  <div className="h-full flex flex-col items-center justify-center gap-2.5 text-[var(--text-secondary)]">
+                    <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
+                    <span className="text-xs font-medium">Fetching lyrics...</span>
+                  </div>
+                ) : lyricsData?.instrumental ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center gap-2 px-4">
+                    <Music2 className="w-7 h-7 text-[var(--accent)] opacity-80" />
+                    <p className="font-display text-base font-bold text-[var(--text-primary)]">
+                      Instrumental Track
+                    </p>
+                    <p className="text-xs text-[var(--text-secondary)]">
+                      Sit back and enjoy the music.
+                    </p>
+                  </div>
+                ) : !parsedLyrics || parsedLyrics.lines.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center gap-1.5 px-4">
+                    <Mic2 className="w-6 h-6 text-[var(--text-muted)] mb-1" />
+                    <p className="font-display text-sm font-semibold text-[var(--text-primary)]">
+                      No lyrics found
+                    </p>
+                    <p className="text-xs text-[var(--text-secondary)] max-w-[230px]">
+                      {offline
+                        ? 'Reconnect to fetch lyrics online or embed lyrics in the file.'
+                        : 'Lyrics are not available for this track yet.'}
+                    </p>
+                  </div>
+                ) : parsedLyrics.isSynced ? (
+                  <div className="py-16 space-y-3.5">
+                    {parsedLyrics.lines.map((line, idx) => {
+                      const isCurrent = idx === activeLyricIndex;
+                      const isPast = activeLyricIndex >= 0 && idx < activeLyricIndex;
+                      return (
+                        <button
+                          key={`${line.time ?? idx}-${idx}`}
+                          ref={(el) => {
+                            lyricLineRefs.current[idx] = el;
+                          }}
+                          type="button"
+                          onClick={() => {
+                            if (line.time !== null) {
+                              userScrollPauseUntilRef.current = 0;
+                              seek(line.time);
+                            }
+                          }}
+                          className={`block w-full text-left font-display leading-snug transition-all duration-200 cursor-pointer focus:outline-none ${
+                            isCurrent
+                              ? isLight
+                                ? 'text-[19px] sm:text-[21px] font-extrabold text-[#1C1C1E]'
+                                : 'text-[19px] sm:text-[21px] font-extrabold text-white'
+                              : isPast
+                                ? isLight
+                                  ? 'text-base sm:text-[17px] font-semibold text-black/30 hover:text-black/70'
+                                  : 'text-base sm:text-[17px] font-semibold text-white/35 hover:text-white/75'
+                                : isLight
+                                  ? 'text-base sm:text-[17px] font-semibold text-black/55 hover:text-black/85'
+                                  : 'text-base sm:text-[17px] font-semibold text-white/55 hover:text-white/85'
+                          }`}
+                        >
+                          {line.text}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="py-6 space-y-2.5">
+                    {parsedLyrics.lines.map((line, idx) => (
+                      <p
+                        key={idx}
+                        className={`font-display text-[15px] sm:text-base leading-relaxed font-medium ${
+                          isLight ? 'text-[#1C1C1E]/90' : 'text-white/90'
+                        }`}
+                      >
+                        {line.text}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : (
+            <div
+              {...artworkSwipe.handlers}
+              style={artworkSwipe.style}
+              className="w-full max-w-[340px] sm:max-w-[380px] aspect-square select-none cursor-grab active:cursor-grabbing"
+              aria-label="Swipe left for next track or right for previous track"
+            >
+              <AlbumArt
+                coverFile={currentTrack.cover_file}
+                externalUrl={currentTrack.coverUrl}
+                alt={currentTrack.title}
+                color={currentTrack.dominant_color}
+                className={`w-full h-full rounded-2xl pointer-events-none select-none ${
+                  isLight
+                    ? 'shadow-[0_24px_56px_rgba(0,0,0,0.22)] ring-1 ring-black/[0.06]'
+                    : 'shadow-2xl'
+                }`}
+                iconSize={72}
+              />
+            </div>
+          )}
 
           {/* Track Metadata + Heart or Save to Library */}
           <div className="mt-7 flex w-full items-start justify-between gap-4">
@@ -571,68 +833,6 @@ export const NowPlayingPage: React.FC = () => {
             />
           </div>
         </div>
-
-        {/* Toggleable Lyrics Drawer */}
-        {lyricsOpen && (
-          <section
-            className={`w-full lg:w-[440px] max-h-[480px] lg:max-h-[580px] flex flex-col rounded-2xl backdrop-blur-xl border p-6 ${
-              isLight
-                ? 'bg-white/75 border-black/[0.08] shadow-xl'
-                : 'bg-black/35 border-white/10'
-            }`}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Mic2 className="w-4 h-4 text-[var(--accent)]" />
-                <h2 className="font-display text-sm font-bold text-[var(--text-primary)]">Lyrics</h2>
-              </div>
-              {parsedLyrics?.isSynced && (
-                <span className="text-xs text-[var(--accent)] font-medium">Synced LRC</span>
-              )}
-            </div>
-
-            <div className="flex-1 overflow-y-auto pr-2 space-y-3">
-              {lyricsLoading ? (
-                <div className="flex items-center justify-center py-16 text-[var(--text-secondary)] gap-2">
-                  <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
-                  <span className="text-sm">Reading lyrics...</span>
-                </div>
-              ) : !parsedLyrics || parsedLyrics.lines.length === 0 ? (
-                <div className="py-16 text-center space-y-2">
-                  <p className="text-sm font-medium text-[var(--text-primary)]">No lyrics available</p>
-                  <p className="text-xs text-[var(--text-secondary)] max-w-xs mx-auto">
-                    Embed lyrics in the audio file tags or place a matching{' '}
-                    <code className="font-mono text-[var(--text-primary)]">.lrc</code> sidecar file alongside the
-                    track on your NAS.
-                  </p>
-                </div>
-              ) : (
-                parsedLyrics.lines.map((line, idx) => {
-                  const isCurrent = idx === activeLyricIndex;
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      disabled={line.time === null}
-                      onClick={() => line.time !== null && seek(line.time)}
-                      className={`block w-full text-left font-display text-lg leading-snug transition-colors ${
-                        parsedLyrics.isSynced
-                          ? isCurrent
-                            ? 'text-[var(--text-primary)] font-bold'
-                            : idx < activeLyricIndex
-                              ? 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                          : 'text-[var(--text-primary)] opacity-85 font-medium cursor-default'
-                      }`}
-                    >
-                      {line.text}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </section>
-        )}
       </div>
     </div>
   );
