@@ -32,6 +32,8 @@ import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
+import {useMainScrollRestoration} from '../lib/scrollHistory';
+import {getTabGroup, openPrimaryDestination, rememberTabLocation} from '../lib/tabMemory';
 import {
   getUnifiedPageHeaderGradient,
   getUnifiedPageHeaderTopHex,
@@ -43,6 +45,11 @@ import {AlbumArt} from './AlbumArt';
 import {BrandLogo} from './BrandLogo';
 import {CreatePlaylistModal} from './CreatePlaylistModal';
 import {QueueDrawer} from './QueueDrawer';
+
+const MainScrollRestorationSync: React.FC = () => {
+  useMainScrollRestoration();
+  return null;
+};
 
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
@@ -161,6 +168,20 @@ export const AppShell: React.FC = () => {
     }
   }, [usesUnifiedHeader, unifiedHeaderTopHex, location.pathname, theme]);
 
+  useEffect(() => {
+    rememberTabLocation(location.pathname, location.search);
+  }, [location.pathname, location.search]);
+
+  const handlePrimaryNavClick = useCallback(
+    (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      const isSelected = getTabGroup(location.pathname) === href;
+      openPrimaryDestination(navigate, href, isSelected, location, mainElement);
+    },
+    [location, mainElement, navigate]
+  );
+
   const navItems = [
     {to: '/', label: 'Home', icon: Home, end: true},
     {to: '/playlists', label: 'Playlists', icon: ListMusic, end: false},
@@ -181,6 +202,7 @@ export const AppShell: React.FC = () => {
 
   return (
     <MainScrollProvider element={mainElement}>
+      <MainScrollRestorationSync />
       <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Main Area: Sidebar (Desktop) + Scrollable Stage */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -204,6 +226,7 @@ export const AppShell: React.FC = () => {
                   key={item.to}
                   to={item.to}
                   end={item.end}
+                  onClick={(e) => handlePrimaryNavClick(e, item.to)}
                   className={({isActive}) =>
                     `flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
                       isActive
@@ -716,6 +739,7 @@ export const AppShell: React.FC = () => {
                   key={item.to}
                   to={item.to}
                   end={item.end}
+                  onClick={(e) => handlePrimaryNavClick(e, item.to)}
                   className={({isActive}) =>
                     `flex flex-col items-center justify-center gap-1 h-full text-[11px] font-medium transition-colors ${
                       isActive ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'

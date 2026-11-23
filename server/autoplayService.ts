@@ -16,6 +16,7 @@ import {
 } from './autoplay.ts';
 import {getCatalogRelatedArtistsWithTopTracks} from './catalog.ts';
 import {db} from './db.ts';
+import {getListeningProfileForUser} from './listeningProfile.ts';
 import {
   getCachedTrackVideoId,
   isValidYouTubeVideoId,
@@ -411,7 +412,8 @@ export async function planAutoplayForUser(
     if (cid) combinedExclude.add(cid);
   }
 
-  // 5. Run the pure queue planner
+  // 5. Run the pure queue planner (with gentle per-user listening profile signals)
+  const listeningProfile = getListeningProfileForUser(input.userId);
   const items = planAutoplayQueue(
     {
       related: relatedPool,
@@ -424,6 +426,7 @@ export async function planAutoplayForUser(
       exclude: combinedExclude,
       contextArtists,
       entropy: input.entropy ?? null,
+      listeningProfile,
     }
   );
 

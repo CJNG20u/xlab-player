@@ -1,6 +1,7 @@
 import {X} from 'lucide-react';
 import React, {useState} from 'react';
 import {apiFetch} from '../lib/api';
+import {useBackClose} from '../lib/backStack';
 import type {Playlist} from '../types';
 
 interface CreatePlaylistModalProps {
@@ -18,6 +19,8 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useBackClose(open, onClose);
 
   if (!open) return null;
 

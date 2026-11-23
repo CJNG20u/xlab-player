@@ -1,6 +1,7 @@
 import {ListMusic, Loader2, Plus, X} from 'lucide-react';
 import React, {useState} from 'react';
 import {apiFetch} from '../lib/api';
+import {useBackClose} from '../lib/backStack';
 import type {Playlist} from '../types';
 import {PlaylistMosaic} from './AlbumArt';
 
@@ -23,7 +24,10 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   const [busyId, setBusyId] = useState<number | 'new' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  if (!open || trackIds.length === 0) return null;
+  const isVisible = open && trackIds.length > 0;
+  useBackClose(isVisible, onClose);
+
+  if (!isVisible) return null;
 
   const handlePickExisting = async (pl: Playlist) => {
     setBusyId(pl.id);

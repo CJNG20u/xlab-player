@@ -43,6 +43,7 @@ import {
   getYouTubeThumbProxyUrl,
   getYouTubeVideoId,
 } from '../lib/api';
+import {useScrollReady} from '../lib/scrollHistory';
 import {
   computeLightTintedTopHex,
   computeNowPlayingTopHex,
@@ -154,6 +155,9 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [stats, setStats] = useState({totalTracks: 0, likedTracks: 0});
   const [activePlaylist, setActivePlaylist] = useState<Playlist | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadedRouteKey, setLoadedRouteKey] = useState<string | null>(null);
+  const loadSeqRef = useRef(0);
+  const currentRouteKey = `${location.pathname}${location.search}`;
   const [createOpen, setCreateOpen] = useState(false);
   const [greeting, setGreeting] = useState<string>(() => getTimeOfDayGreeting());
   const [searchOpen, setSearchOpen] = useState(false);
@@ -279,13 +283,17 @@ export const PlaylistsLibraryPage: React.FC = () => {
   }, [offline]);
 
   const loadContent = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
+    const targetRouteKey = currentRouteKey;
     setLoading(true);
     try {
       await loadPlaylists();
+      if (loadSeqRef.current !== seq) return;
       if (playlistIdParam) {
         const numericId = Number(playlistIdParam);
         if (offline) {
           const cached = await getOfflinePlaylistTracks(numericId);
+          if (loadSeqRef.current !== seq) return;
           setActivePlaylist(cached?.playlist ?? null);
           setTracks(cached?.tracks ?? []);
         } else {
@@ -293,10 +301,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
             const res = await apiFetch<{playlist: Playlist; tracks: Track[]}>(
               `/api/playlists/${playlistIdParam}`
             );
+            if (loadSeqRef.current !== seq) return;
             setActivePlaylist(res.playlist);
             setTracks(res.tracks || []);
           } catch {
             const cached = await getOfflinePlaylistTracks(numericId);
+            if (loadSeqRef.current !== seq) return;
             setActivePlaylist(cached?.playlist ?? null);
             setTracks(cached?.tracks ?? []);
           }
@@ -304,6 +314,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       } else if (activeTab === 'offline' || offline) {
         setActivePlaylist(null);
         const cachedTracks = await getOfflineTracks();
+        if (loadSeqRef.current !== seq) return;
         const filteredByArtist = artistFilter
           ? cachedTracks.filter(
               (t) => t.artist.toLowerCase() === artistFilter.toLowerCase()
@@ -318,22 +329,31 @@ export const PlaylistsLibraryPage: React.FC = () => {
         if (artistFilter) qs.set('artist', artistFilter);
         try {
           const res = await apiFetch<{tracks: Track[]}>(`/api/tracks?${qs.toString()}`);
+          if (loadSeqRef.current !== seq) return;
           setTracks(res.tracks || []);
         } catch {
           const cachedTracks = await getOfflineTracks();
+          if (loadSeqRef.current !== seq) return;
           setTracks(cachedTracks);
         }
       }
     } catch {
-      setTracks([]);
+      if (loadSeqRef.current === seq) {
+        setTracks([]);
+      }
     } finally {
-      setLoading(false);
+      if (loadSeqRef.current === seq) {
+        setLoadedRouteKey(targetRouteKey);
+        setLoading(false);
+      }
     }
-  }, [playlistIdParam, activeTab, artistFilter, loadPlaylists, offline]);
+  }, [playlistIdParam, activeTab, artistFilter, loadPlaylists, offline, currentRouteKey]);
 
   useEffect(() => {
     void loadContent();
   }, [loadContent, libraryRefreshVersion]);
+
+  useScrollReady(!loading && loadedRouteKey === currentRouteKey);
 
   // Keep Offline Library & Offline Mode views live when tracks/playlists are cached or removed
   useEffect(() => {

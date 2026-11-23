@@ -8,6 +8,12 @@ export interface User {
 
 export type TrackId = number | string;
 
+export type RecommendationSource = 'autoplay' | 'radio' | 'discover' | 'library' | 'search';
+
+export interface TrackRecommendation {
+  source: RecommendationSource;
+}
+
 export interface Track {
   id: TrackId;
   rel_path: string;
@@ -35,6 +41,7 @@ export interface Track {
   filePath?: string;
   queueSource?: 'autoplay' | 'radio';
   sourcePool?: 'related' | 'discovery' | 'local';
+  recommendation?: TrackRecommendation;
 }
 
 export interface Playlist {

@@ -34,6 +34,7 @@ import {
   getYouTubeVideoId,
   parseLrc,
 } from '../lib/api';
+import {useScrollReady} from '../lib/scrollHistory';
 import {
   computeLightTintedTopHex,
   computeNowPlayingTopHex,
@@ -64,6 +65,7 @@ function getSessionLyricsKey(track: {
 
 export const NowPlayingPage: React.FC = () => {
   const navigate = useNavigate();
+  useScrollReady(true);
   const {user, isOfflineMode} = useAuth();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;

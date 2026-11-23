@@ -2,6 +2,7 @@ import {ArrowDown, ArrowUp, ListMusic, Loader2, Radio, Sparkles, Trash2, X} from
 import React, {useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
 import {formatDuration} from '../lib/api';
+import {useBackClose} from '../lib/backStack';
 import {AlbumArt} from './AlbumArt';
 
 interface QueueDrawerProps {
@@ -31,6 +32,8 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
   } = usePlayer();
 
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+
+  useBackClose(open, onClose);
 
   if (!open) return null;
 

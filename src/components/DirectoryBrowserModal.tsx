@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useState} from 'react';
 import {apiFetch, formatBytes} from '../lib/api';
+import {useBackClose} from '../lib/backStack';
 import type {MountHealth} from '../types';
 
 interface DirEntry {
@@ -64,6 +65,8 @@ export const DirectoryBrowserModal: React.FC<DirectoryBrowserModalProps> = ({
       void loadDir(initialPath || '/mnt');
     }
   }, [open, initialPath, loadDir]);
+
+  useBackClose(open, onClose);
 
   if (!open) return null;
 

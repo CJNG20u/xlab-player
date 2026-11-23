@@ -28,6 +28,7 @@ import {
   type CatalogRoute,
 } from '../components/CatalogDetailView';
 import {useAuth} from '../context/AuthContext';
+import {useMainScroll} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {
@@ -39,6 +40,8 @@ import {
   isValidYouTubeVideoId,
   prefetchYouTubeStreams,
 } from '../lib/api';
+import {useScrollReady} from '../lib/scrollHistory';
+import {scrollMainToTop} from '../lib/tabMemory';
 import type {
   DiscoverAlbumItem,
   DiscoverAlbumTrack,
@@ -158,6 +161,7 @@ function metadataItemToYouTubeTrack(item: MetadataPreviewItem): Track {
     streamUrl: `/api/yt-stream/${encodeURIComponent(videoId)}`,
     isYouTubeStream: true,
     youtubeUrl: item.url || `https://www.youtube.com/watch?v=${videoId}`,
+    recommendation: {source: 'search'},
   };
 }
 
@@ -199,6 +203,7 @@ function discoverReleaseToTrack(item: DiscoverNewReleaseItem): Track {
     deezerTrackId: item.deezerTrackId,
     deezerAlbumId: item.albumId,
     deezerArtistId: item.artistId,
+    recommendation: {source: 'discover'},
   };
 }
 
@@ -237,6 +242,7 @@ function discoverAlbumToTrack(item: DiscoverAlbumItem): Track {
     youtubeUrl: hasVid ? `https://www.youtube.com/watch?v=${item.videoId}` : undefined,
     deezerAlbumId: item.deezerAlbumId,
     deezerArtistId: item.artistId,
+    recommendation: {source: 'discover'},
   };
 }
 
@@ -654,11 +660,14 @@ export const DiscoverPage: React.FC = () => {
           normalizeArtistSeedKey(lastPlayed?.artist, lastPlayed?.title)
       )
   );
+  const {getElement: getMainScrollElement} = useMainScroll();
   const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [catalogStack, setCatalogStack] = useState<CatalogRoute[]>([]);
   const activeCatalogRoute =
     catalogStack.length > 0 ? catalogStack[catalogStack.length - 1] : null;
+
+  useScrollReady(!discoverLoading || Boolean(discoverFeed));
 
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
@@ -917,12 +926,9 @@ export const DiscoverPage: React.FC = () => {
   );
 
   const scrollStageToTop = useCallback(() => {
-    const mainEl = pageRootRef.current?.closest('main');
-    if (mainEl) {
-      mainEl.scrollTo({top: 0, behavior: 'smooth'});
-    }
-    window.scrollTo({top: 0, behavior: 'smooth'});
-  }, []);
+    const mainEl = getMainScrollElement() ?? pageRootRef.current?.closest('main');
+    scrollMainToTop(mainEl);
+  }, [getMainScrollElement]);
 
   const handlePlayDiscoverRelease = useCallback(
     (item: DiscoverNewReleaseItem) => {
@@ -1289,12 +1295,12 @@ export const DiscoverPage: React.FC = () => {
         );
       }
 
-      const target = catalogTrackToPlayerTrack(clicked);
+      const target = catalogTrackToPlayerTrack(clicked, 'search');
       if (isCatalogTrackActive(clicked)) {
         togglePlay();
         return;
       }
-      const queue = list.map(catalogTrackToPlayerTrack);
+      const queue = list.map((entry) => catalogTrackToPlayerTrack(entry, 'search'));
       const matched =
         queue.find(
           (q) => q.id === target.id || q.deezerTrackId === clicked.deezerTrackId
@@ -1307,7 +1313,7 @@ export const DiscoverPage: React.FC = () => {
   const handleQueueSearchTrack = useCallback(
     (e: React.MouseEvent, item: DiscoverAlbumTrack) => {
       e.stopPropagation();
-      addToQueue(catalogTrackToPlayerTrack(item));
+      addToQueue(catalogTrackToPlayerTrack(item, 'search'));
       flashToast(`Added "${item.title}" to queue`);
     },
     [addToQueue, flashToast]

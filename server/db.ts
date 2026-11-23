@@ -205,6 +205,25 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_related_mix_fetched ON related_mix(fetched_at);
+
+  -- Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
+  CREATE TABLE IF NOT EXISTS listening_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    track_id TEXT NOT NULL DEFAULT '',
+    video_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    listened_sec REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_listening_events_user_time
+    ON listening_events(user_id, created_at DESC, id DESC);
 `);
 
 // Safe incremental migrations for existing databases
@@ -574,6 +593,121 @@ export function pruneExpiredRelatedMixCache(ttlMs = RELATED_MIX_TTL_MS): number 
   const result = pruneRelatedMixStmt.run(cutoff);
   return result.changes || 0;
 }
+
+// ---------------------------------------------------------------------------
+// Per-User Listening Signals (capped at 5,000 events per user)
+// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
+// ---------------------------------------------------------------------------
+
+export const LISTENING_EVENTS_MAX_PER_USER = 5000;
+
+export type ListeningEventName =
+  | 'played_30s'
+  | 'generated_completed'
+  | 'generated_skipped_early';
+
+export interface ListeningEventRow {
+  id: number;
+  user_id: number;
+  event: ListeningEventName;
+  track_id: string;
+  video_id: string;
+  title: string;
+  artist: string;
+  album: string;
+  source: string;
+  listened_sec: number;
+  created_at: string;
+}
+
+const insertListeningEventStmt = db.prepare(
+  `INSERT INTO listening_events (
+     user_id, event, track_id, video_id, title, artist, album, source, listened_sec
+   )
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+);
+
+const countListeningEventsStmt = db.prepare(
+  'SELECT COUNT(*) AS cnt FROM listening_events WHERE user_id = ?'
+);
+
+const pruneListeningEventsStmt = db.prepare(
+  `DELETE FROM listening_events
+   WHERE user_id = ?
+     AND id NOT IN (
+       SELECT id FROM listening_events
+       WHERE user_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?
+     )`
+);
+
+const getUserListeningEventsStmt = db.prepare(
+  `SELECT id, user_id, event, track_id, video_id, title, artist, album, source, listened_sec, created_at
+   FROM listening_events
+   WHERE user_id = ?
+   ORDER BY created_at DESC, id DESC
+   LIMIT ?`
+);
+
+const clearUserListeningEventsStmt = db.prepare(
+  'DELETE FROM listening_events WHERE user_id = ?'
+);
+
+export function recordListeningEvent(entry: {
+  userId: number;
+  event: ListeningEventName;
+  trackId?: string;
+  videoId?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  source?: string;
+  listenedSec?: number;
+}): void {
+  const trackId = String(entry.trackId ?? '').trim().slice(0, 80);
+  const rawVideoId = String(entry.videoId ?? '').trim();
+  const videoId = STRICT_YOUTUBE_VIDEO_ID_RE.test(rawVideoId) ? rawVideoId : '';
+  const title = String(entry.title ?? '').trim().slice(0, 200);
+  const artist = String(entry.artist ?? '').trim().slice(0, 200);
+  const album = String(entry.album ?? '').trim().slice(0, 200);
+  const source = String(entry.source ?? '').trim().slice(0, 32);
+  const listenedSec =
+    typeof entry.listenedSec === 'number' && Number.isFinite(entry.listenedSec) && entry.listenedSec >= 0
+      ? Math.min(86400, Math.round(entry.listenedSec * 100) / 100)
+      : 0;
+
+  insertListeningEventStmt.run(
+    entry.userId,
+    entry.event,
+    trackId,
+    videoId,
+    title,
+    artist,
+    album,
+    source,
+    listenedSec
+  );
+
+  const row = countListeningEventsStmt.get(entry.userId) as {cnt?: number} | undefined;
+  if ((row?.cnt ?? 0) > LISTENING_EVENTS_MAX_PER_USER) {
+    pruneListeningEventsStmt.run(entry.userId, entry.userId, LISTENING_EVENTS_MAX_PER_USER);
+  }
+}
+
+export function getUserListeningEvents(
+  userId: number,
+  limit = LISTENING_EVENTS_MAX_PER_USER
+): ListeningEventRow[] {
+  const safeLimit = Math.max(1, Math.min(LISTENING_EVENTS_MAX_PER_USER, Math.floor(limit)));
+  return getUserListeningEventsStmt.all(userId, safeLimit) as ListeningEventRow[];
+}
+
+export function clearUserListeningEvents(userId: number): number {
+  const result = clearUserListeningEventsStmt.run(userId);
+  return result.changes || 0;
+}
+
 
 
 

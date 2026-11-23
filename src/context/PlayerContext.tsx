@@ -15,6 +15,12 @@ import {
   recordPlaybackHistory,
 } from '../lib/api';
 import {
+  getListeningLearningEnabled,
+  ListeningLearning,
+  sendListeningEvent,
+} from '../lib/listeningLearning';
+import {useAuth} from './AuthContext';
+import {
   getCachedCanvasArtwork,
   getImmediateTrackMediaArtwork,
   getTrackArtworkCacheKey,
@@ -420,6 +426,18 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const autoplayEmptyRetryKeyRef = useRef<string | null>(null);
   const autoplayEmptyExhaustedKeyRef = useRef<string | null>(null);
   const autoplayClearedForTrackKeyRef = useRef<string | null>(null);
+
+  // Per-user listening signals tracker (ref only — no React state)
+  const {user} = useAuth();
+  const userIdRef = useRef<number | null>(user?.id ?? null);
+  userIdRef.current = user?.id ?? null;
+  const listeningLearningRef = useRef<ListeningLearning | null>(null);
+  if (!listeningLearningRef.current) {
+    listeningLearningRef.current = new ListeningLearning((event, payload) => {
+      if (!getListeningLearningEnabled(userIdRef.current)) return;
+      sendListeningEvent(event, payload);
+    });
+  }
 
   const cancelAutoplayPlan = useCallback((resetRetry = true) => {
     autoplayGenRef.current += 1;
@@ -1321,6 +1339,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         return;
       }
 
+      if (!fromEndedEvent) {
+        const skippedTrack = q[idx] ?? stateRef.current.currentTrack;
+        const dur =
+          Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : stateRef.current.duration;
+        listeningLearningRef.current?.skip(skippedTrack, dur);
+      }
+
       let nextIdx = -1;
       if (isShuf && q.length > 1) {
         nextIdx = idx;
@@ -2099,6 +2126,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           ? audio.duration
           : stateRef.current.duration;
       setCurrentTime(pos);
+      listeningLearningRef.current?.update(
+        stateRef.current.currentTrack,
+        pos,
+        !audio.paused && !audio.ended
+      );
       lifecycleRef.current.prefetchNextTrackIfReady(pos, dur);
       lifecycleRef.current.syncMediaSessionMetadata(stateRef.current.currentTrack, false);
       if (!transitioningTrackRef.current) {
@@ -2124,6 +2156,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     const handleEnded = () => {
       if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
+      const dur =
+        Number.isFinite(audio.duration) && audio.duration > 0
+          ? audio.duration
+          : stateRef.current.duration;
+      listeningLearningRef.current?.complete(stateRef.current.currentTrack, dur);
       lifecycleRef.current.advanceToNextTrack(true);
     };
 

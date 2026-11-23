@@ -1,5 +1,6 @@
 import {AlertTriangle, Loader2, Trash2, X} from 'lucide-react';
 import React from 'react';
+import {useBackClose} from '../lib/backStack';
 
 interface ConfirmDeleteModalProps {
   open: boolean;
@@ -20,7 +21,12 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
   onCancel,
   onConfirm,
 }) => {
-  if (!open || count <= 0) return null;
+  const isVisible = open && count > 0;
+  useBackClose(isVisible, () => {
+    if (!deleting) onCancel();
+  });
+
+  if (!isVisible) return null;
 
   const isBulk = count > 1;
 

@@ -317,6 +317,7 @@ export function autoplayPlanItemToTrack(
       isYouTubeStream: false,
       queueSource: intent,
       sourcePool: item.sourcePool,
+      recommendation: {source: intent},
     };
   }
 
@@ -345,6 +346,7 @@ export function autoplayPlanItemToTrack(
     deezerArtistId: item.deezerArtistId,
     queueSource: intent,
     sourcePool: item.sourcePool,
+    recommendation: {source: intent},
   };
 }
 

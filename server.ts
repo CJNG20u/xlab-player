@@ -43,6 +43,7 @@ import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
 import {discoverRouter, downloadRouter} from './server/routes/downloadRoutes.ts';
 import {libraryRouter} from './server/routes/libraryRoutes.ts';
+import {listeningRouter} from './server/routes/listeningRoutes.ts';
 
 dns.setDefaultResultOrder('ipv4first');
 
@@ -150,6 +151,7 @@ async function startServer() {
   app.use('/api/auth', authRouter);
   app.use('/api', libraryRouter);
   app.use('/api', discoverRouter);
+  app.use('/api', listeningRouter);
   app.use('/api/download', downloadRouter);
   app.use('/api/admin', adminRouter);
 

@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Check,
   CheckCircle2,
@@ -33,6 +34,11 @@ import {THEME_OPTIONS, useTheme} from '../context/ThemeContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {apiFetch, formatBytes, getSSEUrl} from '../lib/api';
+import {
+  getListeningLearningEnabled,
+  setListeningLearningEnabled,
+} from '../lib/listeningLearning';
+import {useScrollReady} from '../lib/scrollHistory';
 import type {AppSettings, MountHealth, ScanProgress, SystemStatus, User} from '../types';
 import {
   clearAllOfflineMusic,
@@ -52,6 +58,7 @@ export const SettingsPage: React.FC = () => {
   const isAdmin = user?.role === 'admin' && !offline;
 
   // Admin: Settings & System Status
+  const [adminDataLoaded, setAdminDataLoaded] = useState(!isAdmin);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
   const [mountInput, setMountInput] = useState('');
@@ -95,6 +102,46 @@ export const SettingsPage: React.FC = () => {
   const [confirmClearOffline, setConfirmClearOffline] = useState(false);
   const [offlineFeedback, setOfflineFeedback] = useState<string | null>(null);
 
+  // Listening Data Preferences (All Users)
+  const [learnFromListening, setLearnFromListening] = useState<boolean>(() =>
+    getListeningLearningEnabled(user?.id)
+  );
+  const [clearingListening, setClearingListening] = useState(false);
+  const [confirmClearListening, setConfirmClearListening] = useState(false);
+  const [listeningFeedback, setListeningFeedback] = useState<{ok: boolean; text: string} | null>(
+    null
+  );
+
+  useEffect(() => {
+    setLearnFromListening(getListeningLearningEnabled(user?.id));
+  }, [user?.id]);
+
+  const handleToggleLearnFromListening = () => {
+    const next = !learnFromListening;
+    setLearnFromListening(next);
+    setListeningLearningEnabled(user?.id, next);
+  };
+
+  const handleClearListeningData = async () => {
+    setClearingListening(true);
+    setListeningFeedback(null);
+    try {
+      await apiFetch('/api/listening', {method: 'DELETE'});
+      setConfirmClearListening(false);
+      setListeningFeedback({
+        ok: true,
+        text: 'Your listening data has been cleared.',
+      });
+    } catch (err) {
+      setListeningFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to clear listening data.',
+      });
+    } finally {
+      setClearingListening(false);
+    }
+  };
+
   const loadOfflineUsage = useCallback(async () => {
     const usage = await getOfflineStorageUsage();
     setOfflineUsage(usage);
@@ -132,7 +179,10 @@ export const SettingsPage: React.FC = () => {
   const [ytdlpUpdateLog, setYtdlpUpdateLog] = useState<string | null>(null);
 
   const loadAdminData = useCallback(async () => {
-    if (!isAdmin) return;
+    if (!isAdmin) {
+      setAdminDataLoaded(true);
+      return;
+    }
     try {
       const [settingsRes, statusRes, usersRes] = await Promise.all([
         apiFetch<{settings: AppSettings}>('/api/admin/settings'),
@@ -147,12 +197,16 @@ export const SettingsPage: React.FC = () => {
       setUsers(usersRes.users || []);
     } catch {
       // ignore
+    } finally {
+      setAdminDataLoaded(true);
     }
   }, [isAdmin]);
 
   useEffect(() => {
     void loadAdminData();
   }, [loadAdminData]);
+
+  useScrollReady(!isAdmin || adminDataLoaded);
 
   // Subscribe to Library Scan SSE stream (Admin only)
   useEffect(() => {
@@ -640,6 +694,115 @@ export const SettingsPage: React.FC = () => {
             />
           </button>
         </div>
+      </section>
+
+      {/* 0.6 LISTENING DATA PREFERENCES (ALL USERS) */}
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-5">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
+            <Activity className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+              Listening data
+            </h2>
+            <p className="text-xs text-[var(--text-secondary)]">
+              Use your plays, completions, and early skips to gently personalize Autoplay, Radio, and Discover.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 pt-1 border-t border-[var(--border-subtle)]">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">
+              Learn from my listening
+            </p>
+            <p className="text-xs text-[var(--text-secondary)]">
+              When turned off, no listening signals are recorded or sent.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={learnFromListening}
+            aria-label="Learn from my listening"
+            onClick={handleToggleLearnFromListening}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              learnFromListening
+                ? 'bg-[var(--accent)]'
+                : 'bg-[var(--bg-elevated)] border border-[var(--border-strong)]'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full transition-transform ${
+                learnFromListening
+                  ? 'translate-x-6 bg-[var(--accent-contrast)]'
+                  : 'translate-x-1 bg-[var(--text-secondary)]'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4 border-t border-[var(--border-subtle)]">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">
+              Clear listening data
+            </p>
+            <p className="text-xs text-[var(--text-secondary)]">
+              Remove all saved listening signals for your account. Your library, playlists, and likes stay untouched.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {confirmClearListening ? (
+              <>
+                <button
+                  type="button"
+                  disabled={clearingListening || offline}
+                  onClick={() => void handleClearListeningData()}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[var(--danger-bg)] border border-[var(--danger-border)] px-4 py-2 text-xs font-bold text-[var(--danger-text)] hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {clearingListening ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" />
+                  )}
+                  Confirm clear
+                </button>
+                <button
+                  type="button"
+                  disabled={clearingListening}
+                  onClick={() => setConfirmClearListening(false)}
+                  className="rounded-full bg-[var(--bg-elevated)] px-3.5 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                disabled={offline}
+                onClick={() => {
+                  setListeningFeedback(null);
+                  setConfirmClearListening(true);
+                }}
+                className="inline-flex items-center gap-2 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] px-4 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-[var(--danger-text)]" />
+                Clear listening data
+              </button>
+            )}
+          </div>
+        </div>
+
+        {listeningFeedback && (
+          <p
+            className={`text-xs font-medium ${
+              listeningFeedback.ok ? 'text-[var(--accent)]' : 'text-[var(--danger-text)]'
+            }`}
+          >
+            {listeningFeedback.text}
+          </p>
+        )}
       </section>
 
       {/* 1. NAS MUSIC MOUNT & LIBRARY SCANNER (ADMIN ONLY — TOP PRIORITY CARD) */}

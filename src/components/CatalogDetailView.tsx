@@ -74,7 +74,10 @@ function hashTint(seed: string): string {
   return palette[Math.abs(hash) % palette.length];
 }
 
-export function catalogTrackToPlayerTrack(item: DiscoverAlbumTrack): Track {
+export function catalogTrackToPlayerTrack(
+  item: DiscoverAlbumTrack,
+  source: 'discover' | 'search' = 'discover'
+): Track {
   const hasVid = isValidYouTubeVideoId(item.videoId);
   const trackId = hasVid ? `yt-${item.videoId}` : item.id;
   const streamUrl = hasVid
@@ -108,6 +111,7 @@ export function catalogTrackToPlayerTrack(item: DiscoverAlbumTrack): Track {
     deezerTrackId: item.deezerTrackId,
     deezerAlbumId: item.albumId || undefined,
     deezerArtistId: item.artistId || undefined,
+    recommendation: {source},
   };
 }
 
@@ -377,7 +381,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         );
       }
 
-      const queue = list.map(catalogTrackToPlayerTrack);
+      const queue = list.map((entry) => catalogTrackToPlayerTrack(entry));
       const target = catalogTrackToPlayerTrack(clicked);
       if (
         currentTrack?.id === target.id ||

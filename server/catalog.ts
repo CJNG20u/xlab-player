@@ -4,10 +4,21 @@ import {
   isValidYouTubeVideoId,
   pickDiscoverSeedArtists,
 } from './downloader.ts';
+import {
+  extractListeningArtistKeys,
+  getListeningProfileForUser,
+  type ListeningProfile,
+} from './listeningProfile.ts';
 
 const DEEZER_API_BASE = 'https://api.deezer.com';
 const CATALOG_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MEMORY_CACHE_MAX_ENTRIES = 200;
+
+// Gentle per-user listening-profile re-ranking constants for Discover "for you" rows.
+// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
+const DISCOVER_PROFILE_TOP_ARTIST_MAX_BONUS = 0.25;
+const DISCOVER_PROFILE_TOP_ARTIST_SCORE_SATURATION = 6.0;
+const DISCOVER_PROFILE_SKIPPED_ARTIST_PENALTY = 0.45;
 
 const ALLOWED_CATALOG_IMAGE_HOSTS = [
   'cdn-images.dzcdn.net',
@@ -498,6 +509,57 @@ function attachCachedVideoIdsToFeed(
       return cachedVid ? {...item, videoId: cachedVid} : {...item, videoId: undefined};
     }),
   };
+}
+
+function rerankDiscoverRowByProfile<T>(
+  items: readonly T[],
+  getArtist: (item: T) => string,
+  profile: ListeningProfile | null | undefined
+): T[] {
+  if (!profile || items.length <= 1) return items.slice();
+  if (profile.topArtists.length === 0 && profile.skippedArtists.length === 0) {
+    return items.slice();
+  }
+
+  const topScores = new Map<string, number>();
+  for (const entry of profile.topArtists) {
+    if (!entry || !Number.isFinite(entry.score) || entry.score <= 0) continue;
+    for (const key of extractListeningArtistKeys(entry.artist)) {
+      const prev = topScores.get(key) ?? 0;
+      if (entry.score > prev) topScores.set(key, entry.score);
+    }
+  }
+  const skippedKeys = new Set<string>();
+  for (const artist of profile.skippedArtists) {
+    for (const key of extractListeningArtistKeys(artist)) {
+      skippedKeys.add(key);
+    }
+  }
+  if (topScores.size === 0 && skippedKeys.size === 0) return items.slice();
+
+  const total = items.length;
+  return items
+    .map((item, idx) => {
+      const baseRank = 1 - idx / total;
+      const keys = extractListeningArtistKeys(getArtist(item));
+      let bestTop = 0;
+      let isSkipped = false;
+      for (const key of keys) {
+        if (skippedKeys.has(key)) isSkipped = true;
+        const s = topScores.get(key) ?? 0;
+        if (s > bestTop) bestTop = s;
+      }
+      let adjustment = 0;
+      if (isSkipped) {
+        adjustment -= DISCOVER_PROFILE_SKIPPED_ARTIST_PENALTY;
+      } else if (bestTop > 0) {
+        const ratio = Math.min(1, bestTop / DISCOVER_PROFILE_TOP_ARTIST_SCORE_SATURATION);
+        adjustment += DISCOVER_PROFILE_TOP_ARTIST_MAX_BONUS * ratio;
+      }
+      return {item, idx, rank: baseRank + adjustment};
+    })
+    .sort((a, b) => (b.rank !== a.rank ? b.rank - a.rank : a.idx - b.idx))
+    .map((entry) => entry.item);
 }
 
 function attachCachedVideoIdsToTracks(tracks: DiscoverAlbumTrack[]): DiscoverAlbumTrack[] {
@@ -1169,9 +1231,27 @@ export async function getCatalogDiscoverFeed(
     }
   );
 
-  // Always return the freshest lastPlayed track/artist metadata even on a same-artist cache hit
+  // Always return the freshest lastPlayed track/artist metadata even on a same-artist cache hit,
+  // and gently re-rank "for you" rows per user using their listening profile without mutating cache.
+  const enriched = attachCachedVideoIdsToFeed(data);
+  const listeningProfile = getListeningProfileForUser(userId);
   return {
-    ...attachCachedVideoIdsToFeed(data),
+    ...enriched,
+    newReleases: rerankDiscoverRowByProfile(
+      enriched.newReleases,
+      (item) => item.artist,
+      listeningProfile
+    ),
+    artistsToDiscover: rerankDiscoverRowByProfile(
+      enriched.artistsToDiscover,
+      (item) => item.name,
+      listeningProfile
+    ),
+    albumsForYou: rerankDiscoverRowByProfile(
+      enriched.albumsForYou,
+      (item) => item.artist,
+      listeningProfile
+    ),
     lastPlayed: lastPlayed || data.lastPlayed || null,
     basedOnHistory,
     cached,

@@ -26,6 +26,14 @@ export const AUTOPLAY_CONTEXT_MAX = 5;
 export const AUTOPLAY_GRAPH_ANCHORS = 4;
 export const DEFAULT_GUMBEL_TEMPERATURE = 0.2;
 
+// Gentle per-user listening-profile score adjustments (named constants so they
+// never override same-loop graph membership, pool mix ratios, or artist caps).
+// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
+export const LISTENING_PROFILE_TOP_ARTIST_MAX_BONUS = 0.08;
+export const LISTENING_PROFILE_TOP_ARTIST_SCORE_SATURATION = 6.0;
+export const LISTENING_PROFILE_SKIPPED_ARTIST_PENALTY = 0.14;
+export const LISTENING_PROFILE_MIN_SCORE = 0.05;
+
 const PLANNER_POOLS: readonly AutoplayPoolName[] = ['related', 'discovery', 'local'];
 
 const INTENT_SEQUENCES: Record<AutoplayIntent, readonly AutoplayPoolName[]> = {
@@ -150,6 +158,11 @@ export interface AutoplayPools {
   local: AutoplayCandidate[];
 }
 
+export interface ListeningProfileSignal {
+  topArtists: Array<{artist: string; score: number}>;
+  skippedArtists: string[];
+}
+
 export interface PlanAutoplayOptions {
   intent: AutoplayIntent;
   limit?: number;
@@ -157,6 +170,7 @@ export interface PlanAutoplayOptions {
   contextArtists?: Iterable<string>;
   entropy?: string | null;
   temperature?: number;
+  listeningProfile?: ListeningProfileSignal | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +773,47 @@ export function planAutoplayQueue(
     }
   }
 
+  const topArtistScores = new Map<string, number>();
+  const skippedArtistKeys = new Set<string>();
+  if (options.listeningProfile) {
+    for (const entry of options.listeningProfile.topArtists || []) {
+      if (!entry || !Number.isFinite(entry.score) || entry.score <= 0) continue;
+      for (const key of extractArtistKeys(entry.artist)) {
+        const prev = topArtistScores.get(key) ?? 0;
+        if (entry.score > prev) topArtistScores.set(key, entry.score);
+      }
+    }
+    for (const skipped of options.listeningProfile.skippedArtists || []) {
+      for (const key of extractArtistKeys(skipped)) {
+        skippedArtistKeys.add(key);
+      }
+    }
+  }
+
+  const applyListeningProfileAdjustment = (baseScore: number, artist: string): number => {
+    if (topArtistScores.size === 0 && skippedArtistKeys.size === 0) return baseScore;
+    const keys = extractArtistKeys(artist);
+    if (keys.size === 0) return baseScore;
+
+    let bestTopScore = 0;
+    let isSkipped = false;
+    for (const key of keys) {
+      if (skippedArtistKeys.has(key)) isSkipped = true;
+      const s = topArtistScores.get(key) ?? 0;
+      if (s > bestTopScore) bestTopScore = s;
+    }
+
+    let delta = 0;
+    if (isSkipped) {
+      delta -= LISTENING_PROFILE_SKIPPED_ARTIST_PENALTY;
+    } else if (bestTopScore > 0) {
+      const ratio = Math.min(1, bestTopScore / LISTENING_PROFILE_TOP_ARTIST_SCORE_SATURATION);
+      delta += LISTENING_PROFILE_TOP_ARTIST_MAX_BONUS * ratio;
+    }
+    if (delta === 0) return baseScore;
+    return Math.max(LISTENING_PROFILE_MIN_SCORE, Number((baseScore + delta).toFixed(6)));
+  };
+
   const filterAndPreparePool = (rawRows: AutoplayCandidate[] | undefined, poolName: AutoplayPoolName) => {
     const eligible: AutoplayCandidate[] = [];
     for (const row of rawRows || []) {
@@ -773,7 +828,11 @@ export function planAutoplayQueue(
         }
       }
       if (excluded) continue;
-      eligible.push({...row, sourcePool: poolName});
+      eligible.push({
+        ...row,
+        score: applyListeningProfileAdjustment(row.score, row.artist),
+        sourcePool: poolName,
+      });
     }
     const deduped = preferBestSongVariants(eligible);
     return rankPoolCandidates(deduped, {
