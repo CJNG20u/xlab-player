@@ -1457,6 +1457,400 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
   }
 }
 
+const ALLOWED_CATALOG_COVER_SUFFIXES = ['.dzcdn.net', '.deezer.com'];
+
+function isAllowedCoverImageUrl(rawUrl: string): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  if (isAllowedYouTubeMediaUrl(trimmed)) return true;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return false;
+    }
+    return ALLOWED_CATALOG_COVER_SUFFIXES.some(
+      (suffix) => host === suffix.slice(1) || host.endsWith(suffix)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function downloadCoverImageToTemp(
+  tmpWorkDir: string,
+  dlUuid: string,
+  coverUrl: string | undefined,
+  videoId: string
+): Promise<string | null> {
+  const candidates: string[] = [];
+  if (coverUrl && isAllowedCoverImageUrl(coverUrl)) {
+    candidates.push(coverUrl.trim());
+  }
+  const cachedYtThumb = getCachedYouTubeThumbnailUrl(videoId);
+  if (cachedYtThumb && isAllowedCoverImageUrl(cachedYtThumb)) {
+    candidates.push(cachedYtThumb);
+  }
+  candidates.push(`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`);
+  candidates.push(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`);
+
+  for (const url of candidates) {
+    if (!isAllowedCoverImageUrl(url)) continue;
+    try {
+      const resp = await fetch(url, {
+        headers: {Accept: 'image/*'},
+        redirect: 'follow',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) {
+        await resp.body?.cancel().catch(() => {});
+        continue;
+      }
+      if (resp.url && !isAllowedCoverImageUrl(resp.url)) {
+        await resp.body?.cancel().catch(() => {});
+        continue;
+      }
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length < 256 || buf.length > 10 * 1024 * 1024) continue;
+      const outPath = path.join(tmpWorkDir, `${dlUuid}-cover.jpg`);
+      fs.writeFileSync(outPath, buf);
+      return outPath;
+    } catch {
+      // Try next cover candidate
+    }
+  }
+  return null;
+}
+
+export interface DirectNasDownloadInput {
+  userId: number;
+  videoId?: string;
+  url?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  coverUrl?: string;
+  duration?: number;
+}
+
+export interface DirectNasDownloadResult {
+  track: Record<string, unknown> & {id: number; rel_path: string; filePath: string; liked: boolean};
+  filePath: string;
+  alreadyExists: boolean;
+}
+
+const inFlightNasDownloads = new Map<string, Promise<DirectNasDownloadResult>>();
+
+function loadCanonicalTrackRow(
+  trackId: number,
+  userId: number,
+  filePath: string
+): Record<string, unknown> & {id: number; rel_path: string; filePath: string; liked: boolean} {
+  const row = db
+    .prepare(
+      `SELECT t.*, CASE WHEN lt.track_id IS NOT NULL THEN 1 ELSE 0 END AS liked
+       FROM tracks t
+       LEFT JOIN liked_tracks lt ON lt.track_id = t.id AND lt.user_id = ?
+       WHERE t.id = ?`
+    )
+    .get(userId, trackId) as (Record<string, unknown> & {id: number; rel_path: string}) | undefined;
+  if (!row) {
+    throw new Error('Downloaded track could not be retrieved from library database');
+  }
+  return {
+    ...row,
+    liked: Boolean(row.liked),
+    filePath,
+  };
+}
+
+export async function downloadTrackToNas(
+  input: DirectNasDownloadInput
+): Promise<DirectNasDownloadResult> {
+  const rawVideoId = (input.videoId || '').trim();
+  const rawUrl = (input.url || '').trim();
+  let resolvedTitle = (input.title || '').trim().slice(0, 200);
+  let resolvedArtist = (input.artist || '').trim().slice(0, 160);
+  let resolvedAlbum = (input.album || '').trim().slice(0, 200);
+  const rawCoverUrl = (input.coverUrl || '').trim();
+  const duration = Number.isFinite(Number(input.duration)) ? Math.max(0, Number(input.duration)) : 0;
+
+  let videoId = isValidYouTubeVideoId(rawVideoId)
+    ? rawVideoId
+    : rawUrl
+      ? extractYouTubeVideoIdFromUrl(rawUrl) || ''
+      : '';
+
+  if (!videoId) {
+    if (!resolvedTitle) {
+      throw new Error('A videoId or track title is required to download audio');
+    }
+    const matched = await resolveTrackToVideoId({
+      artist: resolvedArtist,
+      title: resolvedTitle,
+      duration,
+    });
+    videoId = matched.videoId;
+  }
+
+  if (!isValidYouTubeVideoId(videoId)) {
+    throw new Error('Could not resolve a valid YouTube video ID');
+  }
+
+  const targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Recover clean tags when caller omitted artist/title
+  if (needsMetadataRecovery(resolvedTitle, resolvedArtist)) {
+    try {
+      const peeked = await peekTrackMetadata(targetUrl);
+      if (!resolvedTitle && peeked.title) resolvedTitle = peeked.title;
+      if ((!resolvedArtist || needsMetadataRecovery('ok', resolvedArtist)) && peeked.artist) {
+        resolvedArtist = peeked.artist;
+      }
+      if (!resolvedAlbum && peeked.album) resolvedAlbum = peeked.album;
+    } catch {
+      // Proceed with provided metadata
+    }
+  }
+
+  if (!resolvedTitle) resolvedTitle = videoId;
+  if (!resolvedArtist) resolvedArtist = 'Unknown Artist';
+  if (!resolvedAlbum || resolvedAlbum === 'Online Stream' || resolvedAlbum === 'YouTube Stream') {
+    resolvedAlbum = 'Singles';
+  }
+
+  const musicDir = path.resolve(getMusicDir());
+  const downloadsDir = path.resolve(musicDir, 'Downloads');
+  if (!downloadsDir.startsWith(musicDir + path.sep)) {
+    throw new Error('Downloads directory escaped configured music root');
+  }
+  fs.mkdirSync(downloadsDir, {recursive: true});
+
+  const safeArtist = sanitizeNasSegment(resolvedArtist, 'Unknown Artist');
+  const safeTitle = sanitizeNasSegment(resolvedTitle, 'Untitled');
+  const finalFileName = `${safeArtist} - ${safeTitle}.m4a`;
+  const finalAudioPath = path.resolve(downloadsDir, finalFileName);
+  if (!finalAudioPath.startsWith(downloadsDir + path.sep)) {
+    throw new Error('Destination file path escaped Downloads directory');
+  }
+
+  const dedupeKey = finalAudioPath.toLowerCase();
+  const existingFlight = inFlightNasDownloads.get(dedupeKey);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
+  const workPromise = (async (): Promise<DirectNasDownloadResult> => {
+    // Fast-path: already saved on disk in /music/Downloads
+    if (fs.existsSync(finalAudioPath)) {
+      const st = fs.statSync(finalAudioPath);
+      if (st.isFile() && st.size > 0) {
+        const indexed = await indexSingleFile(finalAudioPath, musicDir, {
+          title: resolvedTitle,
+          artist: resolvedArtist,
+          album: resolvedAlbum,
+        });
+        const track = loadCanonicalTrackRow(indexed.id, input.userId, finalAudioPath);
+        return {track, filePath: finalAudioPath, alreadyExists: true};
+      }
+    }
+
+    const ffmpegPath = getFfmpegPath();
+    const cropCover = getSetting('ytdlp_crop_cover', 'true') === 'true';
+    const dlUuid = crypto.randomUUID();
+    const tmpWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlab-nas-dl-'));
+    let tempCookiePath: string | null = null;
+
+    try {
+      const outTemplate = path.join(tmpWorkDir, `${dlUuid}.%(ext)s`);
+
+      const buildYtdlpArgs = (cookiePath: string | null): string[] => {
+        const args = [
+          '--no-playlist',
+          '--no-warnings',
+          '--js-runtimes',
+          'node',
+          '--force-ipv4',
+          '-f',
+          'bestaudio[ext=m4a]/bestaudio',
+          '--extract-audio',
+          '--audio-format',
+          'm4a',
+          '--embed-thumbnail',
+          '--add-metadata',
+          '--ffmpeg-location',
+          ffmpegPath,
+        ];
+        if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+          args.push('--remote-components', 'ejs:github');
+        }
+        if (cookiePath) {
+          args.push('--cookies', cookiePath);
+        }
+        args.push('-o', outTemplate, '--', targetUrl);
+        return args;
+      };
+
+      try {
+        await execYtdlp(buildYtdlpArgs(null), {timeout: 180_000});
+      } catch (anonErr) {
+        const msg = anonErr instanceof Error ? anonErr.message : String(anonErr);
+        if (!isRecoverableCookieError(msg) || !hasConfiguredCookies()) {
+          throw anonErr;
+        }
+        cleanUuidTempAudioFiles(tmpWorkDir, dlUuid);
+        tempCookiePath = createTempCookiesCopy();
+        await execYtdlp(buildYtdlpArgs(tempCookiePath), {timeout: 180_000});
+      }
+
+      const expectedM4a = path.join(tmpWorkDir, `${dlUuid}.m4a`);
+      const downloadedPath = fs.existsSync(expectedM4a)
+        ? expectedM4a
+        : findUuidDownloadedAudio(tmpWorkDir, dlUuid);
+      if (!downloadedPath || !fs.existsSync(downloadedPath)) {
+        throw new Error('yt-dlp finished without producing an audio file');
+      }
+
+      // Fetch clean square cover art (preferring high-res Deezer coverUrl if provided)
+      let coverPath = await downloadCoverImageToTemp(tmpWorkDir, dlUuid, rawCoverUrl, videoId);
+      if (coverPath && cropCover) {
+        const croppedCover = path.join(tmpWorkDir, `${dlUuid}-cover-sq.jpg`);
+        try {
+          await execFileAsync(
+            ffmpegPath,
+            [
+              '-y',
+              '-i',
+              coverPath,
+              '-vf',
+              "crop='min(iw,ih)':'min(iw,ih)'",
+              '-q:v',
+              '2',
+              croppedCover,
+            ],
+            {timeout: 25_000}
+          );
+          if (fs.existsSync(croppedCover) && fs.statSync(croppedCover).size > 0) {
+            coverPath = croppedCover;
+          }
+        } catch {
+          // Keep original cover if crop fails
+        }
+      }
+
+      // Embed clean MP4 metadata tags & high-res square artwork with zero audio re-encoding when already M4A
+      const downloadedExt = path.extname(downloadedPath).replace('.', '').toLowerCase();
+      const taggedOutPath = path.join(tmpWorkDir, `${dlUuid}-tagged.m4a`);
+      let readyPath = downloadedPath;
+
+      try {
+        const ffArgs: string[] = ['-y', '-i', downloadedPath];
+        const audioCodecArgs =
+          downloadedExt === 'm4a' || downloadedExt === 'mp4'
+            ? ['-c:a', 'copy']
+            : ['-c:a', 'aac', '-b:a', '256k'];
+
+        if (coverPath) {
+          ffArgs.push(
+            '-i',
+            coverPath,
+            '-map',
+            '0:a:0',
+            '-map',
+            '1:v:0',
+            ...audioCodecArgs,
+            '-c:v',
+            'mjpeg',
+            '-disposition:v:0',
+            'attached_pic'
+          );
+        } else {
+          ffArgs.push('-map', '0', ...audioCodecArgs, '-c:v', 'copy');
+        }
+
+        ffArgs.push(
+          '-metadata',
+          `title=${resolvedTitle}`,
+          '-metadata',
+          `artist=${resolvedArtist}`,
+          '-metadata',
+          `album=${resolvedAlbum}`,
+          '-movflags',
+          '+faststart',
+          taggedOutPath
+        );
+
+        await execFileAsync(ffmpegPath, ffArgs, {timeout: 90_000});
+        if (fs.existsSync(taggedOutPath) && fs.statSync(taggedOutPath).size > 0) {
+          readyPath = taggedOutPath;
+        }
+      } catch {
+        // Fall back to yt-dlp's own --embed-thumbnail --add-metadata output if remux fails
+      }
+
+      // Atomically save into <music_dir>/Downloads/<Sanitized Artist> - <Sanitized Title>.m4a
+      const stagedPath = path.join(downloadsDir, `.${dlUuid}.part`);
+      try {
+        fs.copyFileSync(readyPath, stagedPath);
+        fs.renameSync(stagedPath, finalAudioPath);
+      } finally {
+        if (fs.existsSync(stagedPath)) {
+          try {
+            fs.unlinkSync(stagedPath);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      const fileHash = await computeFileSha256(finalAudioPath);
+      const indexed = await indexSingleFile(finalAudioPath, musicDir, {
+        fileHash,
+        title: resolvedTitle,
+        artist: resolvedArtist,
+        album: resolvedAlbum,
+        coverFilePath: coverPath,
+      });
+
+      const track = loadCanonicalTrackRow(indexed.id, input.userId, finalAudioPath);
+      return {track, filePath: finalAudioPath, alreadyExists: false};
+    } finally {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        try {
+          fs.unlinkSync(tempCookiePath);
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        fs.rmSync(tmpWorkDir, {recursive: true, force: true});
+      } catch {
+        // ignore
+      }
+    }
+  })();
+
+  inFlightNasDownloads.set(dedupeKey, workPromise);
+  try {
+    return await workPromise;
+  } finally {
+    if (inFlightNasDownloads.get(dedupeKey) === workPromise) {
+      inFlightNasDownloads.delete(dedupeKey);
+    }
+  }
+}
+
 export async function testCookiesFile(): Promise<{
   ok: boolean;
   status: 'active' | 'expired' | 'missing' | 'unavailable';

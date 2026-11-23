@@ -737,7 +737,127 @@ libraryRouter.delete('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
   res.json({ok: true});
 });
 
-libraryRouter.post('/playlists/:id/tracks', requireAuth, (req: AuthRequest, res) => {
+const M3U_EXT_RE = /\.m3u8?$/i;
+
+function sanitizeM3uLabel(value: string, fallback: string): string {
+  const cleaned = (value || '').replace(/[\r\n]+/g, ' ').trim();
+  return cleaned || fallback;
+}
+
+async function appendTracksToM3uFile(
+  m3uRelPath: string,
+  tracks: Array<{rel_path: string; title: string; artist: string; duration: number}>
+): Promise<boolean> {
+  if (!m3uRelPath || tracks.length === 0 || !M3U_EXT_RE.test(m3uRelPath)) return false;
+  const m3uAbsPath = resolveSafeTrackPath(m3uRelPath);
+  if (!m3uAbsPath) return false;
+
+  const m3uDirAbs = path.dirname(m3uAbsPath);
+  const newEntryLines: string[] = [];
+
+  for (const track of tracks) {
+    const trackAbsPath = resolveSafeTrackPath(track.rel_path);
+    if (!trackAbsPath) continue;
+    const relFromM3u = path.relative(m3uDirAbs, trackAbsPath).split(path.sep).join('/');
+    const dur = Math.max(-1, Math.round(track.duration || 0));
+    const cleanArtist = sanitizeM3uLabel(track.artist, 'Unknown Artist');
+    const cleanTitle = sanitizeM3uLabel(track.title, 'Untitled');
+    newEntryLines.push(`#EXTINF:${dur},${cleanArtist} - ${cleanTitle}`);
+    newEntryLines.push(relFromM3u);
+  }
+
+  if (newEntryLines.length === 0) return false;
+
+  let existing = '';
+  try {
+    existing = await fs.promises.readFile(m3uAbsPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'ENOENT') throw err;
+  }
+
+  const eol = existing.includes('\r\n') ? '\r\n' : '\n';
+  const normalizedExisting = existing.trim().length === 0 ? `#EXTM3U${eol}` : existing;
+  const needsLeadingNewline =
+    normalizedExisting.length > 0 && !normalizedExisting.endsWith('\n') && !normalizedExisting.endsWith('\r');
+  const nextContent =
+    normalizedExisting +
+    (needsLeadingNewline ? eol : '') +
+    newEntryLines.join(eol) +
+    eol;
+
+  await fs.promises.mkdir(m3uDirAbs, {recursive: true});
+  await fs.promises.writeFile(m3uAbsPath, nextContent, 'utf-8');
+  return true;
+}
+
+async function removeTrackFromM3uFile(
+  m3uRelPath: string,
+  trackRelPath: string
+): Promise<boolean> {
+  if (!m3uRelPath || !trackRelPath || !M3U_EXT_RE.test(m3uRelPath)) return false;
+  const m3uAbsPath = resolveSafeTrackPath(m3uRelPath);
+  const trackAbsPath = resolveSafeTrackPath(trackRelPath);
+  if (!m3uAbsPath || !trackAbsPath) return false;
+
+  let existing: string;
+  try {
+    existing = await fs.promises.readFile(m3uAbsPath, 'utf-8');
+  } catch {
+    return false;
+  }
+
+  const eol = existing.includes('\r\n') ? '\r\n' : '\n';
+  const musicDir = path.resolve(getMusicDir());
+  const m3uDirAbs = path.dirname(m3uAbsPath);
+  const targetRelNorm = trackRelPath.replace(/\\/g, '/').toLowerCase();
+  const targetFromM3u = path
+    .relative(m3uDirAbs, trackAbsPath)
+    .split(path.sep)
+    .join('/')
+    .toLowerCase();
+
+  const lines = existing.split(/\r?\n/);
+  const kept: string[] = [];
+  let removed = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      kept.push(line);
+      continue;
+    }
+
+    const posix = trimmed.replace(/\\/g, '/');
+    let matchesTarget = posix.toLowerCase() === targetFromM3u || posix.toLowerCase() === targetRelNorm;
+    if (!matchesTarget && !path.isAbsolute(trimmed) && !/^[a-zA-Z]:\//.test(posix)) {
+      const resolvedRel = path
+        .relative(musicDir, path.resolve(m3uDirAbs, posix))
+        .split(path.sep)
+        .join('/')
+        .toLowerCase();
+      if (resolvedRel === targetRelNorm) matchesTarget = true;
+    }
+
+    if (matchesTarget) {
+      removed = true;
+      // Drop the immediately preceding #EXTINF line if present
+      if (kept.length > 0 && /^#EXTINF:/i.test(kept[kept.length - 1].trim())) {
+        kept.pop();
+      }
+      continue;
+    }
+    kept.push(line);
+  }
+
+  if (!removed) return false;
+  const out = kept.join(eol).replace(/(\r?\n)*$/, '') + eol;
+  await fs.promises.writeFile(m3uAbsPath, out, 'utf-8');
+  return true;
+}
+
+libraryRouter.post('/playlists/:id/tracks', requireAuth, async (req: AuthRequest, res) => {
   const playlistId = Number(req.params.id);
   const incomingIds: number[] = Array.isArray(req.body?.trackIds)
     ? req.body.trackIds.map((v: unknown) => Number(v)).filter((n: number) => Number.isFinite(n))
@@ -751,18 +871,23 @@ libraryRouter.post('/playlists/:id/tracks', requireAuth, (req: AuthRequest, res)
   }
 
   const playlist = db
-    .prepare('SELECT id, user_id FROM playlists WHERE id = ?')
-    .get(playlistId) as {id: number; user_id: number} | undefined;
+    .prepare('SELECT id, user_id, source, m3u_path FROM playlists WHERE id = ?')
+    .get(playlistId) as
+    | {id: number; user_id: number; source: 'manual' | 'm3u'; m3u_path: string | null}
+    | undefined;
   if (!playlist) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
-  if (playlist.user_id !== req.user!.id && req.user!.role !== 'admin') {
+  const canModifyM3u = playlist.source === 'm3u' && req.user!.can_download;
+  if (playlist.user_id !== req.user!.id && req.user!.role !== 'admin' && !canModifyM3u) {
     res.status(403).json({error: 'Not allowed to modify this playlist'});
     return;
   }
 
-  const checkTrackStmt = db.prepare('SELECT id FROM tracks WHERE id = ?');
+  const getTrackStmt = db.prepare(
+    'SELECT id, rel_path, title, artist, duration FROM tracks WHERE id = ?'
+  );
   const maxPosRow = db
     .prepare('SELECT COALESCE(MAX(position), -1) AS maxPos FROM playlist_tracks WHERE playlist_id = ?')
     .get(playlistId) as {maxPos: number};
@@ -771,26 +896,48 @@ libraryRouter.post('/playlists/:id/tracks', requireAuth, (req: AuthRequest, res)
   );
 
   let nextPos = maxPosRow.maxPos + 1;
-  let addedCount = 0;
+  const addedTracks: Array<{
+    id: number;
+    rel_path: string;
+    title: string;
+    artist: string;
+    duration: number;
+  }> = [];
 
   const addTx = db.transaction(() => {
     for (const trackId of incomingIds) {
-      if (!checkTrackStmt.get(trackId)) continue;
-      insertStmt.run(playlistId, trackId, nextPos++);
-      addedCount++;
+      const trackRow = getTrackStmt.get(trackId) as
+        | {id: number; rel_path: string; title: string; artist: string; duration: number}
+        | undefined;
+      if (!trackRow) continue;
+      insertStmt.run(playlistId, trackRow.id, nextPos++);
+      addedTracks.push(trackRow);
     }
-    if (addedCount > 0) {
+    if (addedTracks.length > 0) {
       db.prepare("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?").run(playlistId);
     }
   });
   addTx();
 
-  if (addedCount === 0) {
+  if (addedTracks.length === 0) {
     res.status(404).json({error: 'Track not found'});
     return;
   }
 
-  res.status(201).json({ok: true, addedCount});
+  let m3uUpdated = false;
+  if (playlist.source === 'm3u' && playlist.m3u_path) {
+    try {
+      m3uUpdated = await appendTracksToM3uFile(playlist.m3u_path, addedTracks);
+    } catch (err) {
+      console.error(
+        '[playlists-m3u] Failed to append track(s) to',
+        playlist.m3u_path,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+
+  res.status(201).json({ok: true, addedCount: addedTracks.length, m3uUpdated});
 });
 
 // Export any playlist as a standard .m3u8 file inside <Active_Music_Mount>/Playlists/
@@ -857,26 +1004,50 @@ libraryRouter.post('/playlists/:id/export-m3u', requireAuth, async (req: AuthReq
   }
 });
 
-libraryRouter.delete('/playlists/:id/tracks/:trackId', requireAuth, (req: AuthRequest, res) => {
-  const playlistId = Number(req.params.id);
-  const trackId = Number(req.params.trackId);
+libraryRouter.delete(
+  '/playlists/:id/tracks/:trackId',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    const playlistId = Number(req.params.id);
+    const trackId = Number(req.params.trackId);
 
-  const playlist = db
-    .prepare('SELECT id, user_id FROM playlists WHERE id = ?')
-    .get(playlistId) as {id: number; user_id: number} | undefined;
-  if (!playlist) {
-    res.status(404).json({error: 'Playlist not found'});
-    return;
-  }
-  if (playlist.user_id !== req.user!.id && req.user!.role !== 'admin') {
-    res.status(403).json({error: 'Not allowed to modify this playlist'});
-    return;
-  }
+    const playlist = db
+      .prepare('SELECT id, user_id, source, m3u_path FROM playlists WHERE id = ?')
+      .get(playlistId) as
+      | {id: number; user_id: number; source: 'manual' | 'm3u'; m3u_path: string | null}
+      | undefined;
+    if (!playlist) {
+      res.status(404).json({error: 'Playlist not found'});
+      return;
+    }
+    const canModifyM3u = playlist.source === 'm3u' && req.user!.can_download;
+    if (playlist.user_id !== req.user!.id && req.user!.role !== 'admin' && !canModifyM3u) {
+      res.status(403).json({error: 'Not allowed to modify this playlist'});
+      return;
+    }
 
-  db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(
-    playlistId,
-    trackId
-  );
-  db.prepare("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?").run(playlistId);
-  res.json({ok: true});
-});
+    const trackRow = db
+      .prepare('SELECT rel_path FROM tracks WHERE id = ?')
+      .get(trackId) as {rel_path: string} | undefined;
+
+    db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(
+      playlistId,
+      trackId
+    );
+    db.prepare("UPDATE playlists SET updated_at = datetime('now') WHERE id = ?").run(playlistId);
+
+    if (playlist.source === 'm3u' && playlist.m3u_path && trackRow?.rel_path) {
+      try {
+        await removeTrackFromM3uFile(playlist.m3u_path, trackRow.rel_path);
+      } catch (err) {
+        console.error(
+          '[playlists-m3u] Failed to remove track from',
+          playlist.m3u_path,
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
+
+    res.json({ok: true});
+  }
+);

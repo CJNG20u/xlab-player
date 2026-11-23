@@ -32,6 +32,7 @@ export interface Track {
   deezerTrackId?: string;
   deezerAlbumId?: string;
   deezerArtistId?: string;
+  filePath?: string;
 }
 
 export interface Playlist {

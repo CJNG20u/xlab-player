@@ -135,6 +135,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     handleDeletedTracks,
     libraryRefreshVersion,
     bumpLibraryRefresh,
+    recentlyDownloadedTracks,
   } = usePlayer();
   const {isLight, isTidal, baseThemeColor} = useTheme();
 
@@ -346,10 +347,27 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const activeHomeTab: HomeViewTab = activeTab === 'playlists' ? 'all' : activeTab;
 
   const filteredTracks = useMemo(() => {
-    let list = tracks;
+    let baseList = tracks;
+    if (
+      isHomeView &&
+      (activeHomeTab === 'all' || activeHomeTab === 'recent') &&
+      !artistFilter &&
+      !offline &&
+      recentlyDownloadedTracks.length > 0
+    ) {
+      const existingIds = new Set(tracks.map((t) => String(t.id)));
+      const missingRecent = recentlyDownloadedTracks.filter(
+        (t) => !existingIds.has(String(t.id))
+      );
+      if (missingRecent.length > 0) {
+        baseList = [...missingRecent, ...tracks];
+      }
+    }
+
+    let list = baseList;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      list = tracks.filter(
+      list = baseList.filter(
         (t) =>
           t.title.toLowerCase().includes(q) ||
           t.artist.toLowerCase().includes(q) ||
@@ -425,7 +443,16 @@ export const PlaylistsLibraryPage: React.FC = () => {
     }
 
     return list;
-  }, [tracks, searchQuery, isHomeView, activeHomeTab, lastPlayed]);
+  }, [
+    tracks,
+    recentlyDownloadedTracks,
+    searchQuery,
+    isHomeView,
+    activeHomeTab,
+    artistFilter,
+    offline,
+    lastPlayed,
+  ]);
 
   const totalDuration = useMemo(
     () => filteredTracks.reduce((sum, t) => sum + (t.duration || 0), 0),

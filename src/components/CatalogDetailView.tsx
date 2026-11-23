@@ -457,8 +457,8 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     });
     onFlashToast(
       queuedCount > 0
-        ? `Queued ${queuedCount} of ${total} tracks from "${album.title}"`
-        : `Could not queue tracks from "${album.title}"`
+        ? `Downloaded ${queuedCount} of ${total} tracks from "${album.title}"`
+        : `Could not download tracks from "${album.title}"`
     );
   }, [album, albumDownloadState, canDownload, getYouTubeSaveStatus, onFlashToast, saveYouTubeTrackToLibrary]);
 
@@ -770,13 +770,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                             <>
                               <Loader2 className="w-4 h-4 animate-spin" />
                               <span className="tabular-nums">
-                                Queueing {albumDownloadState?.queued}/{albumDownloadState?.total}...
+                                Downloading {albumDownloadState?.queued}/{albumDownloadState?.total}...
                               </span>
                             </>
                           ) : isAlbumQueued ? (
                             <>
                               <Check className="w-4 h-4 stroke-[2.5]" />
-                              <span>Album Queued</span>
+                              <span>Album Downloaded</span>
                             </>
                           ) : (
                             <>

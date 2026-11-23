@@ -14,6 +14,7 @@ import {
 import {
   cancelDownloadJob,
   downloadEvents,
+  downloadTrackToNas,
   enqueueDownloadJob,
   fetchMetadataPreview,
   getDownloadJobs,
@@ -223,6 +224,51 @@ downloadRouter.post('/peek', requireAuth, async (req, res) => {
     res.status(400).json({
       error: err instanceof Error ? err.message : 'Failed to peek track metadata',
     });
+  }
+});
+
+// Direct NAS download endpoint: saves tagged .m4a to <music_dir>/Downloads and indexes immediately into SQLite
+downloadRouter.post('/', requireDownloadPermission, async (req: AuthRequest, res) => {
+  const videoId = typeof req.body?.videoId === 'string' ? req.body.videoId.trim() : '';
+  const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const artist = typeof req.body?.artist === 'string' ? req.body.artist.trim() : '';
+  const album = typeof req.body?.album === 'string' ? req.body.album.trim() : '';
+  const coverUrl =
+    typeof req.body?.coverUrl === 'string'
+      ? req.body.coverUrl.trim()
+      : typeof req.body?.thumbnail_url === 'string'
+        ? req.body.thumbnail_url.trim()
+        : '';
+  const rawDuration = Number(req.body?.duration);
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
+
+  if (!videoId && !url && !title) {
+    res.status(400).json({error: 'A videoId, url, or track title is required'});
+    return;
+  }
+
+  try {
+    const result = await downloadTrackToNas({
+      userId: req.user!.id,
+      videoId: videoId || undefined,
+      url: url || undefined,
+      title: title || undefined,
+      artist: artist || undefined,
+      album: album || undefined,
+      coverUrl: coverUrl || undefined,
+      duration,
+    });
+    res.status(result.alreadyExists ? 200 : 201).json({
+      success: true,
+      alreadyExists: result.alreadyExists,
+      filePath: result.filePath,
+      track: result.track,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to download track to NAS';
+    console.error('[api/download]', artist, '-', title || videoId, msg);
+    res.status(502).json({success: false, error: msg});
   }
 });
 

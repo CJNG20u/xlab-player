@@ -75,6 +75,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     playNextInQueue,
     toggleLikeTrack,
     handleDeletedTracks,
+    bumpLibraryRefresh,
   } = usePlayer();
 
   const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
@@ -167,6 +168,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
         method: 'POST',
         body: JSON.stringify({trackId}),
       });
+      bumpLibraryRefresh();
       flashToast(`Added to ${pName}`);
     } catch (err) {
       flashToast(err instanceof Error ? err.message : 'Failed to add to playlist');
@@ -181,6 +183,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     try {
       await apiFetch(`/api/playlists/${playlistId}/tracks/${trackId}`, {method: 'DELETE'});
       onRemovedFromPlaylist?.(trackId);
+      bumpLibraryRefresh();
       flashToast('Removed from playlist');
     } catch (err) {
       flashToast(err instanceof Error ? err.message : 'Failed to remove track');

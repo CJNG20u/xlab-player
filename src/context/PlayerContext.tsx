@@ -65,10 +65,11 @@ interface PlayerContextValue {
   syncTrackLikeState: (trackId: TrackId, liked: boolean) => void;
   libraryRefreshVersion: number;
   bumpLibraryRefresh: () => void;
+  recentlyDownloadedTracks: Track[];
   saveYouTubeTrackToLibrary: (
     track: Track,
     format?: 'm4a' | 'opus'
-  ) => Promise<{ok: boolean; message: string}>;
+  ) => Promise<{ok: boolean; message: string; track?: Track}>;
   getYouTubeSaveStatus: (trackId: TrackId) => 'idle' | 'saving' | 'saved';
 }
 
@@ -169,6 +170,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const [youtubeSaveStates, setYoutubeSaveStates] = useState<
     Record<string, 'saving' | 'saved'>
   >({});
+  const [recentlyDownloadedTracks, setRecentlyDownloadedTracks] = useState<Track[]>([]);
   const [lastPlayed, setLastPlayed] = useState<PlayHistoryEntry | null>(
     () => getLocalPlayHistory()[0] ?? null
   );
@@ -1267,6 +1269,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         (t) => !(typeof t.id === 'number' && deletedSet.has(t.id))
       );
       setQueue(nextQueue);
+      setRecentlyDownloadedTracks((prev) =>
+        prev.filter((t) => !(typeof t.id === 'number' && deletedSet.has(t.id)))
+      );
 
       if (activeWasDeleted || nextQueue.length === 0) {
         setCurrentIndex(-1);
@@ -1375,76 +1380,99 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const saveYouTubeTrackToLibrary = useCallback(
     async (
       track: Track,
-      format: 'm4a' | 'opus' = 'm4a'
-    ): Promise<{ok: boolean; message: string}> => {
-      const key = String(track.id);
-      if (youtubeSaveStates[key] === 'saving') {
-        return {ok: false, message: 'Already saving to library'};
+      _format: 'm4a' | 'opus' = 'm4a'
+    ): Promise<{ok: boolean; message: string; track?: Track}> => {
+      const videoId = getYouTubeVideoId(track);
+      const saveKeys = Array.from(
+        new Set(
+          [
+            String(track.id),
+            track.deezerTrackId ? `dz-track-${track.deezerTrackId}` : null,
+            videoId ? `yt-${videoId}` : null,
+          ].filter((k): k is string => Boolean(k))
+        )
+      );
+
+      if (saveKeys.some((k) => youtubeSaveStates[k] === 'saving')) {
+        return {ok: false, message: 'Already downloading to library'};
       }
 
-      setYoutubeSaveStates((prev) => ({...prev, [key]: 'saving'}));
+      setYoutubeSaveStates((prev) => {
+        const next = {...prev};
+        for (const k of saveKeys) next[k] = 'saving';
+        return next;
+      });
+
       try {
-        const videoId = getYouTubeVideoId(track);
-        let url =
-          track.youtubeUrl || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : '');
+        const cleanAlbum =
+          track.album &&
+          track.album !== 'YouTube Stream' &&
+          track.album !== 'Online Stream'
+            ? track.album
+            : 'Downloads';
 
-        // For Deezer catalog tracks not yet matched to a videoId, resolve on demand first
-        if (!url && track.title) {
-          const resolved = await apiFetch<{videoId: string; url: string}>('/api/yt-stream/resolve', {
-            method: 'POST',
-            body: JSON.stringify({
-              artist: track.artist || '',
-              title: track.title,
-              duration: track.duration || 0,
-            }),
-          });
-          url = resolved.url;
-        }
-
-        if (!url) {
-          setYoutubeSaveStates((prev) => {
-            const next = {...prev};
-            delete next[key];
-            return next;
-          });
-          return {ok: false, message: 'Could not find a matching online stream for this track'};
-        }
-
-        await apiFetch('/api/download/start', {
+        const res = await apiFetch<{
+          success: boolean;
+          alreadyExists?: boolean;
+          filePath?: string;
+          track?: Track;
+        }>('/api/download', {
           method: 'POST',
           body: JSON.stringify({
-            items: [
-              {
-                url,
-                title: track.title || 'Untitled Track',
-                artist: track.artist || 'Unknown Artist',
-                album:
-                  track.album &&
-                  track.album !== 'YouTube Stream' &&
-                  track.album !== 'Online Stream'
-                    ? track.album
-                    : 'Singles',
-                format,
-                thumbnail_url: track.coverUrl || '',
-              },
-            ],
+            videoId: videoId || undefined,
+            url:
+              track.youtubeUrl ||
+              (videoId ? `https://www.youtube.com/watch?v=${videoId}` : undefined),
+            title: track.title || 'Untitled Track',
+            artist: track.artist || 'Unknown Artist',
+            album: cleanAlbum,
+            coverUrl: track.coverUrl || '',
+            duration: track.duration || 0,
           }),
         });
-        setYoutubeSaveStates((prev) => ({...prev, [key]: 'saved'}));
-        return {ok: true, message: `Saving "${track.title}" to library`};
+
+        const savedTrack: Track | undefined = res.track
+          ? {
+              ...res.track,
+              filePath: res.filePath || res.track.filePath,
+            }
+          : undefined;
+
+        if (savedTrack) {
+          setRecentlyDownloadedTracks((prev) => [
+            savedTrack,
+            ...prev.filter((item) => String(item.id) !== String(savedTrack.id)),
+          ]);
+        }
+
+        setYoutubeSaveStates((prev) => {
+          const next = {...prev};
+          for (const k of saveKeys) next[k] = 'saved';
+          return next;
+        });
+
+        bumpLibraryRefresh();
+
+        return {
+          ok: true,
+          track: savedTrack,
+          message: res.alreadyExists
+            ? `"${savedTrack?.title || track.title}" is already in your library`
+            : `Downloaded "${savedTrack?.title || track.title}" to library`,
+        };
       } catch (err) {
         setYoutubeSaveStates((prev) => {
           const next = {...prev};
-          delete next[key];
+          for (const k of saveKeys) delete next[k];
           return next;
         });
         return {
           ok: false,
-          message: err instanceof Error ? err.message : 'Could not queue download',
+          message: err instanceof Error ? err.message : 'Could not download track',
         };
       }
     },
-    [youtubeSaveStates]
+    [youtubeSaveStates, bumpLibraryRefresh]
   );
 
   const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
@@ -1912,6 +1940,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         syncTrackLikeState,
         libraryRefreshVersion,
         bumpLibraryRefresh,
+        recentlyDownloadedTracks,
         saveYouTubeTrackToLibrary,
         getYouTubeSaveStatus,
       }}

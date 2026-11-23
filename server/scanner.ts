@@ -275,7 +275,8 @@ export async function indexSingleFile(
     } else if (
       segments.length === 2 &&
       segments[0].toLowerCase() !== 'uploads' &&
-      segments[0].toLowerCase() !== 'tracks'
+      segments[0].toLowerCase() !== 'tracks' &&
+      segments[0].toLowerCase() !== 'downloads'
     ) {
       artist = segments[0] || artist;
     }
