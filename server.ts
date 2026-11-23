@@ -7,12 +7,20 @@ import http from 'http';
 import path from 'path';
 import {type AuthRequest, requireAuth} from './server/auth.ts';
 import {
+  enforceAudioCacheLimit,
+  enqueueMetadataPrefetch,
+  getCachedAudio,
+  isAudioCacheEnabled,
+  requestPrefetch,
+  serveAudioFromDiskOrFill,
+} from './server/audioCache.ts';
+import {
   cacheYouTubeThumbnailUrl,
   DirectProxyCircuitOpenError,
-  enqueueYouTubePrefetch,
   getCachedYouTubeAudioStream,
   getCachedYouTubeThumbnailUrl,
   getDirectProxyCircuitCooldownRemainingMs,
+  getPipeStartupTimeoutMs,
   getVideoDirectProxyNegativeInfo,
   inspectYouTubeStreamUrlParams,
   invalidateYouTubeAudioStreamCache,
@@ -27,9 +35,9 @@ import {
   resolveTrackToVideoId,
   resolveYouTubeAudioStreamUrl,
   spawnDirectYouTubeAudioStream,
+  upstreamBackoffRemainingSec,
   type Ipv4MediaResponse,
   type PrefetchRequestItem,
-  type YouTubeStreamStrategy,
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
@@ -113,6 +121,9 @@ async function startServer() {
   const app = express();
   const httpServer = http.createServer(app);
 
+  // Sweep stale .part files (> 1h) and enforce AUDIO_CACHE_MB budget on boot
+  enforceAudioCacheLimit();
+
   app.set('trust proxy', 1);
   app.use(cookieParser());
   app.use(express.json({limit: '10mb'}));
@@ -145,7 +156,6 @@ async function startServer() {
   // Authenticated YouTube audio stream proxy with 30-min cache, in-flight deduplication,
   // adaptive 403 circuit breaker, strict timeouts, and full lifecycle cleanup.
   const UPSTREAM_FETCH_TIMEOUT_MS = 8_000;
-  const DIRECT_PIPE_STARTUP_TIMEOUT_MS = 15_000;
 
   const streamYouTubeVideoById = async (
     videoId: string,
@@ -192,11 +202,23 @@ async function startServer() {
       res.end();
     };
 
-    // Safe HEAD probe handling: serve immediately from cache or circuit-breaker metadata,
-    // or await a single deduplicated in-flight resolution without spawning duplicate subprocesses
-    // or fallback pipes.
+    // Safe HEAD probe handling: serve immediately from disk cache, active fill, URL cache,
+    // or circuit/backoff metadata without spawning duplicate subprocesses or fallback pipes.
     if (isHead) {
       try {
+        if (isAudioCacheEnabled()) {
+          const headDisk = await serveAudioFromDiskOrFill(
+            videoId,
+            req,
+            res,
+            true,
+            abortController.signal
+          );
+          if (headDisk.outcome === 'served' || headDisk.outcome === 'aborted') {
+            return;
+          }
+        }
+
         const cached = getCachedYouTubeAudioStream(videoId);
         if (cached) {
           sendHeadHeaders({
@@ -208,7 +230,11 @@ async function startServer() {
           return;
         }
 
-        if (isVideoDirectProxyNegative(videoId) || isDirectProxyCircuitOpen()) {
+        if (
+          isVideoDirectProxyNegative(videoId) ||
+          isDirectProxyCircuitOpen() ||
+          upstreamBackoffRemainingSec() > 0
+        ) {
           sendHeadHeaders({
             contentType: 'audio/mp4',
             acceptRanges: 'none',
@@ -266,8 +292,36 @@ async function startServer() {
       if (res.headersSent || res.writableEnded || res.destroyed || abortController.signal.aborted) {
         return false;
       }
-      console.warn(`[yt-stream] ${videoId} using direct yt-dlp audio pipe fallback (${fallbackReason})`);
-      const {stream, cleanup, getStderr} = spawnDirectYouTubeAudioStream(videoId);
+      const pipeStartupTimeoutMs = getPipeStartupTimeoutMs();
+      const pipeStartedAt = Date.now();
+      console.warn(
+        `[yt-stream] ${videoId} using direct yt-dlp audio pipe fallback (${fallbackReason}; startupTimeoutMs=${pipeStartupTimeoutMs})`
+      );
+
+      let spawned: ReturnType<typeof spawnDirectYouTubeAudioStream>;
+      try {
+        spawned = spawnDirectYouTubeAudioStream(videoId);
+      } catch (spawnErr) {
+        const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+        console.error(
+          '[yt-stream]',
+          JSON.stringify({
+            event: 'direct_pipe_spawn_error',
+            videoId,
+            fallbackReason,
+            error: msg,
+          })
+        );
+        detachClientListeners();
+        if (!res.headersSent && !res.destroyed) {
+          res.status(502).json({error: 'Audio stream fallback failed to start'});
+        } else if (!res.destroyed) {
+          res.destroy();
+        }
+        return true;
+      }
+
+      const {stream, cleanup, getStderr} = spawned;
       let started = false;
       let finished = false;
 
@@ -288,14 +342,26 @@ async function startServer() {
 
       const startupTimer = setTimeout(() => {
         if (started || finished) return;
-        console.error('[yt-stream]', videoId, 'direct-pipe-startup-timeout');
+        const elapsedMs = Date.now() - pipeStartedAt;
+        const stderr = getStderr();
+        console.error(
+          '[yt-stream]',
+          JSON.stringify({
+            event: 'direct_pipe_startup_timeout',
+            videoId,
+            timeoutMs: pipeStartupTimeoutMs,
+            elapsedMs,
+            fallbackReason,
+            stderr: stderr ? stderr.slice(0, 400) : null,
+          })
+        );
         teardown();
         if (!res.headersSent && !res.destroyed) {
-          res.status(504).json({error: 'Audio stream fallback timed out before starting'});
+          res.status(502).json({error: 'Audio stream fallback timed out before starting'});
         } else if (!res.destroyed) {
           res.destroy();
         }
-      }, DIRECT_PIPE_STARTUP_TIMEOUT_MS);
+      }, pipeStartupTimeoutMs);
       startupTimer.unref();
 
       res.once('close', onPipeAbort);
@@ -310,6 +376,18 @@ async function startServer() {
         if (!started) {
           started = true;
           clearTimeout(startupTimer);
+          console.info(
+            '[yt-stream-served]',
+            JSON.stringify({
+              event: 'stream_served',
+              videoId,
+              mode: 'pipe',
+              strategy: 'pipe-fallback',
+              client: 'yt-dlp-pipe(tv,android_vr,default)',
+              startupMs: Date.now() - pipeStartedAt,
+              fallbackReason,
+            })
+          );
           res.status(200);
           res.setHeader('Content-Type', 'audio/mp4');
           res.setHeader('Accept-Ranges', 'none');
@@ -328,13 +406,22 @@ async function startServer() {
       stream.on('end', () => {
         const wasStarted = started;
         const wasFinished = finished;
+        const detail = getStderr() || fallbackReason;
         teardown();
         if (wasFinished) return;
         if (!wasStarted) {
-          const detail = getStderr() || fallbackReason;
-          console.error('[yt-stream]', videoId, 'direct-pipe-empty:', detail);
-          if (!res.headersSent) {
-            res.status(502).json({error: `Could not stream YouTube audio: ${detail.slice(0, 220)}`});
+          console.error(
+            '[yt-stream]',
+            JSON.stringify({
+              event: 'direct_pipe_empty',
+              videoId,
+              elapsedMs: Date.now() - pipeStartedAt,
+              fallbackReason,
+              stderr: detail.slice(0, 400),
+            })
+          );
+          if (!res.headersSent && !res.destroyed) {
+            res.status(502).json({error: 'Audio stream fallback ended before starting'});
           }
           return;
         }
@@ -344,14 +431,52 @@ async function startServer() {
       });
 
       stream.on('error', (pipeErr) => {
+        const wasStarted = started;
         const wasFinished = finished;
+        const stderr = getStderr();
         teardown();
         if (wasFinished) return;
-        console.error('[yt-stream]', videoId, 'direct-pipe-error:', pipeErr.message);
-        if (!res.headersSent) {
+        console.error(
+          '[yt-stream]',
+          JSON.stringify({
+            event: 'direct_pipe_error',
+            videoId,
+            started: wasStarted,
+            elapsedMs: Date.now() - pipeStartedAt,
+            error: pipeErr.message,
+            stderr: stderr ? stderr.slice(0, 400) : null,
+          })
+        );
+        if (!res.headersSent && !res.destroyed) {
           res.status(502).json({error: 'Failed to stream YouTube audio'});
         } else if (!res.destroyed) {
           res.destroy();
+        }
+      });
+
+      stream.once('close', () => {
+        if (finished) return;
+        const wasStarted = started;
+        const detail = getStderr() || fallbackReason;
+        teardown();
+        if (!wasStarted) {
+          console.error(
+            '[yt-stream]',
+            JSON.stringify({
+              event: 'direct_pipe_closed_early',
+              videoId,
+              elapsedMs: Date.now() - pipeStartedAt,
+              fallbackReason,
+              stderr: detail.slice(0, 400),
+            })
+          );
+          if (!res.headersSent && !res.destroyed) {
+            res.status(502).json({error: 'Audio stream fallback closed before starting'});
+          }
+          return;
+        }
+        if (!res.writableEnded && !res.destroyed) {
+          res.end();
         }
       });
 
@@ -359,8 +484,16 @@ async function startServer() {
     };
 
     try {
-      // Fast per-video handoff: if this videoId recently 403d on direct proxy, skip yt-dlp JSON
-      // resolution and stream directly through the pipe fallback for 15 minutes.
+      // 1. Always serve completed disk-cached audio immediately (zero upstream traffic,
+      // even if upstream backoff or negative cache is active).
+      if (getCachedAudio(videoId)) {
+        await serveAudioFromDiskOrFill(videoId, req, res, false, abortController.signal);
+        detachClientListeners();
+        return;
+      }
+
+      // 2. Fast per-video handoff: if this videoId recently 403d on direct proxy, skip yt-dlp JSON
+      // resolution and stream directly through the pipe fallback.
       const videoNegInfo = getVideoDirectProxyNegativeInfo(videoId);
       if (videoNegInfo) {
         const remainingSec = Math.ceil(videoNegInfo.remainingMs / 1000);
@@ -371,7 +504,8 @@ async function startServer() {
         return;
       }
 
-      // Short-circuit straight to the fallback pipe while every active strategy's circuit is open
+      // 3. Short-circuit straight to the fallback pipe while every active strategy's circuit is open
+      // or during a short post-exhaustion global upstream backoff pause.
       if (isDirectProxyCircuitOpen()) {
         const remainingSec = Math.ceil(getDirectProxyCircuitCooldownRemainingMs() / 1000);
         if (pipeDirectFallback(`403 circuit breaker open (${remainingSec}s cooldown left)`)) {
@@ -381,6 +515,39 @@ async function startServer() {
         return;
       }
 
+      const backoffRemaining = upstreamBackoffRemainingSec();
+      if (backoffRemaining > 0) {
+        if (pipeDirectFallback(`upstream backoff active (${backoffRemaining}s left)`)) {
+          return;
+        }
+        detachClientListeners();
+        return;
+      }
+
+      // 4. Primary disk-backed single-flight fill + progressive Range serving (when AUDIO_CACHE_MB > 0)
+      if (isAudioCacheEnabled()) {
+        const diskResult = await serveAudioFromDiskOrFill(
+          videoId,
+          req,
+          res,
+          false,
+          abortController.signal
+        );
+        if (diskResult.outcome === 'served' || diskResult.outcome === 'aborted') {
+          detachClientListeners();
+          if (diskResult.outcome === 'aborted' && !res.writableEnded) {
+            res.end();
+          }
+          return;
+        }
+        if (pipeDirectFallback(diskResult.reason)) {
+          return;
+        }
+        detachClientListeners();
+        return;
+      }
+
+      // 5. Direct proxy path when disk caching is explicitly disabled (AUDIO_CACHE_MB=0)
       let resolved: Awaited<ReturnType<typeof resolveYouTubeAudioStreamUrl>>;
       try {
         resolved = await resolveYouTubeAudioStreamUrl(videoId);
@@ -421,12 +588,11 @@ async function startServer() {
       const headerStr = (h: string | string[] | undefined): string =>
         Array.isArray(h) ? h[0] || '' : h || '';
 
-      // If a cached/resolved signed URL expired OR was rejected with 403/410, update the
-      // sliding-window circuit breaker and either try a distinct client family or hand off fast to pipe.
+      // On googlevideo 403/410, invalidate BOTH URL cache layers (memory + SQLite) and re-resolve
+      // ONCE with the `default` strategy (never android_vr), polling the new URL.
       if (upstream.statusCode === 403 || upstream.statusCode === 410) {
         const failedStatus = upstream.statusCode;
         const failedStrategy = resolved.strategy;
-        const failedClientParam = resolved.clientParam || null;
         const failedUsedFormatHeaders = Boolean(resolved.usedFormatHeaders);
         const failedUrlParams = inspectYouTubeStreamUrlParams(resolved.url);
         const failedServer = headerStr(upstream.headers.server);
@@ -470,20 +636,10 @@ async function startServer() {
         }
 
         try {
-          const skipStrategies: YouTubeStreamStrategy[] = [];
-          if (!resolved.fromCache && failedStatus === 403) {
-            skipStrategies.push(failedStrategy);
-            const normClient = (failedClientParam || '').toUpperCase();
-            if (
-              failedStrategy === 'default' &&
-              (normClient.startsWith('TV') || normClient === 'ANDROID_VR')
-            ) {
-              skipStrategies.push('tv-android-vr');
-            }
-          }
           resolved = await resolveYouTubeAudioStreamUrl(videoId, {
             forceRefresh: true,
-            skipStrategies,
+            skipFastPath: true,
+            defaultOnly: true,
           });
           upstream = await fetchUpstream(resolved.url, resolved.headers);
           if (upstream.statusCode === 403) {
@@ -552,6 +708,20 @@ async function startServer() {
 
       if (upstream.statusCode === 200 || upstream.statusCode === 206) {
         recordStrategyDirectSuccess(resolved.strategy, videoId);
+        console.info(
+          '[yt-stream-served]',
+          JSON.stringify({
+            event: 'stream_served',
+            videoId,
+            mode: 'direct',
+            strategy: resolved.strategy,
+            client: resolved.clientParam || 'unknown',
+            formatId: resolved.formatId || null,
+            fromCache: resolved.fromCache,
+            status: upstream.statusCode,
+            adGateWaitedMs: resolved.adGateWaitedMs ?? 0,
+          })
+        );
       }
 
       const contentType =
@@ -606,8 +776,77 @@ async function startServer() {
     }
   };
 
-  // Non-blocking background stream prefetch endpoint (warms metadata match + direct stream URL cache)
+  // Per-user sliding-window rate limiter for POST /api/prefetch (60 req/min)
+  const PREFETCH_RATE_LIMIT_MAX = 60;
+  const PREFETCH_RATE_LIMIT_WINDOW_MS = 60_000;
+  const prefetchRateBuckets = new Map<string, number[]>();
+
+  function checkPrefetchRateLimit(key: string): {allowed: boolean; retryAfterSec: number} {
+    const now = Date.now();
+    const cutoff = now - PREFETCH_RATE_LIMIT_WINDOW_MS;
+    const prev = prefetchRateBuckets.get(key) || [];
+    const active = prev.filter((ts) => ts > cutoff);
+    if (active.length >= PREFETCH_RATE_LIMIT_MAX) {
+      const oldest = active[0] ?? now;
+      const retryAfterSec = Math.max(1, Math.ceil((oldest + PREFETCH_RATE_LIMIT_WINDOW_MS - now) / 1000));
+      prefetchRateBuckets.set(key, active);
+      return {allowed: false, retryAfterSec};
+    }
+    active.push(now);
+    prefetchRateBuckets.set(key, active);
+    if (prefetchRateBuckets.size > 1000) {
+      for (const [bucketKey, timestamps] of prefetchRateBuckets.entries()) {
+        if (timestamps.length === 0 || timestamps[timestamps.length - 1] <= cutoff) {
+          prefetchRateBuckets.delete(bucketKey);
+        }
+      }
+    }
+    return {allowed: true, retryAfterSec: 0};
+  }
+
+  // Dedicated prefetch endpoint: accepts { videoIds: string[] } (max 3), rate-limited to 60/min.
+  // Runs in background 2-resolve / 1-download workers without android_vr so ad gates clear ahead of play.
+  // Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/api/routes/playback.py
+  app.post('/api/prefetch', requireAuth, (req: AuthRequest, res) => {
+    const rateKey = req.user?.id ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
+    const rate = checkPrefetchRateLimit(rateKey);
+    if (!rate.allowed) {
+      res.setHeader('Retry-After', String(rate.retryAfterSec));
+      res.status(429).json({error: 'Too many prefetch requests'});
+      return;
+    }
+
+    const rawVideoIds = req.body?.videoIds;
+    if (!Array.isArray(rawVideoIds)) {
+      res.status(400).json({error: 'videoIds must be an array of YouTube video IDs'});
+      return;
+    }
+
+    const validIds: string[] = [];
+    for (const raw of rawVideoIds) {
+      if (validIds.length >= 3) break;
+      if (typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (isValidYouTubeVideoId(trimmed) && !validIds.includes(trimmed)) {
+        validIds.push(trimmed);
+      }
+    }
+
+    const download = req.body?.download !== false;
+    const result = requestPrefetch(validIds, {download, maxItems: 3});
+    res.status(202).json({ok: true, ...result});
+  });
+
+  // Non-blocking background stream prefetch endpoint (supports metadata items + videoIds)
   app.post('/api/yt-stream/prefetch', requireAuth, (req: AuthRequest, res) => {
+    const rateKey = req.user?.id ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
+    const rate = checkPrefetchRateLimit(rateKey);
+    if (!rate.allowed) {
+      res.setHeader('Retry-After', String(rate.retryAfterSec));
+      res.status(429).json({error: 'Too many prefetch requests'});
+      return;
+    }
+
     const rawItems = Array.isArray(req.body?.items)
       ? req.body.items
       : req.body && typeof req.body === 'object'
@@ -627,7 +866,7 @@ async function startServer() {
             : undefined,
       });
     }
-    const accepted = enqueueYouTubePrefetch(items);
+    const accepted = enqueueMetadataPrefetch(items);
     res.status(202).json({ok: true, accepted});
   });
 

@@ -13,8 +13,10 @@ services:
       - "3000:3000"
     env_file: .env
     volumes:
-      # Persistent SQLite database, extracted album covers, cookies.txt, and yt-dlp JS player cache (/app/data/ytdlp-cache)
+      # Persistent SQLite database (xlabplayer.db + stream_url_cache), covers, cookies.txt, and yt-dlp JS player cache (/app/data/ytdlp-cache)
       - ./data:/app/data
+      # Persistent disk audio cache (AUDIO_CACHE_MB, default 2048 MB, LRU-evicted; separate mount so cache can live on fast local SSD)
+      - ./audio_cache:/app/data/audio-cache
       # Local music library directory
       - ./music_library:/music
       # To bind-mount an NFS/SMB NAS share already mounted on your Docker host,

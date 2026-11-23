@@ -153,6 +153,35 @@ export interface StreamPrefetchTarget {
   duration?: number;
 }
 
+export function prefetchVideoIds(videoIds: string[], download = true): void {
+  if (!videoIds || videoIds.length === 0) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+  const cleaned: string[] = [];
+  for (const raw of videoIds) {
+    if (cleaned.length >= 3) break;
+    const id = raw?.trim();
+    if (id && !cleaned.includes(id)) {
+      cleaned.push(id);
+    }
+  }
+  if (cleaned.length === 0) return;
+
+  const token = getStoredToken();
+  const headers: Record<string, string> = {'Content-Type': 'application/json'};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  void fetch('/api/prefetch', {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({videoIds: cleaned, download}),
+    priority: 'low',
+  } as RequestInit).catch(() => {
+    // Best-effort background warmup
+  });
+}
+
 export function prefetchYouTubeStreams(items: StreamPrefetchTarget[]): void {
   if (!items || items.length === 0) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) return;

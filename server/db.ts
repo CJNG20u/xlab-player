@@ -13,6 +13,9 @@ export const SECRETS_DIR = path.resolve(DATA_DIR, 'secrets');
 export const YTDLP_CACHE_DIR = process.env.YTDLP_CACHE_DIR?.trim()
   ? path.resolve(process.env.YTDLP_CACHE_DIR.trim())
   : path.resolve(DATA_DIR, 'ytdlp-cache');
+export const AUDIO_CACHE_DIR = process.env.AUDIO_CACHE_DIR?.trim()
+  ? path.resolve(process.env.AUDIO_CACHE_DIR.trim())
+  : path.resolve(DATA_DIR, 'audio-cache');
 export const COOKIES_FILE = path.resolve(SECRETS_DIR, 'cookies.txt');
 export const DEFAULT_MUSIC_DIR = process.env.MUSIC_DIR?.trim()
   ? path.resolve(process.env.MUSIC_DIR.trim())
@@ -21,7 +24,7 @@ export const DEFAULT_YTDLP_PATH = process.env.YTDLP_PATH?.trim() || 'yt-dlp';
 export const DEFAULT_FFMPEG_PATH = process.env.FFMPEG_PATH?.trim() || 'ffmpeg';
 
 // Ensure core runtime directories exist
-for (const dir of [DATA_DIR, COVERS_DIR, SECRETS_DIR, YTDLP_CACHE_DIR]) {
+for (const dir of [DATA_DIR, COVERS_DIR, SECRETS_DIR, YTDLP_CACHE_DIR, AUDIO_CACHE_DIR]) {
   fs.mkdirSync(dir, {recursive: true});
 }
 if (!process.env.MUSIC_DIR?.trim()) {
@@ -174,6 +177,25 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_lyrics_cache_updated ON lyrics_cache(updated_at);
+
+  -- Adapted from Soundsible (MIT, (c) 2026 Arzuparreta)
+  CREATE TABLE IF NOT EXISTS stream_url_cache (
+    video_id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    egress TEXT NOT NULL DEFAULT 'direct',
+    resolved_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    headers_json TEXT NOT NULL DEFAULT '{}',
+    strategy TEXT NOT NULL DEFAULT 'default',
+    content_type TEXT NOT NULL DEFAULT 'audio/mp4',
+    content_length INTEGER,
+    duration INTEGER,
+    client_param TEXT,
+    format_id TEXT,
+    used_format_headers INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_stream_url_cache_expires ON stream_url_cache(expires_at);
 `);
 
 // Safe incremental migrations for existing databases
@@ -356,4 +378,119 @@ export function getRecentPlayHistory(userId: number, limit = 30): PlayHistoryRow
   const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
   return getRecentPlayHistoryStmt.all(userId, safeLimit) as PlayHistoryRow[];
 }
+
+// ---------------------------------------------------------------------------
+// Durable Resolved Stream URL Cache
+// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/db/media_cache.py
+// ---------------------------------------------------------------------------
+
+export interface StreamUrlCacheRow {
+  video_id: string;
+  url: string;
+  egress: string;
+  resolved_at: number;
+  expires_at: number;
+  headers_json: string;
+  strategy: string;
+  content_type: string;
+  content_length: number | null;
+  duration: number | null;
+  client_param: string | null;
+  format_id: string | null;
+  used_format_headers: number;
+}
+
+const getStreamUrlCacheStmt = db.prepare(
+  `SELECT video_id, url, egress, resolved_at, expires_at,
+          headers_json, strategy, content_type, content_length,
+          duration, client_param, format_id, used_format_headers
+   FROM stream_url_cache
+   WHERE video_id = ? AND egress = ? AND expires_at > ?`
+);
+
+const upsertStreamUrlCacheStmt = db.prepare(
+  `INSERT INTO stream_url_cache (
+     video_id, url, egress, resolved_at, expires_at,
+     headers_json, strategy, content_type, content_length,
+     duration, client_param, format_id, used_format_headers
+   )
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(video_id) DO UPDATE SET
+     url = excluded.url,
+     egress = excluded.egress,
+     resolved_at = excluded.resolved_at,
+     expires_at = excluded.expires_at,
+     headers_json = excluded.headers_json,
+     strategy = excluded.strategy,
+     content_type = excluded.content_type,
+     content_length = excluded.content_length,
+     duration = excluded.duration,
+     client_param = excluded.client_param,
+     format_id = excluded.format_id,
+     used_format_headers = excluded.used_format_headers`
+);
+
+const deleteStreamUrlCacheStmt = db.prepare(
+  'DELETE FROM stream_url_cache WHERE video_id = ?'
+);
+
+const pruneStreamUrlCacheStmt = db.prepare(
+  'DELETE FROM stream_url_cache WHERE expires_at <= ?'
+);
+
+export function getCachedStreamUrlRow(
+  videoId: string,
+  egress: string,
+  safetyMarginSec = 60
+): StreamUrlCacheRow | null {
+  if (!videoId || !egress) return null;
+  const nowSec = Date.now() / 1000 + Math.max(0, safetyMarginSec);
+  const row = getStreamUrlCacheStmt.get(videoId, egress, nowSec) as StreamUrlCacheRow | undefined;
+  return row ?? null;
+}
+
+export function setCachedStreamUrlRow(entry: {
+  videoId: string;
+  url: string;
+  egress: string;
+  resolvedAtSec: number;
+  expiresAtSec: number;
+  headers: Record<string, string>;
+  strategy: string;
+  contentType: string;
+  contentLength: number | null;
+  duration: number | null;
+  clientParam: string | null;
+  formatId: string | null;
+  usedFormatHeaders: boolean;
+}): void {
+  if (!entry.videoId || !entry.url || !entry.egress) return;
+  if (!Number.isFinite(entry.expiresAtSec) || entry.expiresAtSec <= Date.now() / 1000) return;
+  upsertStreamUrlCacheStmt.run(
+    entry.videoId,
+    entry.url,
+    entry.egress,
+    entry.resolvedAtSec,
+    entry.expiresAtSec,
+    JSON.stringify(entry.headers || {}),
+    entry.strategy || 'default',
+    entry.contentType || 'audio/mp4',
+    entry.contentLength,
+    entry.duration,
+    entry.clientParam,
+    entry.formatId,
+    entry.usedFormatHeaders ? 1 : 0
+  );
+}
+
+export function invalidateCachedStreamUrlRow(videoId: string): void {
+  if (!videoId) return;
+  deleteStreamUrlCacheStmt.run(videoId);
+}
+
+export function pruneExpiredStreamUrlCache(): number {
+  const result = pruneStreamUrlCacheStmt.run(Date.now() / 1000);
+  return result.changes || 0;
+}
+
 

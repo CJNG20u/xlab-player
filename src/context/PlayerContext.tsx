@@ -8,6 +8,7 @@ import {
   getTrackCoverUrl,
   getTrackStreamUrl,
   getYouTubeVideoId,
+  prefetchVideoIds,
   prefetchYouTubeStreams,
   recordPlaybackHistory,
 } from '../lib/api';
@@ -345,35 +346,66 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     };
   }, [queue, currentIndex, repeat, offlineStoreVersion]);
 
-  // Immediately prefetch the next streamed track in the queue as soon as a track starts playing
-  // so skipping or auto-advancing starts with zero resolution delay.
+  // Immediately prefetch the next 1-2 queued online tracks when a track starts playing
+  // so ad-gate polling and disk cache warm-up complete before auto-advance or Skip.
   const lastPrefetchedStreamKeyRef = useRef<string>('');
   useEffect(() => {
     if (!currentTrack || currentIndex < 0 || queue.length <= 1) return;
     if (repeat === 'one' || shuffle) return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
-    let nextItem: Track | null = null;
-    if (currentIndex + 1 < queue.length) {
-      nextItem = queue[currentIndex + 1];
-    } else if (repeat === 'all') {
-      nextItem = queue[0];
+    const upcomingOnline: Track[] = [];
+    const seenTrackKeys = new Set<string>([String(currentTrack.id)]);
+    for (let offset = 1; offset <= 2; offset += 1) {
+      let candidateIdx = currentIndex + offset;
+      if (candidateIdx >= queue.length) {
+        if (repeat === 'all') {
+          candidateIdx = candidateIdx % queue.length;
+        } else {
+          break;
+        }
+      }
+      if (candidateIdx === currentIndex) break;
+      const item = queue[candidateIdx];
+      if (!item || !item.isYouTubeStream) continue;
+      const key = String(item.id);
+      if (seenTrackKeys.has(key)) continue;
+      seenTrackKeys.add(key);
+      upcomingOnline.push(item);
     }
-    if (!nextItem || !nextItem.isYouTubeStream) return;
 
-    const videoId = getYouTubeVideoId(nextItem) || undefined;
-    const dedupKey = `${String(currentTrack.id)}=>${videoId || `${nextItem.artist}::${nextItem.title}`}`;
+    if (upcomingOnline.length === 0) return;
+
+    const directVideoIds: string[] = [];
+    const metadataTargets: Array<{artist: string; title: string; duration?: number}> = [];
+    const sigParts: string[] = [];
+
+    for (const item of upcomingOnline) {
+      const vid = getYouTubeVideoId(item);
+      if (vid) {
+        directVideoIds.push(vid);
+        sigParts.push(`vid:${vid}`);
+      } else if (item.title?.trim()) {
+        metadataTargets.push({
+          artist: item.artist,
+          title: item.title,
+          duration: item.duration,
+        });
+        sigParts.push(`meta:${item.artist}::${item.title}`);
+      }
+    }
+
+    if (sigParts.length === 0) return;
+    const dedupKey = `${String(currentTrack.id)}=>${sigParts.join('|')}`;
     if (lastPrefetchedStreamKeyRef.current === dedupKey) return;
     lastPrefetchedStreamKeyRef.current = dedupKey;
 
-    prefetchYouTubeStreams([
-      {
-        videoId,
-        artist: nextItem.artist,
-        title: nextItem.title,
-        duration: nextItem.duration,
-      },
-    ]);
+    if (directVideoIds.length > 0) {
+      prefetchVideoIds(directVideoIds, true);
+    }
+    if (metadataTargets.length > 0) {
+      prefetchYouTubeStreams(metadataTargets);
+    }
   }, [currentTrack, currentIndex, queue, repeat, shuffle]);
 
   // Silently prefetch the next track in the queue once the current track reaches 50% playback
