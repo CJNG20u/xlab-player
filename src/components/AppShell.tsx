@@ -45,7 +45,7 @@ import {QueueDrawer} from './QueueDrawer';
 
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
-  const {theme, isLight, isAppleStyle, isTidal} = useTheme();
+  const {theme} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -132,7 +132,7 @@ export const AppShell: React.FC = () => {
     location.pathname === '/discover' ||
     location.pathname === '/search' ||
     location.pathname.startsWith('/playlists');
-  const stageTint = currentTrack?.dominant_color || (isAppleStyle ? '#4a1822' : '#1c3b29');
+  const stageTint = currentTrack?.dominant_color || '#1c3b29';
   const isCurrentYouTube = Boolean(currentTrack?.isYouTubeStream);
   const currentYtSaveStatus =
     currentTrack && isCurrentYouTube ? getYouTubeSaveStatus(currentTrack.id) : 'idle';
@@ -163,33 +163,16 @@ export const AppShell: React.FC = () => {
     {to: '/settings', label: 'Settings', icon: Settings, end: false},
   ];
 
-  const miniPlayerSurfaceStyle: React.CSSProperties =
-    theme === 'spotify-dark'
-      ? {
-          background: `linear-gradient(90deg, ${stageTint} 0%, #1c1c1c 100%)`,
-          touchAction: 'pan-y',
-        }
-      : {
-          touchAction: 'pan-y',
-        };
+  const miniPlayerSurfaceStyle = {
+    '--stage-tint': stageTint,
+    touchAction: 'pan-y',
+  } as React.CSSProperties;
 
   const miniPlayerClassName =
-    theme === 'apple-light'
-      ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-2xl bg-white/85 backdrop-blur-xl border border-black/[0.08] shadow-[0_8px_28px_rgba(0,0,0,0.12)] overflow-hidden select-none'
-      : theme === 'apple-dark'
-        ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-2xl bg-[#1C1C1E]/80 backdrop-blur-xl border border-white/[0.12] shadow-2xl overflow-hidden select-none'
-        : theme === 'tidal-dark'
-          ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-xl bg-[#111111]/95 backdrop-blur-xl border border-white/[0.08] shadow-2xl overflow-hidden select-none'
-          : 'md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden select-none';
+    'md:hidden fixed left-[var(--miniplayer-inset)] right-[var(--miniplayer-inset)] bottom-above-nav z-30 h-[64px] rounded-[var(--miniplayer-radius)] [background:var(--miniplayer-bg)] backdrop-blur-xl border border-[var(--miniplayer-border)] shadow-[var(--miniplayer-shadow)] overflow-hidden select-none';
 
   const bottomNavClassName =
-    theme === 'apple-light'
-      ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-white/85 backdrop-blur-xl border-t border-black/[0.08]'
-      : theme === 'apple-dark'
-        ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[#1C1C1E]/80 backdrop-blur-xl border-t border-white/[0.10]'
-        : theme === 'tidal-dark'
-          ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[#060608]/95 backdrop-blur-xl border-t border-white/[0.08]'
-          : 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--bg-glass)] backdrop-blur-md border-t border-[var(--border-subtle)]';
+    'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--nav-bg)] backdrop-blur-xl border-t border-[var(--nav-border)]';
 
   return (
     <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
@@ -333,11 +316,7 @@ export const AppShell: React.FC = () => {
       </div>
 
       {/* Desktop Fixed Bottom Playback Bar (90px) */}
-      <footer
-        className={`hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(220px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] px-4 z-30 ${
-          isAppleStyle ? 'bg-[var(--bg-glass)] backdrop-blur-xl' : 'bg-[var(--bg-secondary)]'
-        }`}
-      >
+      <footer className="hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(220px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] bg-[var(--footer-bg)] backdrop-blur-xl px-4 z-30">
         {/* Left: Mini Cover + Title + Artist + Heart */}
         <div className="flex items-center gap-3.5 min-w-0">
           {currentTrack ? (
@@ -382,13 +361,7 @@ export const AppShell: React.FC = () => {
                     </button>
                   )}
                   {isCurrentYouTube && (
-                    <span
-                      className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
-                        isTidal
-                          ? 'border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
-                          : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-                      }`}
-                    >
+                    <span className="shrink-0 rounded border border-[var(--badge-source-border)] bg-[var(--badge-source-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--badge-source-text)]">
                       Web
                     </span>
                   )}
@@ -621,6 +594,7 @@ export const AppShell: React.FC = () => {
         >
           <div className="flex h-full items-center gap-3 px-3">
             <button
+              ref={miniPlayerSwipe.ref}
               type="button"
               onClick={() => {
                 if (miniPlayerSwipe.shouldSuppressClick()) return;
@@ -638,31 +612,15 @@ export const AppShell: React.FC = () => {
                 iconSize={18}
               />
               <div className="min-w-0 flex-1">
-                <p
-                  className={`text-sm font-semibold truncate ${
-                    theme === 'apple-light' ? 'text-[#1C1C1E]' : 'text-white'
-                  }`}
-                >
+                <p className="text-sm font-semibold truncate text-[var(--miniplayer-text)]">
                   {currentTrack.title}
                 </p>
                 <div className="flex items-center gap-1.5 min-w-0">
-                  <p
-                    className={`text-xs truncate ${
-                      theme === 'apple-light' ? 'text-[#6E6E73]' : 'text-white/75'
-                    }`}
-                  >
+                  <p className="text-xs truncate text-[var(--miniplayer-subtext)]">
                     {currentTrack.artist}
                   </p>
                   {isCurrentYouTube && (
-                    <span
-                      className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
-                        isTidal
-                          ? 'border border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
-                          : theme === 'apple-light'
-                            ? 'bg-black/[0.07] text-[#6E6E73]'
-                            : 'bg-white/15 text-white/85'
-                      }`}
-                    >
+                    <span className="shrink-0 rounded border border-[var(--miniplayer-badge-border)] bg-[var(--miniplayer-badge-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--miniplayer-badge-text)]">
                       Web
                     </span>
                   )}
@@ -680,9 +638,7 @@ export const AppShell: React.FC = () => {
                   className={`flex h-11 w-11 items-center justify-center ${
                     currentYtSaveStatus === 'saved'
                       ? 'text-[var(--accent)]'
-                      : theme === 'apple-light'
-                        ? 'text-[#6E6E73]'
-                        : 'text-white/85'
+                      : 'text-[var(--miniplayer-icon)]'
                   }`}
                   title={
                     currentYtSaveStatus === 'saved'
@@ -708,9 +664,7 @@ export const AppShell: React.FC = () => {
                 className={`flex h-11 w-11 items-center justify-center ${
                   currentTrack.liked
                     ? 'text-[var(--accent)]'
-                    : theme === 'apple-light'
-                      ? 'text-[#6E6E73]'
-                      : 'text-white/80'
+                    : 'text-[var(--miniplayer-icon)]'
                 }`}
                 aria-label="Like track"
               >
@@ -721,9 +675,7 @@ export const AppShell: React.FC = () => {
               type="button"
               data-no-swipe="true"
               onClick={togglePlay}
-              className={`flex h-11 w-11 items-center justify-center ${
-                theme === 'apple-light' ? 'text-[#1C1C1E]' : 'text-white'
-              }`}
+              className="flex h-11 w-11 items-center justify-center text-[var(--miniplayer-text)]"
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? (
@@ -734,11 +686,7 @@ export const AppShell: React.FC = () => {
             </button>
           </div>
           {/* Thin progress strip along bottom of mini-player */}
-          <div
-            className={`absolute bottom-0 left-0 right-0 h-[2px] ${
-              theme === 'apple-light' ? 'bg-black/10' : 'bg-white/15'
-            }`}
-          >
+          <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[var(--miniplayer-progress-track)]">
             <div
               className="h-full bg-[var(--accent)] transition-[width] duration-150"
               style={{width: `${progressPct}%`}}

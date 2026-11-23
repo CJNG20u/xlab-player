@@ -24,6 +24,8 @@ export interface SwipeTrackGestureResult {
   pendingDirection: 'next' | 'prev' | null;
   /** Returns true if a swipe just completed (use to suppress click-to-navigate on mini-player). */
   shouldSuppressClick: () => boolean;
+  /** Optional ref for call sites where pointer handlers and animated element are separate DOM nodes. */
+  ref: (node: HTMLElement | null) => void;
   style: React.CSSProperties;
   handlers: {
     onPointerDown: (e: React.PointerEvent<HTMLElement>) => void;
@@ -31,6 +33,27 @@ export interface SwipeTrackGestureResult {
     onPointerUp: (e: React.PointerEvent<HTMLElement>) => void;
     onPointerCancel: (e: React.PointerEvent<HTMLElement>) => void;
   };
+}
+
+const SPRING_BACK_TRANSITION =
+  'transform 250ms cubic-bezier(0.22, 1, 0.36, 1), opacity 250ms ease-out';
+const EXITING_TRANSITION =
+  'transform 170ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease-out';
+const ENTERING_TRANSITION =
+  'transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease-out';
+
+function getPhaseTransition(phase: AnimationPhase): string {
+  if (phase === 'spring-back') return SPRING_BACK_TRANSITION;
+  if (phase === 'exiting') return EXITING_TRANSITION;
+  if (phase === 'entering') return ENTERING_TRANSITION;
+  return 'none';
+}
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
 export function useSwipeTrackGesture({
@@ -43,8 +66,12 @@ export function useSwipeTrackGesture({
   slideDistance = 360,
 }: UseSwipeTrackGestureOptions): SwipeTrackGestureResult {
   const [phase, setPhase] = useState<AnimationPhase>('idle');
-  const [offsetX, setOffsetX] = useState(0);
-  const [opacity, setOpacity] = useState(1);
+
+  const phaseRef = useRef<AnimationPhase>('idle');
+  const offsetXRef = useRef(0);
+  const opacityRef = useRef(1);
+  const explicitElRef = useRef<HTMLElement | null>(null);
+  const fallbackElRef = useRef<HTMLElement | null>(null);
 
   const pointerIdRef = useRef<number | null>(null);
   const startXRef = useRef(0);
@@ -56,8 +83,37 @@ export function useSwipeTrackGesture({
   const suppressClickUntilRef = useRef(0);
   const exitTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
+  const dragRafRef = useRef<number | null>(null);
   const raf1Ref = useRef<number | null>(null);
   const raf2Ref = useRef<number | null>(null);
+
+  const ref = useCallback((node: HTMLElement | null) => {
+    explicitElRef.current = node;
+  }, []);
+
+  const getTargetEl = useCallback((): HTMLElement | null => {
+    return explicitElRef.current ?? fallbackElRef.current;
+  }, []);
+
+  const applyElementStyles = useCallback(
+    (dx: number, opacity: number, nextPhase: AnimationPhase) => {
+      const el = getTargetEl();
+      if (!el) return;
+      const rotation = dx * rotationFactor;
+      el.style.transition = getPhaseTransition(nextPhase);
+      el.style.transform = `translateX(${dx}px) rotate(${rotation}deg)`;
+      el.style.opacity = String(opacity);
+      el.style.willChange = nextPhase === 'idle' ? 'auto' : 'transform, opacity';
+    },
+    [getTargetEl, rotationFactor]
+  );
+
+  const commitPhase = useCallback((nextPhase: AnimationPhase) => {
+    if (phaseRef.current !== nextPhase) {
+      phaseRef.current = nextPhase;
+      setPhase(nextPhase);
+    }
+  }, []);
 
   const clearTimers = useCallback(() => {
     if (exitTimerRef.current !== null) {
@@ -67,6 +123,10 @@ export function useSwipeTrackGesture({
     if (settleTimerRef.current !== null) {
       window.clearTimeout(settleTimerRef.current);
       settleTimerRef.current = null;
+    }
+    if (dragRafRef.current !== null) {
+      window.cancelAnimationFrame(dragRafRef.current);
+      dragRafRef.current = null;
     }
     if (raf1Ref.current !== null) {
       window.cancelAnimationFrame(raf1Ref.current);
@@ -80,6 +140,14 @@ export function useSwipeTrackGesture({
 
   useEffect(() => clearTimers, [clearTimers]);
 
+  const scheduleDragVisuals = useCallback(() => {
+    if (dragRafRef.current !== null) return;
+    dragRafRef.current = window.requestAnimationFrame(() => {
+      dragRafRef.current = null;
+      applyElementStyles(offsetXRef.current, opacityRef.current, phaseRef.current);
+    });
+  }, [applyElementStyles]);
+
   const resetPointerTracking = useCallback(() => {
     pointerIdRef.current = null;
     axisLockRef.current = 'none';
@@ -88,27 +156,50 @@ export function useSwipeTrackGesture({
 
   const triggerSpringBack = useCallback(() => {
     clearTimers();
-    setPhase('spring-back');
-    setOffsetX(0);
-    setOpacity(1);
+    offsetXRef.current = 0;
+    opacityRef.current = 1;
+
+    if (prefersReducedMotion()) {
+      applyElementStyles(0, 1, 'idle');
+      commitPhase('idle');
+      return;
+    }
+
+    applyElementStyles(0, 1, 'spring-back');
+    commitPhase('spring-back');
     settleTimerRef.current = window.setTimeout(() => {
-      setPhase('idle');
+      applyElementStyles(0, 1, 'idle');
+      commitPhase('idle');
       settleTimerRef.current = null;
     }, 260);
-  }, [clearTimers]);
+  }, [applyElementStyles, clearTimers, commitPhase]);
 
   const triggerSlideSkip = useCallback(
     (direction: 'next' | 'prev') => {
       clearTimers();
       suppressClickUntilRef.current = Date.now() + 350;
 
+      if (prefersReducedMotion()) {
+        offsetXRef.current = 0;
+        opacityRef.current = 1;
+        applyElementStyles(0, 1, 'idle');
+        commitPhase('idle');
+        if (direction === 'next') {
+          onSwipeNext();
+        } else {
+          onSwipePrev();
+        }
+        return;
+      }
+
       // Slide current cover out toward the swipe direction
       const exitX = direction === 'next' ? -slideDistance : slideDistance;
       const enterStartX = direction === 'next' ? slideDistance * 0.75 : -slideDistance * 0.75;
 
-      setPhase('exiting');
-      setOffsetX(exitX);
-      setOpacity(0);
+      offsetXRef.current = exitX;
+      opacityRef.current = 0;
+      applyElementStyles(exitX, 0, 'exiting');
+      commitPhase('exiting');
 
       exitTimerRef.current = window.setTimeout(() => {
         exitTimerRef.current = null;
@@ -120,27 +211,30 @@ export function useSwipeTrackGesture({
         }
 
         // Jump instantaneously to the opposite edge with transition disabled
-        setPhase('entering-prep');
-        setOffsetX(enterStartX);
-        setOpacity(0);
+        offsetXRef.current = enterStartX;
+        opacityRef.current = 0;
+        applyElementStyles(enterStartX, 0, 'entering-prep');
+        commitPhase('entering-prep');
 
         // Wait two frames so the browser commits the starting transform before animating in
         raf1Ref.current = window.requestAnimationFrame(() => {
           raf1Ref.current = null;
           raf2Ref.current = window.requestAnimationFrame(() => {
             raf2Ref.current = null;
-            setPhase('entering');
-            setOffsetX(0);
-            setOpacity(1);
+            offsetXRef.current = 0;
+            opacityRef.current = 1;
+            applyElementStyles(0, 1, 'entering');
+            commitPhase('entering');
             settleTimerRef.current = window.setTimeout(() => {
-              setPhase('idle');
+              applyElementStyles(0, 1, 'idle');
+              commitPhase('idle');
               settleTimerRef.current = null;
             }, 340);
           });
         });
       }, 170);
     },
-    [clearTimers, onSwipeNext, onSwipePrev, slideDistance]
+    [applyElementStyles, clearTimers, commitPhase, onSwipeNext, onSwipePrev, slideDistance]
   );
 
   const onPointerDown = useCallback(
@@ -151,8 +245,9 @@ export function useSwipeTrackGesture({
       const target = e.target as HTMLElement | null;
       if (target && target.closest('[data-no-swipe="true"]')) return;
       // Ignore if an exit/enter skip animation is already running
-      if (phase === 'exiting' || phase === 'entering-prep') return;
+      if (phaseRef.current === 'exiting' || phaseRef.current === 'entering-prep') return;
 
+      fallbackElRef.current = e.currentTarget;
       clearTimers();
       pointerIdRef.current = e.pointerId;
       startXRef.current = e.clientX;
@@ -162,7 +257,7 @@ export function useSwipeTrackGesture({
       velocityXRef.current = 0;
       axisLockRef.current = 'none';
     },
-    [clearTimers, phase]
+    [clearTimers]
   );
 
   const onPointerMove = useCallback(
@@ -203,11 +298,19 @@ export function useSwipeTrackGesture({
       lastXRef.current = e.clientX;
       lastTimeRef.current = now;
 
-      setPhase('dragging');
-      setOffsetX(dx);
-      setOpacity(1 - Math.min(absDx / 500, 0.25));
+      if (prefersReducedMotion()) {
+        offsetXRef.current = 0;
+        opacityRef.current = 1;
+        commitPhase('dragging');
+        return;
+      }
+
+      offsetXRef.current = dx;
+      opacityRef.current = 1 - Math.min(absDx / 500, 0.25);
+      commitPhase('dragging');
+      scheduleDragVisuals();
     },
-    [deadZone]
+    [commitPhase, deadZone, scheduleDragVisuals]
   );
 
   const finishGesture = useCallback(
@@ -270,38 +373,32 @@ export function useSwipeTrackGesture({
   }, []);
 
   const isDragging = phase === 'dragging';
-  const rotation = offsetX * rotationFactor;
-
-  let transition = 'none';
-  if (phase === 'spring-back') {
-    transition = 'transform 250ms cubic-bezier(0.22, 1, 0.36, 1), opacity 250ms ease-out';
-  } else if (phase === 'exiting') {
-    transition = 'transform 170ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease-out';
-  } else if (phase === 'entering') {
-    transition = 'transform 320ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease-out';
-  }
+  const currentOffsetX = offsetXRef.current;
+  const rotation = currentOffsetX * rotationFactor;
+  const transition = getPhaseTransition(phase);
 
   const pendingDirection: 'next' | 'prev' | null = isDragging
-    ? offsetX <= -threshold
+    ? currentOffsetX <= -threshold
       ? 'next'
-      : offsetX >= threshold
+      : currentOffsetX >= threshold
         ? 'prev'
         : null
     : null;
 
   const style: React.CSSProperties = {
     touchAction: 'pan-y',
-    transform: `translateX(${offsetX}px) rotate(${rotation}deg)`,
-    opacity,
+    transform: `translateX(${currentOffsetX}px) rotate(${rotation}deg)`,
+    opacity: opacityRef.current,
     transition,
     willChange: phase === 'idle' ? 'auto' : 'transform, opacity',
   };
 
   return {
     isDragging,
-    deltaX: offsetX,
+    deltaX: currentOffsetX,
     pendingDirection,
     shouldSuppressClick,
+    ref,
     style,
     handlers: {
       onPointerDown,

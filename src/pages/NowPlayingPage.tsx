@@ -395,14 +395,8 @@ export const NowPlayingPage: React.FC = () => {
 
   return (
     <div
-      className="relative min-h-full w-full overflow-hidden flex flex-col pt-safe"
-      style={{
-        background: isTidal
-          ? '#000000'
-          : isLight
-            ? `linear-gradient(180deg, ${dominantTopHexColor} 0%, #FFFFFF 76%)`
-            : `linear-gradient(180deg, ${dominantTopHexColor} 0%, var(--bg-primary) 72%)`,
-      }}
+      className="relative min-h-full w-full overflow-hidden flex flex-col pt-safe [background:var(--np-canvas-bg)]"
+      style={{'--np-top-hex': dominantTopHexColor} as React.CSSProperties}
     >
       {actionToast && (
         <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
@@ -425,22 +419,13 @@ export const NowPlayingPage: React.FC = () => {
       {/* Blurred album cover backdrop */}
       {coverUrl && (
         <div
-          className={`pointer-events-none absolute inset-0 blur-3xl scale-110 bg-cover bg-center ${
-            isTidal ? 'opacity-10' : isLight ? 'opacity-15' : 'opacity-20'
-          }`}
+          className="pointer-events-none absolute inset-0 blur-3xl scale-110 bg-cover bg-center opacity-[var(--np-backdrop-opacity)]"
           style={{backgroundImage: `url("${coverUrl}")`}}
           aria-hidden="true"
         />
       )}
       <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background: isTidal
-            ? 'linear-gradient(180deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.35) 38%, #000000 100%)'
-            : isLight
-              ? 'linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.68) 60%, #FFFFFF 100%)'
-              : 'linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg-primary) 62%, transparent) 60%, var(--bg-primary) 100%)',
-        }}
+        className="pointer-events-none absolute inset-0 [background:var(--np-scrim)]"
         aria-hidden="true"
       />
 
@@ -450,11 +435,7 @@ export const NowPlayingPage: React.FC = () => {
           <button
             type="button"
             onClick={() => navigate(-1)}
-            className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors ${
-              isLight
-                ? 'bg-white/75 backdrop-blur-md border border-black/[0.08] text-[#1C1C1E] hover:bg-white'
-                : 'bg-black/30 text-white hover:bg-black/50'
-            }`}
+            className="flex h-11 w-11 items-center justify-center rounded-full backdrop-blur-md border border-[var(--np-pill-border)] bg-[var(--np-pill-bg)] text-[var(--np-pill-text)] hover:bg-[var(--np-pill-bg-hover)] transition-colors"
             aria-label="Back"
           >
             <ChevronDown className="w-6 h-6" />
@@ -477,9 +458,7 @@ export const NowPlayingPage: React.FC = () => {
               className={`flex h-11 px-3.5 items-center gap-2 rounded-full text-xs font-semibold transition-colors ${
                 lyricsOpen
                   ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-md'
-                  : isLight
-                    ? 'bg-white/75 backdrop-blur-md border border-black/[0.08] text-[#1C1C1E] hover:bg-white'
-                    : 'bg-black/30 text-white hover:bg-black/50'
+                  : 'backdrop-blur-md border border-[var(--np-pill-border)] bg-[var(--np-pill-bg)] text-[var(--np-pill-text)] hover:bg-[var(--np-pill-bg-hover)]'
               }`}
               aria-label="Toggle Lyrics"
             >
@@ -502,9 +481,7 @@ export const NowPlayingPage: React.FC = () => {
                 className={`flex h-11 px-3.5 items-center gap-2 rounded-full text-xs font-semibold transition-colors ${
                   radioMode
                     ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-md'
-                    : isLight
-                      ? 'bg-white/75 backdrop-blur-md border border-black/[0.08] text-[#1C1C1E] hover:bg-white'
-                      : 'bg-black/30 text-white hover:bg-black/50'
+                    : 'backdrop-blur-md border border-[var(--np-pill-border)] bg-[var(--np-pill-bg)] text-[var(--np-pill-text)] hover:bg-[var(--np-pill-bg-hover)]'
                 }`}
                 aria-label={radioMode ? 'Stop Radio' : 'Start Radio'}
               >
@@ -515,11 +492,7 @@ export const NowPlayingPage: React.FC = () => {
             <button
               type="button"
               onClick={() => setQueueOpen(true)}
-              className={`flex h-11 px-3.5 items-center gap-2 rounded-full text-xs font-semibold transition-colors ${
-                isLight
-                  ? 'bg-white/75 backdrop-blur-md border border-black/[0.08] text-[#1C1C1E] hover:bg-white'
-                  : 'bg-black/30 text-white hover:bg-black/50'
-              }`}
+              className="flex h-11 px-3.5 items-center gap-2 rounded-full text-xs font-semibold backdrop-blur-md border border-[var(--np-pill-border)] bg-[var(--np-pill-bg)] text-[var(--np-pill-text)] hover:bg-[var(--np-pill-bg-hover)] transition-colors"
               aria-label="Open Queue"
             >
               <ListMusic className="w-4 h-4" />
@@ -536,18 +509,10 @@ export const NowPlayingPage: React.FC = () => {
           {lyricsOpen ? (
             <section
               aria-label="Song lyrics"
-              className={`w-full max-w-[340px] sm:max-w-[380px] aspect-square rounded-2xl backdrop-blur-xl border overflow-hidden flex flex-col ${
-                isLight
-                  ? 'bg-white/80 border-black/[0.08] shadow-[0_24px_56px_rgba(0,0,0,0.14)]'
-                  : 'bg-black/45 border-white/12 shadow-2xl'
-              }`}
+              className="w-full max-w-[340px] sm:max-w-[380px] aspect-square rounded-2xl backdrop-blur-xl border border-[var(--np-lyrics-border)] bg-[var(--np-lyrics-bg)] shadow-[var(--np-lyrics-shadow)] overflow-hidden flex flex-col"
             >
               {/* Compact Lyrics Header Bar */}
-              <div
-                className={`flex items-center justify-between px-4 py-2.5 border-b shrink-0 ${
-                  isLight ? 'border-black/[0.06]' : 'border-white/10'
-                }`}
-              >
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--np-lyrics-header-border)] shrink-0">
                 <div className="flex items-center gap-2 min-w-0">
                   <Mic2 className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
                   <span className="font-display text-xs font-bold tracking-wide text-[var(--text-primary)]">
@@ -631,18 +596,10 @@ export const NowPlayingPage: React.FC = () => {
                           }}
                           className={`block w-full text-left font-display leading-snug transition-all duration-200 cursor-pointer focus:outline-none ${
                             isCurrent
-                              ? isTidal
-                                ? 'text-[19px] sm:text-[21px] font-extrabold text-[#00FFFF] drop-shadow-[0_0_16px_rgba(0,255,255,0.35)]'
-                                : isLight
-                                  ? 'text-[19px] sm:text-[21px] font-extrabold text-[#1C1C1E]'
-                                  : 'text-[19px] sm:text-[21px] font-extrabold text-white'
+                              ? 'text-[19px] sm:text-[21px] font-extrabold text-[var(--np-lyric-current)] [filter:var(--np-lyric-current-filter)]'
                               : isPast
-                                ? isLight
-                                  ? 'text-base sm:text-[17px] font-semibold text-black/30 hover:text-black/70'
-                                  : 'text-base sm:text-[17px] font-semibold text-white/35 hover:text-white/75'
-                                : isLight
-                                  ? 'text-base sm:text-[17px] font-semibold text-black/55 hover:text-black/85'
-                                  : 'text-base sm:text-[17px] font-semibold text-white/55 hover:text-white/85'
+                                ? 'text-base sm:text-[17px] font-semibold text-[var(--np-lyric-past)] hover:text-[var(--np-lyric-past-hover)]'
+                                : 'text-base sm:text-[17px] font-semibold text-[var(--np-lyric-future)] hover:text-[var(--np-lyric-future-hover)]'
                           }`}
                         >
                           {line.text}
@@ -655,9 +612,7 @@ export const NowPlayingPage: React.FC = () => {
                     {parsedLyrics.lines.map((line, idx) => (
                       <p
                         key={idx}
-                        className={`font-display text-[15px] sm:text-base leading-relaxed font-medium ${
-                          isLight ? 'text-[#1C1C1E]/90' : 'text-white/90'
-                        }`}
+                        className="font-display text-[15px] sm:text-base leading-relaxed font-medium text-[var(--np-lyric-plain)]"
                       >
                         {line.text}
                       </p>
@@ -678,11 +633,7 @@ export const NowPlayingPage: React.FC = () => {
                 externalUrl={currentTrack.coverUrl}
                 alt={currentTrack.title}
                 color={currentTrack.dominant_color}
-                className={`w-full h-full rounded-2xl pointer-events-none select-none ${
-                  isLight
-                    ? 'shadow-[0_24px_56px_rgba(0,0,0,0.22)] ring-1 ring-black/[0.06]'
-                    : 'shadow-2xl'
-                }`}
+                className="w-full h-full rounded-2xl pointer-events-none select-none shadow-[var(--np-art-shadow)] ring-1 ring-[var(--np-art-ring)]"
                 iconSize={72}
               />
             </div>
@@ -732,13 +683,7 @@ export const NowPlayingPage: React.FC = () => {
                   </p>
                 )}
                 {isYouTubeTrack && (
-                  <span
-                    className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide leading-none ${
-                      isTidal
-                        ? 'border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
-                        : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-                    }`}
-                  >
+                  <span className="inline-flex items-center rounded border border-[var(--badge-source-border)] bg-[var(--badge-source-bg)] px-1.5 py-0.5 text-[10px] font-semibold tracking-wide leading-none text-[var(--badge-source-text)]">
                     Online
                   </span>
                 )}

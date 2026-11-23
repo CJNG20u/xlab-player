@@ -4,6 +4,7 @@ import React, {
   useContext,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
@@ -133,17 +134,44 @@ function getInitialRouteThemeColor(theme: AppTheme): string {
   return getThemeBaseColor(theme);
 }
 
-function applyThemeToDocument(theme: AppTheme): void {
+let themeTransitionTimer: number | null = null;
+
+function applyThemeToDocument(theme: AppTheme, animate = false): void {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
+
+  if (animate) {
+    if (themeTransitionTimer !== null) {
+      window.clearTimeout(themeTransitionTimer);
+      themeTransitionTimer = null;
+    }
+    root.setAttribute('data-theme-transition', '');
+    void root.offsetHeight;
+  }
+
   root.setAttribute('data-theme', theme);
   root.classList.toggle('dark', theme !== 'apple-light');
+
+  const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (themeColorMeta) {
+    const bgPrimary = window.getComputedStyle(root).getPropertyValue('--bg-primary').trim();
+    if (bgPrimary) {
+      themeColorMeta.setAttribute('content', bgPrimary);
+    }
+  }
 
   const statusBarMeta = document.querySelector<HTMLMetaElement>(
     'meta[name="apple-mobile-web-app-status-bar-style"]'
   );
   if (statusBarMeta) {
     statusBarMeta.setAttribute('content', 'black-translucent');
+  }
+
+  if (animate) {
+    themeTransitionTimer = window.setTimeout(() => {
+      root.removeAttribute('data-theme-transition');
+      themeTransitionTimer = null;
+    }, 300);
   }
 }
 
@@ -160,21 +188,29 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export const ThemeProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
   const [theme, setThemeState] = useState<AppTheme>(() => readStoredTheme());
+  const themeRef = useRef<AppTheme>(theme);
+  themeRef.current = theme;
+  const hasAppliedInitialRef = useRef(false);
 
   const setTheme = useCallback((next: AppTheme) => {
+    if (themeRef.current === next) return;
+    themeRef.current = next;
     setThemeState(next);
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, next);
     } catch {
       // ignore storage errors
     }
-    applyThemeToDocument(next);
+    applyThemeToDocument(next, true);
     setDocumentThemeColor(getInitialRouteThemeColor(next));
   }, []);
 
   useLayoutEffect(() => {
-    applyThemeToDocument(theme);
-    setDocumentThemeColor(getInitialRouteThemeColor(theme));
+    if (!hasAppliedInitialRef.current) {
+      hasAppliedInitialRef.current = true;
+      applyThemeToDocument(theme, false);
+      setDocumentThemeColor(getInitialRouteThemeColor(theme));
+    }
   }, [theme]);
 
   const value = useMemo<ThemeContextValue>(

@@ -1230,12 +1230,13 @@ export const PlaylistsLibraryPage: React.FC = () => {
           {/* DYNAMIC GRADIENT HERO HEADER (Home View Only — extends cleanly behind status bar) */}
           {isHomeView ? (
             <div
-              className="relative pt-safe transition-colors duration-500"
-              style={{
-                background: isTidal
-                  ? 'radial-gradient(ellipse 80% 55% at 50% 42%, rgba(0, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0) 70%), #000000'
-                  : `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
-              }}
+              className="relative pt-safe transition-colors duration-500 [background:var(--home-hero-bg)]"
+              style={
+                {
+                  '--hero-top-hex': heroTopHexColor,
+                  '--hero-mid-hex': `${heroTopHexColor}88`,
+                } as React.CSSProperties
+              }
             >
               <div className="px-4 sm:px-6 lg:px-8 pt-4 pb-4 max-w-7xl mx-auto space-y-4">
                 {/* Offline Mode Banner when Disconnected */}
@@ -1290,9 +1291,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                           className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                             isActive
                               ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-sm'
-                              : isLight
-                                ? 'bg-black/[0.06] text-[var(--text-primary)] hover:bg-black/[0.11] border border-black/[0.08]'
-                                : 'bg-black/30 text-white/90 hover:bg-black/45 border border-white/10'
+                              : 'bg-[var(--chip-bg)] text-[var(--chip-text)] hover:bg-[var(--chip-bg-hover)] border border-[var(--chip-border)]'
                           }`}
                         >
                           {pill.label}
@@ -1309,11 +1308,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     {...heroCoverSwipe.handlers}
                     style={heroCoverSwipe.style}
                     aria-label="Swipe left for next track or right for previous track"
-                    className={`relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden ring-1 ring-[var(--border-subtle)] select-none cursor-grab active:cursor-grabbing ${
-                      isLight
-                        ? 'shadow-[0_18px_42px_rgba(0,0,0,0.16)]'
-                        : 'shadow-[0_20px_50px_rgba(0,0,0,0.55)]'
-                    }`}
+                    className="relative z-10 w-[220px] h-[220px] shrink-0 rounded-2xl overflow-hidden ring-1 ring-[var(--border-subtle)] shadow-[var(--home-hero-cover-shadow)] select-none cursor-grab active:cursor-grabbing"
                   >
                     {heroTrack?.cover_file || heroTrack?.coverUrl ? (
                       <AlbumArt
@@ -1426,9 +1421,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors shrink-0 ${
                           selectionMode
                             ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
-                            : isLight
-                              ? 'border-black/[0.12] bg-black/[0.05] text-[var(--text-primary)] hover:bg-black/[0.1]'
-                              : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
+                            : 'border-[var(--action-pill-border)] bg-[var(--action-pill-bg)] text-[var(--action-pill-text)] hover:border-[var(--action-pill-border-hover)] hover:bg-[var(--action-pill-bg-hover)] hover:text-[var(--action-pill-text-hover)]'
                         }`}
                       >
                         <CheckSquare className="w-3.5 h-3.5" />
@@ -1440,11 +1433,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={toggleSelectAll}
-                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors shrink-0 ${
-                          isLight
-                            ? 'border-black/[0.12] bg-black/[0.05] text-[var(--text-primary)] hover:bg-black/[0.1]'
-                            : 'border-white/20 bg-black/25 text-white hover:bg-white/10'
-                        }`}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-[var(--action-pill-border)] bg-[var(--action-pill-bg)] px-3 py-1.5 text-xs font-semibold text-[var(--action-pill-text)] hover:border-[var(--action-pill-border-hover)] hover:bg-[var(--action-pill-bg-hover)] hover:text-[var(--action-pill-text-hover)] transition-colors shrink-0"
                       >
                         {allVisibleSelected ? (
                           <>
@@ -1474,9 +1463,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors shrink-0 ${
                         searchOpen || searchQuery
                           ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
-                          : isLight
-                            ? 'border-black/[0.12] bg-black/[0.05] text-[var(--text-primary)] hover:bg-black/[0.1]'
-                            : 'border-white/20 bg-black/25 text-white/90 hover:border-white/40 hover:text-white'
+                          : 'border-[var(--action-pill-border)] bg-[var(--action-pill-bg)] text-[var(--action-pill-text)] hover:border-[var(--action-pill-border-hover)] hover:bg-[var(--action-pill-bg-hover)] hover:text-[var(--action-pill-text-hover)]'
                       }`}
                       aria-label="Filter tracks"
                       title="Filter tracks"

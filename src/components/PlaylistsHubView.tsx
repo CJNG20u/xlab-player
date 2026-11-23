@@ -671,13 +671,6 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
     }
   };
 
-  // Smooth bottom fade scrim from transparent artwork into the exact active theme canvas
-  const bottomFadeGradient = isLight
-    ? 'linear-gradient(to bottom, transparent 26%, rgba(255, 255, 255, 0.72) 60%, var(--bg-primary) 100%)'
-    : theme === 'apple-dark' || theme === 'tidal-dark'
-      ? 'linear-gradient(to bottom, transparent 28%, rgba(0, 0, 0, 0.65) 62%, var(--bg-primary) 100%)'
-      : 'linear-gradient(to bottom, transparent 28%, rgba(18, 18, 18, 0.62) 62%, var(--bg-primary) 100%)';
-
   const topSafeScrim = isLight
     ? `linear-gradient(to bottom, ${heroTopHex}e6 0%, ${heroTopHex}73 20%, transparent 45%)`
     : `linear-gradient(to bottom, ${heroTopHex}e0 0%, ${heroTopHex}66 20%, transparent 46%)`;
@@ -796,19 +789,14 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
 
         {/* Smooth Bottom Fade into Active Theme Base Canvas (--bg-primary) */}
         <div
-          className="absolute inset-0 pointer-events-none"
-          style={{background: bottomFadeGradient}}
+          className="absolute inset-0 pointer-events-none [background:var(--hub-bottom-fade)]"
           aria-hidden="true"
         />
 
         {/* Top Safe-Area Header Row */}
         <div className="relative z-10 w-full max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 pt-3.5 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <span
-              className={`font-display text-lg sm:text-xl font-extrabold tracking-tight ${
-                isLight ? 'text-[#1C1C1E]' : 'text-white drop-shadow-sm'
-              }`}
-            >
+            <span className="font-display text-lg sm:text-xl font-extrabold tracking-tight text-[var(--hub-header-text)] [filter:var(--hub-header-filter)]">
               {offline ? 'Offline Playlists' : 'Playlists'}
             </span>
           </div>
@@ -817,11 +805,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
             <button
               type="button"
               onClick={onOpenCreatePlaylist}
-              className={`inline-flex h-10 items-center justify-center gap-1.5 rounded-full px-3.5 sm:px-4 text-xs font-bold backdrop-blur-md transition-all whitespace-nowrap shrink-0 ${
-                isLight
-                  ? 'bg-white/80 hover:bg-white text-[#1C1C1E] border border-black/[0.1] shadow-sm'
-                  : 'bg-black/45 hover:bg-black/65 text-white border border-white/15 shadow-md'
-              }`}
+              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full px-3.5 sm:px-4 text-xs font-bold backdrop-blur-md transition-all whitespace-nowrap shrink-0 bg-[var(--hub-btn-bg)] hover:bg-[var(--hub-btn-bg-hover)] text-[var(--hub-btn-text)] border border-[var(--hub-btn-border)] shadow-[var(--hub-btn-shadow)]"
               aria-label="Create Playlist"
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />

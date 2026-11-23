@@ -1,7 +1,6 @@
 import {ArrowDown, ArrowUp, ListMusic, Loader2, Radio, Sparkles, Trash2, X} from 'lucide-react';
 import React, {useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
-import {useTheme} from '../context/ThemeContext';
 import {formatDuration} from '../lib/api';
 import {AlbumArt} from './AlbumArt';
 
@@ -31,7 +30,6 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
     clearGeneratedQueue,
   } = usePlayer();
 
-  const {isTidal} = useTheme();
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
   if (!open) return null;
@@ -98,13 +96,7 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                       {currentTrack.title}
                     </p>
                     {currentTrack.isYouTubeStream && (
-                      <span
-                        className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
-                          isTidal
-                            ? 'border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
-                            : 'border-[var(--border-strong)] bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
-                        }`}
-                      >
+                      <span className="shrink-0 rounded border border-[var(--badge-source-border)] bg-[var(--badge-source-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--badge-source-text)]">
                         Online
                       </span>
                     )}
@@ -259,22 +251,14 @@ export const QueueDrawer: React.FC<QueueDrawerProps> = ({open, onClose}) => {
                               className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
                                 track.queueSource === 'radio'
                                   ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)]'
-                                  : isTidal
-                                    ? 'border-[rgba(0,255,255,0.3)] bg-[rgba(0,255,255,0.08)] text-[#00FFFF]'
-                                    : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                                  : 'border-[var(--badge-source-border)] bg-[var(--badge-source-bg)] text-[var(--badge-source-text)]'
                               }`}
                             >
                               {track.queueSource === 'radio' ? 'Radio' : 'Autoplay'}
                             </span>
                           )}
                           {track.isYouTubeStream && !track.queueSource && (
-                            <span
-                              className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
-                                isTidal
-                                  ? 'border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
-                                  : 'border-[var(--border-subtle)] bg-[var(--bg-primary)] text-[var(--text-muted)]'
-                              }`}
-                            >
+                            <span className="shrink-0 rounded border border-[var(--badge-queue-border)] bg-[var(--badge-queue-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--badge-queue-text)]">
                               Web
                             </span>
                           )}
