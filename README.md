@@ -7,8 +7,7 @@ Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dl
 ## Features
 Local & NAS Audio Streaming: Streams .m4a, .opus, .flac, .mp3, .ogg, and .wav directly from your local drive or mounted NFS/SMB share with HTTP 206 byte-range seeking and instant library indexing.
 
-On-Demand YouTube & YouTube Music Streaming: Search tracks or paste single/playlist URLs and stream audio directly in the global Now Playing bar—with full track scrubbing, matching yt-dlp session headers, and 30-minute signed URL caching—without needing to download files to disk first.
-
+On-Demand YouTube & YouTube Music Streaming: Search tracks 
 Unified Local & Online Queue: Seamlessly mix local NAS/drive tracks and live YouTube streams inside the same playback queue with Next/Previous skipping and continuous playback.
 
 Gesture-Driven Now Playing & Multi-Theme UI: Switch between custom Spotify and Apple Music visual themes, extract CORS-safe dominant album colors via /api/yt-thumb/:videoId, and skip tracks effortlessly with album-art swipe gestures.
