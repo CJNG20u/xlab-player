@@ -22,7 +22,7 @@ import {
   VolumeX,
   WifiOff,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useState} from 'react';
 import {NavLink, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
@@ -31,7 +31,11 @@ import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
-import {setDocumentThemeColor} from '../lib/themeColor';
+import {
+  getUnifiedPageHeaderGradient,
+  getUnifiedPageHeaderTopHex,
+  setDocumentThemeColor,
+} from '../lib/themeColor';
 import type {Playlist} from '../types';
 import {getOfflinePlaylists, subscribeOfflineStore} from '../utils/offlineStore';
 import {AlbumArt} from './AlbumArt';
@@ -41,7 +45,7 @@ import {QueueDrawer} from './QueueDrawer';
 
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
-  const {theme, isLight, isAppleStyle, baseThemeColor} = useTheme();
+  const {theme, isLight, isAppleStyle} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -139,12 +143,17 @@ export const AppShell: React.FC = () => {
     flashShellToast(res.message);
   }, [currentTrack, flashShellToast, saveYouTubeTrackToLibrary]);
 
-  // Keep mobile status bar synced to the active theme's base color on standard views
-  useEffect(() => {
-    if (!isNowPlayingPage && !isHomePage) {
-      setDocumentThemeColor(baseThemeColor);
+  const usesUnifiedHeader = !isNowPlayingPage && !isHomePage;
+  const unifiedHeaderTopHex = getUnifiedPageHeaderTopHex(theme);
+  const unifiedHeaderGradient = getUnifiedPageHeaderGradient(theme);
+
+  // Synchronously match mobile status bar (`meta[name="theme-color"]` & root/body bg)
+  // to the exact top edge of the unified header gradient on Playlists, Discover, and Settings.
+  useLayoutEffect(() => {
+    if (usesUnifiedHeader) {
+      setDocumentThemeColor(unifiedHeaderTopHex);
     }
-  }, [isNowPlayingPage, isHomePage, baseThemeColor, theme]);
+  }, [usesUnifiedHeader, unifiedHeaderTopHex, location.pathname, theme]);
 
   const navItems = [
     {to: '/', label: 'Home', icon: Home, end: true},
@@ -178,7 +187,7 @@ export const AppShell: React.FC = () => {
         : 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--bg-glass)] backdrop-blur-md border-t border-[var(--border-subtle)]';
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+    <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Main Area: Sidebar (Desktop) + Scrollable Stage */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Desktop Fixed Left Sidebar (240px) */}
@@ -294,14 +303,13 @@ export const AppShell: React.FC = () => {
 
         {/* Main Scrollable Viewport */}
         <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[var(--bg-primary)] relative">
-          {/* Dynamic Subtle Top-to-Bottom Gradient Backdrop */}
+          {/* Unified Full-Bleed Top-to-Bottom Header Gradient Backdrop (starts flush at y=0 behind status bar) */}
           <main
             className="flex-1 overflow-y-auto relative"
             style={{
-              backgroundImage:
-                isNowPlayingPage || isHomePage || isLight
-                  ? undefined
-                  : `linear-gradient(180deg, ${stageTint}44 0%, var(--bg-primary) 260px, var(--bg-primary) 100%)`,
+              backgroundColor: 'var(--bg-primary)',
+              backgroundImage: usesUnifiedHeader ? unifiedHeaderGradient : undefined,
+              backgroundRepeat: 'no-repeat',
             }}
           >
             <div

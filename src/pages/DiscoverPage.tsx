@@ -526,6 +526,7 @@ export const DiscoverPage: React.FC = () => {
   } | null>(null);
 
   const pageRootRef = useRef<HTMLDivElement | null>(null);
+  const searchSentinelRef = useRef<HTMLDivElement | null>(null);
   const metadataEditorRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
@@ -533,6 +534,7 @@ export const DiscoverPage: React.FC = () => {
   const searchRequestIdRef = useRef(0);
   const inFlightTermRef = useRef<string | null>(null);
   const skipNextDebounceTermRef = useRef<string | null>(null);
+  const [searchPinned, setSearchPinned] = useState(false);
 
   const trimmedQuery = query.trim();
   const isUrlInput = /^https?:\/\//i.test(trimmedQuery);
@@ -1184,6 +1186,31 @@ export const DiscoverPage: React.FC = () => {
 
   const isCatalogDetailOpen = Boolean(isDiscoverView && activeCatalogRoute && !offline);
 
+  useEffect(() => {
+    if (isCatalogDetailOpen) {
+      setSearchPinned(false);
+      return;
+    }
+    const sentinel = searchSentinelRef.current;
+    if (!sentinel || typeof IntersectionObserver === 'undefined') {
+      setSearchPinned(false);
+      return;
+    }
+    const scrollRoot = sentinel.closest('main');
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        setSearchPinned(Boolean(entry && !entry.isIntersecting));
+      },
+      {
+        root: scrollRoot,
+        threshold: 0,
+      }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [isCatalogDetailOpen]);
+
   const discoverSubtitle = useMemo(() => {
     const feedArtist = extractDisplayArtist(
       discoverFeed?.lastPlayed?.artist,
@@ -1211,10 +1238,14 @@ export const DiscoverPage: React.FC = () => {
   return (
     <div
       ref={pageRootRef}
-      className="px-4 sm:px-6 lg:px-8 max-w-[1680px] mx-auto space-y-5 pb-36 md:pb-12"
+      className={
+        isCatalogDetailOpen
+          ? 'w-full pb-36 md:pb-12'
+          : 'px-4 sm:px-6 lg:px-8 max-w-[1680px] mx-auto space-y-5 pb-36 md:pb-12'
+      }
       style={{
         paddingTop: isCatalogDetailOpen
-          ? 'calc(0.25rem + env(safe-area-inset-top, 0px))'
+          ? '0px'
           : 'calc(1.25rem + env(safe-area-inset-top, 0px))',
         paddingBottom: 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
       }}
@@ -1259,9 +1290,26 @@ export const DiscoverPage: React.FC = () => {
       </div>
       )}
 
-      {/* Pinned Wide Minimalist Search Input Bar (auto-searches as you type) */}
+      {/* Sentinel for detecting when the search bar pins at top of viewport */}
       {!isCatalogDetailOpen && (
-      <div className="sticky top-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2.5 bg-[var(--bg-glass)] backdrop-blur-md">
+        <div ref={searchSentinelRef} className="h-px w-full -mt-5 pointer-events-none" aria-hidden="true" />
+      )}
+
+      {/* Pinned Wide Minimalist Search Input Bar (transparent over top gradient, frosted glass behind status bar when pinned) */}
+      {!isCatalogDetailOpen && (
+      <div
+        className={`sticky top-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 transition-colors duration-200 ${
+          searchPinned
+            ? 'bg-[var(--bg-glass)] backdrop-blur-xl border-b border-[var(--border-subtle)]'
+            : 'bg-transparent'
+        }`}
+        style={{
+          paddingTop: searchPinned
+            ? 'calc(0.625rem + env(safe-area-inset-top, 0px))'
+            : '0.375rem',
+          paddingBottom: '0.625rem',
+        }}
+      >
         <form onSubmit={handleFetchMetadata}>
           <div className="relative">
             {isUrlInput ? (

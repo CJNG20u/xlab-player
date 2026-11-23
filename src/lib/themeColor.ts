@@ -5,12 +5,48 @@ export const THEME_BASE_COLORS = {
   'apple-light': '#FFFFFF',
 } as const;
 
+// Unified topmost hex at y=0 for Playlists, Discover, and Settings headers so
+// `<meta name="theme-color">`, `html/body` background, and the CSS top gradient
+// match pixel-for-pixel behind `env(safe-area-inset-top)` with zero seam.
+export const THEME_HEADER_TOP_COLORS = {
+  'spotify-dark': '#1c2520',
+  'apple-dark': '#141214',
+  'apple-light': '#f3f3f7',
+} as const;
+
 export function getThemeBaseColor(
   theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
 ): string {
   if (theme === 'apple-dark') return THEME_BASE_COLORS['apple-dark'];
   if (theme === 'apple-light') return THEME_BASE_COLORS['apple-light'];
   return THEME_BASE_COLORS['spotify-dark'];
+}
+
+export function getUnifiedPageHeaderTopHex(
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
+): string {
+  if (theme === 'apple-dark') return THEME_HEADER_TOP_COLORS['apple-dark'];
+  if (theme === 'apple-light') return THEME_HEADER_TOP_COLORS['apple-light'];
+  return THEME_HEADER_TOP_COLORS['spotify-dark'];
+}
+
+export function getUnifiedPageHeaderGradient(
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
+): string {
+  const topHex = getUnifiedPageHeaderTopHex(theme);
+  const baseHex = getThemeBaseColor(theme);
+  return `linear-gradient(180deg, ${topHex} 0%, ${baseHex} 240px, ${baseHex} 100%)`;
+}
+
+export function isUnifiedHeaderPath(pathname: string): boolean {
+  return (
+    pathname === '/playlists' ||
+    pathname.startsWith('/playlists/') ||
+    pathname === '/discover' ||
+    pathname === '/search' ||
+    pathname === '/download' ||
+    pathname === '/settings'
+  );
 }
 
 export function getActiveDocumentBaseThemeColor(): string {

@@ -17,7 +17,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {AlbumArt} from '../components/AlbumArt';
 import {useAuth} from '../context/AuthContext';
@@ -159,14 +159,10 @@ export const NowPlayingPage: React.FC = () => {
     return computeNowPlayingTopHex(effectiveDominantColor);
   }, [baseThemeColor, currentTrack, effectiveDominantColor, isLight]);
 
-  // Dynamically sync mobile status bar (`meta[name="theme-color"]`) with the Now Playing top gradient color,
-  // resetting back to the active theme's base color when Now Playing is minimized or closed.
-  useEffect(() => {
+  // Synchronously sync mobile status bar (`meta[name="theme-color"]`) with the Now Playing top gradient color
+  useLayoutEffect(() => {
     setDocumentThemeColor(dominantTopHexColor);
-    return () => {
-      setDocumentThemeColor(baseThemeColor);
-    };
-  }, [dominantTopHexColor, baseThemeColor]);
+  }, [dominantTopHexColor]);
 
   useEffect(() => {
     setOfflineCoverBackdrop(null);

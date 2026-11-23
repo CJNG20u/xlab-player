@@ -1,5 +1,17 @@
-import React, {createContext, useCallback, useContext, useEffect, useMemo, useState} from 'react';
-import {getThemeBaseColor, setDocumentThemeColor} from '../lib/themeColor';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from 'react';
+import {
+  getThemeBaseColor,
+  getUnifiedPageHeaderTopHex,
+  isUnifiedHeaderPath,
+  setDocumentThemeColor,
+} from '../lib/themeColor';
 
 export type AppTheme = 'spotify-dark' | 'apple-dark' | 'apple-light';
 
@@ -92,6 +104,13 @@ function readStoredTheme(): AppTheme {
   return 'spotify-dark';
 }
 
+function getInitialRouteThemeColor(theme: AppTheme): string {
+  if (typeof window !== 'undefined' && isUnifiedHeaderPath(window.location.pathname)) {
+    return getUnifiedPageHeaderTopHex(theme);
+  }
+  return getThemeBaseColor(theme);
+}
+
 function applyThemeToDocument(theme: AppTheme): void {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
@@ -102,10 +121,7 @@ function applyThemeToDocument(theme: AppTheme): void {
     'meta[name="apple-mobile-web-app-status-bar-style"]'
   );
   if (statusBarMeta) {
-    statusBarMeta.setAttribute(
-      'content',
-      theme === 'apple-light' ? 'default' : 'black-translucent'
-    );
+    statusBarMeta.setAttribute('content', 'black-translucent');
   }
 }
 
@@ -130,12 +146,12 @@ export const ThemeProvider: React.FC<{children: React.ReactNode}> = ({children})
       // ignore storage errors
     }
     applyThemeToDocument(next);
-    setDocumentThemeColor(getThemeBaseColor(next));
+    setDocumentThemeColor(getInitialRouteThemeColor(next));
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     applyThemeToDocument(theme);
-    setDocumentThemeColor(getThemeBaseColor(theme));
+    setDocumentThemeColor(getInitialRouteThemeColor(theme));
   }, [theme]);
 
   const value = useMemo<ThemeContextValue>(

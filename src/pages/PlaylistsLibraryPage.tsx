@@ -23,7 +23,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {useLocation, useNavigate, useParams, useSearchParams} from 'react-router-dom';
 import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
@@ -753,14 +753,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
     viewFallbackColor,
   ]);
 
-  // Dynamically sync mobile PWA top status bar with the top of the Home hero gradient
-  useEffect(() => {
+  // Synchronously sync mobile PWA top status bar with the exact top edge of the Home hero gradient
+  useLayoutEffect(() => {
     if (!isHomeView) return;
     setDocumentThemeColor(heroTopHexColor);
-    return () => {
-      setDocumentThemeColor(baseThemeColor);
-    };
-  }, [baseThemeColor, heroTopHexColor, isHomeView]);
+  }, [heroTopHexColor, isHomeView]);
 
   // Smooth 1:1 horizontal swipe on the Home hero square cover to skip next/previous tracks
   const handleHeroSwipeNext = useCallback(() => {

@@ -31,11 +31,29 @@
           var root = document.documentElement;
           root.setAttribute('data-theme', t);
           root.classList.toggle('dark', t !== 'apple-light');
-          var color = t === 'apple-light' ? '#FFFFFF' : t === 'apple-dark' ? '#000000' : '#121212';
+          var p = (window.location && window.location.pathname) || '/';
+          var isUnified =
+            p === '/playlists' ||
+            p.indexOf('/playlists/') === 0 ||
+            p === '/discover' ||
+            p === '/search' ||
+            p === '/download' ||
+            p === '/settings';
+          var color = isUnified
+            ? t === 'apple-light'
+              ? '#f3f3f7'
+              : t === 'apple-dark'
+                ? '#141214'
+                : '#1c2520'
+            : t === 'apple-light'
+              ? '#FFFFFF'
+              : t === 'apple-dark'
+                ? '#000000'
+                : '#121212';
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute('content', color);
           var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
-          if (appleMeta) appleMeta.setAttribute('content', t === 'apple-light' ? 'default' : 'black-translucent');
+          if (appleMeta) appleMeta.setAttribute('content', 'black-translucent');
           root.style.backgroundColor = color;
         } catch (e) {}
       })();

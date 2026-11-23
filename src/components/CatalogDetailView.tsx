@@ -9,14 +9,23 @@ import {
   Play,
   RefreshCw,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
+import {useTheme} from '../context/ThemeContext';
 import {
   apiFetch,
   formatDuration,
   getCatalogMatchStreamUrl,
   prefetchYouTubeStreams,
 } from '../lib/api';
+import {
+  computeLightTintedTopHex,
+  computeNowPlayingTopHex,
+  extractDominantColorFromImage,
+  getCachedDominantColor,
+  getUnifiedPageHeaderTopHex,
+  setDocumentThemeColor,
+} from '../lib/themeColor';
 import type {
   DiscoverAlbumDetail,
   DiscoverAlbumTrack,
@@ -161,11 +170,15 @@ const ResilientCover: React.FC<ResilientCoverProps> = ({
 interface BlurredArtworkBackdropProps {
   imageUrl?: string;
   fallbackSeed: string;
+  topHexColor: string;
+  isLight: boolean;
 }
 
 const BlurredArtworkBackdrop: React.FC<BlurredArtworkBackdropProps> = ({
   imageUrl,
   fallbackSeed,
+  topHexColor,
+  isLight,
 }) => {
   const [imgError, setImgError] = useState(false);
 
@@ -178,6 +191,7 @@ const BlurredArtworkBackdrop: React.FC<BlurredArtworkBackdropProps> = ({
   return (
     <div
       className="pointer-events-none absolute inset-0 overflow-hidden select-none"
+      style={{backgroundColor: topHexColor}}
       aria-hidden="true"
     >
       {imageUrl && !imgError ? (
@@ -186,7 +200,9 @@ const BlurredArtworkBackdrop: React.FC<BlurredArtworkBackdropProps> = ({
           alt=""
           referrerPolicy="no-referrer"
           onError={() => setImgError(true)}
-          className="h-full w-full object-cover object-center scale-125 blur-3xl opacity-45 saturate-150"
+          className={`h-full w-full object-cover object-center scale-125 blur-3xl saturate-150 ${
+            isLight ? 'opacity-25' : 'opacity-45'
+          }`}
         />
       ) : (
         <div
@@ -199,8 +215,9 @@ const BlurredArtworkBackdrop: React.FC<BlurredArtworkBackdropProps> = ({
       <div
         className="absolute inset-0"
         style={{
-          background:
-            'linear-gradient(180deg, rgba(0,0,0,0.22) 0%, color-mix(in srgb, var(--bg-primary) 68%, transparent) 60%, var(--bg-primary) 100%)',
+          background: isLight
+            ? `linear-gradient(180deg, ${topHexColor} 0%, ${topHexColor}bb 26%, color-mix(in srgb, var(--bg-primary) 72%, transparent) 66%, var(--bg-primary) 100%)`
+            : `linear-gradient(180deg, ${topHexColor} 0%, ${topHexColor}aa 24%, color-mix(in srgb, var(--bg-primary) 64%, transparent) 64%, var(--bg-primary) 100%)`,
         }}
       />
     </div>
@@ -229,6 +246,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   onOpenArtist,
   onFlashToast,
 }) => {
+  const {theme, isLight} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -472,6 +490,59 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
       ? album?.title || route.titleHint || route.id
       : artist?.name || route.nameHint || route.id;
 
+  const heroFallbackColor = useMemo(() => hashTint(heroFallbackSeed), [heroFallbackSeed]);
+  const heroColorCacheKey = useMemo(
+    () => `catalog:${route.type}:${route.id}:${heroImageUrl || 'none'}`,
+    [heroImageUrl, route.id, route.type]
+  );
+
+  const [sampledHeroColor, setSampledHeroColor] = useState<string>(
+    () => getCachedDominantColor(heroColorCacheKey) || heroFallbackColor
+  );
+
+  useEffect(() => {
+    const cached = getCachedDominantColor(heroColorCacheKey);
+    if (cached) {
+      setSampledHeroColor(cached);
+      return;
+    }
+    setSampledHeroColor(heroFallbackColor);
+    if (!heroImageUrl) return;
+
+    let cancelled = false;
+    void extractDominantColorFromImage(
+      heroImageUrl,
+      heroColorCacheKey,
+      undefined,
+      heroFallbackColor
+    ).then((hex) => {
+      if (!cancelled) {
+        setSampledHeroColor(hex);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [heroColorCacheKey, heroFallbackColor, heroImageUrl]);
+
+  const detailTopHexColor = useMemo(() => {
+    if (error) {
+      return getUnifiedPageHeaderTopHex(theme);
+    }
+    return isLight
+      ? computeLightTintedTopHex(sampledHeroColor, 0.22)
+      : computeNowPlayingTopHex(sampledHeroColor);
+  }, [error, isLight, sampledHeroColor, theme]);
+
+  // Synchronously match mobile status bar (`meta[name="theme-color"]` & root/body bg)
+  // to the top edge of the Artist/Album hero backdrop and restore on Back/unmount.
+  useLayoutEffect(() => {
+    setDocumentThemeColor(detailTopHexColor);
+    return () => {
+      setDocumentThemeColor(getUnifiedPageHeaderTopHex(theme));
+    };
+  }, [detailTopHexColor, theme]);
+
   const latestRelease = useMemo(() => {
     if (!artist) return null;
     return artist.latestRelease || artist.albums[0] || null;
@@ -486,9 +557,17 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     <div className="space-y-7">
       {loading ? (
         <div className="space-y-6">
-          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 pt-4 pb-8 overflow-hidden">
-            <BlurredArtworkBackdrop imageUrl={heroImageUrl} fallbackSeed={heroFallbackSeed} />
-            <div className="relative z-10 space-y-6">
+          <div
+            className="relative w-full pb-8 overflow-hidden"
+            style={{paddingTop: 'calc(0.75rem + env(safe-area-inset-top, 0px))'}}
+          >
+            <BlurredArtworkBackdrop
+              imageUrl={heroImageUrl}
+              fallbackSeed={heroFallbackSeed}
+              topHexColor={detailTopHexColor}
+              isLight={isLight}
+            />
+            <div className="relative z-10 max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
               <button
                 type="button"
                 onClick={onBack}
@@ -514,7 +593,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
             </div>
           </div>
 
-          <div className="space-y-2">
+          <div className="max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-2">
             {Array.from({length: 8}).map((_, idx) => (
               <div
                 key={idx}
@@ -524,7 +603,10 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
           </div>
         </div>
       ) : error ? (
-        <div className="space-y-5">
+        <div
+          className="max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-5"
+          style={{paddingTop: 'calc(1rem + env(safe-area-inset-top, 0px))'}}
+        >
           <button
             type="button"
             onClick={onBack}
@@ -554,14 +636,19 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         </div>
       ) : route.type === 'album' && album ? (
         <div className="space-y-6">
-          {/* Album Blurred Cover-Art Hero */}
-          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 -mt-2 px-4 sm:px-6 lg:px-8 pt-4 pb-6 overflow-hidden rounded-b-2xl">
+          {/* Album Full-Bleed Blurred Cover-Art Hero (extends flush to y=0 behind status bar) */}
+          <div
+            className="relative w-full pb-6 overflow-hidden"
+            style={{paddingTop: 'calc(0.75rem + env(safe-area-inset-top, 0px))'}}
+          >
             <BlurredArtworkBackdrop
               imageUrl={album.coverUrl || route.coverHint}
               fallbackSeed={album.title}
+              topHexColor={detailTopHexColor}
+              isLight={isLight}
             />
 
-            <div className="relative z-10 space-y-5">
+            <div className="relative z-10 max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-5">
               {/* Top Back Button */}
               <div className="flex items-center justify-between gap-3">
                 <button
@@ -706,6 +793,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
           </div>
 
           {/* Complete Numbered Album Tracklist */}
+          <div className="max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-4">
           <div className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]">
             {album.tracks.map((track) => {
               const active = isTrackActive(track);
@@ -806,17 +894,23 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               {[album.releaseDate, album.label].filter(Boolean).join(' · ')}
             </p>
           )}
+          </div>
         </div>
       ) : route.type === 'artist' && artist ? (
         <div className="space-y-8">
-          {/* Artist Blurred Artwork Hero */}
-          <div className="relative -mx-4 sm:-mx-6 lg:-mx-8 -mt-2 px-4 sm:px-6 lg:px-8 pt-4 pb-6 overflow-hidden rounded-b-2xl">
+          {/* Artist Full-Bleed Blurred Artwork Hero (extends flush to y=0 behind status bar) */}
+          <div
+            className="relative w-full pb-6 overflow-hidden"
+            style={{paddingTop: 'calc(0.75rem + env(safe-area-inset-top, 0px))'}}
+          >
             <BlurredArtworkBackdrop
               imageUrl={artist.pictureUrl || route.pictureHint}
               fallbackSeed={artist.name}
+              topHexColor={detailTopHexColor}
+              isLight={isLight}
             />
 
-            <div className="relative z-10 space-y-5">
+            <div className="relative z-10 max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-5">
               {/* Top Back Button */}
               <div className="flex items-center justify-between gap-3">
                 <button
@@ -893,6 +987,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
             </div>
           </div>
 
+          <div className="max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
           {/* Highlighted Latest Release Card */}
           {latestRelease && (
             <section className="space-y-3">
@@ -1135,6 +1230,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               </div>
             </section>
           )}
+          </div>
         </div>
       ) : null}
     </div>
