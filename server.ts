@@ -9,11 +9,18 @@ import {Readable} from 'stream';
 import type {ReadableStream as NodeReadableStream} from 'stream/web';
 import {type AuthRequest, requireAuth} from './server/auth.ts';
 import {
+  cacheYouTubeThumbnailUrl,
+  DirectProxyCircuitOpenError,
   enqueueYouTubePrefetch,
+  getCachedYouTubeAudioStream,
   getCachedYouTubeThumbnailUrl,
+  getDirectProxyCircuitCooldownRemainingMs,
   invalidateYouTubeAudioStreamCache,
   isAllowedYouTubeMediaUrl,
+  isDirectProxyCircuitOpen,
   isValidYouTubeVideoId,
+  recordUpstream403Rejection,
+  recordUpstreamDirectSuccess,
   resolveTrackToVideoId,
   resolveYouTubeAudioStreamUrl,
   spawnDirectYouTubeAudioStream,
@@ -130,7 +137,11 @@ async function startServer() {
   app.use('/api/download', downloadRouter);
   app.use('/api/admin', adminRouter);
 
-  // Authenticated YouTube audio stream proxy with 30-min URL cache and HTTP Range forwarding
+  // Authenticated YouTube audio stream proxy with 30-min cache, in-flight deduplication,
+  // adaptive 403 circuit breaker, strict timeouts, and full lifecycle cleanup.
+  const UPSTREAM_FETCH_TIMEOUT_MS = 8_000;
+  const DIRECT_PIPE_STARTUP_TIMEOUT_MS = 15_000;
+
   const streamYouTubeVideoById = async (
     videoId: string,
     req: AuthRequest,
@@ -148,7 +159,83 @@ async function startServer() {
         abortController.abort();
       }
     };
-    res.on('close', onClientClose);
+    res.once('close', onClientClose);
+    res.once('error', onClientClose);
+    req.once('aborted', onClientClose);
+
+    const detachClientListeners = () => {
+      res.off('close', onClientClose);
+      res.off('error', onClientClose);
+      req.off('aborted', onClientClose);
+    };
+
+    const sendHeadHeaders = (opts: {
+      contentType: string;
+      acceptRanges: string;
+      contentLength?: number | string | null;
+      cacheControl: string;
+    }) => {
+      if (res.headersSent || res.writableEnded || res.destroyed) return;
+      res.status(200);
+      res.setHeader('Content-Type', opts.contentType);
+      res.setHeader('Accept-Ranges', opts.acceptRanges);
+      res.setHeader('Vary', 'Range');
+      res.setHeader('Cache-Control', opts.cacheControl);
+      if (opts.contentLength !== undefined && opts.contentLength !== null && opts.contentLength !== '') {
+        res.setHeader('Content-Length', String(opts.contentLength));
+      }
+      res.end();
+    };
+
+    // Safe HEAD probe handling: serve immediately from cache or circuit-breaker metadata,
+    // or await a single deduplicated in-flight resolution without spawning duplicate subprocesses
+    // or fallback pipes.
+    if (isHead) {
+      try {
+        const cached = getCachedYouTubeAudioStream(videoId);
+        if (cached) {
+          sendHeadHeaders({
+            contentType: cached.contentType || 'audio/mp4',
+            acceptRanges: 'bytes',
+            contentLength: cached.contentLength,
+            cacheControl: 'private, max-age=1800',
+          });
+          return;
+        }
+
+        if (isDirectProxyCircuitOpen()) {
+          sendHeadHeaders({
+            contentType: 'audio/mp4',
+            acceptRanges: 'none',
+            cacheControl: 'no-store',
+          });
+          return;
+        }
+
+        try {
+          const resolved = await resolveYouTubeAudioStreamUrl(videoId);
+          if (abortController.signal.aborted) return;
+          sendHeadHeaders({
+            contentType: resolved.contentType || 'audio/mp4',
+            acceptRanges: 'bytes',
+            contentLength: resolved.contentLength,
+            cacheControl: 'private, max-age=1800',
+          });
+        } catch {
+          if (abortController.signal.aborted) return;
+          // Never spawn a fallback child process for a HEAD probe; advertise streamable audio
+          // so the subsequent GET request immediately hands off to the fallback pipe if needed.
+          sendHeadHeaders({
+            contentType: 'audio/mp4',
+            acceptRanges: 'none',
+            cacheControl: 'no-store',
+          });
+        }
+      } finally {
+        detachClientListeners();
+      }
+      return;
+    }
 
     const rawRange = typeof req.headers.range === 'string' ? req.headers.range.trim() : '';
     const safeRange = /^bytes=\d*-\d*(,\s*\d*-\d*)*$/i.test(rawRange) ? rawRange : '';
@@ -162,52 +249,109 @@ async function startServer() {
       if (!hasAccept) {
         headers.Accept = '*/*';
       }
-      if (isHead) {
-        // googlevideo.com frequently rejects HEAD with 403; probe total size via 1-byte GET Range instead.
-        headers.Range = 'bytes=0-0';
-      } else if (safeRange) {
+      if (safeRange) {
         headers.Range = safeRange;
       }
-      return fetch(streamUrl, {
-        method: 'GET',
-        headers,
-        signal: abortController.signal,
-        redirect: 'follow',
-      });
+
+      const attemptController = new AbortController();
+      const onParentAbort = () => {
+        if (!attemptController.signal.aborted) {
+          attemptController.abort();
+        }
+      };
+      if (abortController.signal.aborted) {
+        attemptController.abort();
+      } else {
+        abortController.signal.addEventListener('abort', onParentAbort, {once: true});
+      }
+
+      const connectTimer = setTimeout(() => {
+        if (!attemptController.signal.aborted) {
+          attemptController.abort(new Error(`Upstream fetch timed out after ${UPSTREAM_FETCH_TIMEOUT_MS}ms`));
+        }
+      }, UPSTREAM_FETCH_TIMEOUT_MS);
+
+      try {
+        return await fetch(streamUrl, {
+          method: 'GET',
+          headers,
+          signal: attemptController.signal,
+          redirect: 'follow',
+        });
+      } finally {
+        clearTimeout(connectTimer);
+      }
     };
 
     const pipeDirectFallback = (fallbackReason: string): boolean => {
-      if (isHead || res.headersSent || abortController.signal.aborted) {
+      if (res.headersSent || res.writableEnded || res.destroyed || abortController.signal.aborted) {
         return false;
       }
       console.warn(`[yt-stream] ${videoId} using direct yt-dlp audio pipe fallback (${fallbackReason})`);
       const {stream, cleanup, getStderr} = spawnDirectYouTubeAudioStream(videoId);
       let started = false;
+      let finished = false;
 
-      res.on('close', cleanup);
+      const teardown = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(startupTimer);
+        res.off('close', onPipeAbort);
+        res.off('error', onPipeAbort);
+        req.off('aborted', onPipeAbort);
+        detachClientListeners();
+        cleanup();
+      };
+
+      const onPipeAbort = () => {
+        teardown();
+      };
+
+      const startupTimer = setTimeout(() => {
+        if (started || finished) return;
+        console.error('[yt-stream]', videoId, 'direct-pipe-startup-timeout');
+        teardown();
+        if (!res.headersSent && !res.destroyed) {
+          res.status(504).json({error: 'Audio stream fallback timed out before starting'});
+        } else if (!res.destroyed) {
+          res.destroy();
+        }
+      }, DIRECT_PIPE_STARTUP_TIMEOUT_MS);
+      startupTimer.unref();
+
+      res.once('close', onPipeAbort);
+      res.once('error', onPipeAbort);
+      req.once('aborted', onPipeAbort);
 
       stream.on('data', (chunk: Buffer) => {
+        if (finished || res.writableEnded || res.destroyed) {
+          teardown();
+          return;
+        }
         if (!started) {
           started = true;
+          clearTimeout(startupTimer);
           res.status(200);
           res.setHeader('Content-Type', 'audio/mp4');
+          res.setHeader('Accept-Ranges', 'none');
           res.setHeader('Cache-Control', 'no-store');
         }
-        if (!res.writableEnded && !res.destroyed) {
-          if (!res.write(chunk)) {
-            stream.pause();
-            res.once('drain', () => {
-              if (!res.destroyed && !res.writableEnded) {
-                stream.resume();
-              }
-            });
-          }
+        if (!res.write(chunk)) {
+          stream.pause();
+          res.once('drain', () => {
+            if (!finished && !res.destroyed && !res.writableEnded) {
+              stream.resume();
+            }
+          });
         }
       });
 
       stream.on('end', () => {
-        cleanup();
-        if (!started) {
+        const wasStarted = started;
+        const wasFinished = finished;
+        teardown();
+        if (wasFinished) return;
+        if (!wasStarted) {
           const detail = getStderr() || fallbackReason;
           console.error('[yt-stream]', videoId, 'direct-pipe-empty:', detail);
           if (!res.headersSent) {
@@ -221,7 +365,9 @@ async function startServer() {
       });
 
       stream.on('error', (pipeErr) => {
-        cleanup();
+        const wasFinished = finished;
+        teardown();
+        if (wasFinished) return;
         console.error('[yt-stream]', videoId, 'direct-pipe-error:', pipeErr.message);
         if (!res.headersSent) {
           res.status(502).json({error: 'Failed to stream YouTube audio'});
@@ -234,38 +380,87 @@ async function startServer() {
     };
 
     try {
+      // Short-circuit straight to the fallback pipe while the adaptive 10-minute 403 circuit is open
+      if (isDirectProxyCircuitOpen()) {
+        const remainingSec = Math.ceil(getDirectProxyCircuitCooldownRemainingMs() / 1000);
+        if (pipeDirectFallback(`403 circuit breaker open (${remainingSec}s cooldown left)`)) {
+          return;
+        }
+        detachClientListeners();
+        return;
+      }
+
       let resolved: Awaited<ReturnType<typeof resolveYouTubeAudioStreamUrl>>;
       try {
         resolved = await resolveYouTubeAudioStreamUrl(videoId);
       } catch (resolveErr) {
         if (abortController.signal.aborted) {
+          detachClientListeners();
           if (!res.writableEnded) res.end();
           return;
         }
-        const reason = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+        const reason =
+          resolveErr instanceof DirectProxyCircuitOpenError
+            ? resolveErr.message
+            : resolveErr instanceof Error
+              ? resolveErr.message
+              : String(resolveErr);
         if (pipeDirectFallback(reason)) {
           return;
         }
         throw resolveErr;
       }
 
-      let upstream = await fetchUpstream(resolved.url, resolved.headers);
+      let upstream: globalThis.Response;
+      try {
+        upstream = await fetchUpstream(resolved.url, resolved.headers);
+      } catch (fetchErr) {
+        if (abortController.signal.aborted) {
+          detachClientListeners();
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        const reason = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+        if (pipeDirectFallback(`upstream connect failed: ${reason}`)) {
+          return;
+        }
+        throw fetchErr;
+      }
 
-      // If a cached signed URL expired OR was rejected with 403/410, force a fresh probed resolution
+      // If a cached signed URL expired OR was rejected with 403/410, update circuit breaker
+      // and either short-circuit to fallback pipe or run one deduplicated refresh.
       if (upstream.status === 403 || upstream.status === 410) {
+        const failedStatus = upstream.status;
         try {
           await upstream.body?.cancel();
         } catch {
           // ignore
         }
         invalidateYouTubeAudioStreamCache(videoId);
+
+        if (failedStatus === 403 && recordUpstream403Rejection('upstream-proxy')) {
+          if (pipeDirectFallback('upstream HTTP 403 tripped 10m circuit breaker')) {
+            return;
+          }
+          detachClientListeners();
+          return;
+        }
+
         try {
           resolved = await resolveYouTubeAudioStreamUrl(videoId, {
             forceRefresh: true,
             skipFastPath: resolved.strategy === 'fast-path',
           });
           upstream = await fetchUpstream(resolved.url, resolved.headers);
+          if (upstream.status === 403) {
+            recordUpstream403Rejection('upstream-proxy-retry');
+          }
         } catch (retryErr) {
+          if (abortController.signal.aborted) {
+            detachClientListeners();
+            if (!res.writableEnded) res.end();
+            return;
+          }
           const reason = retryErr instanceof Error ? retryErr.message : String(retryErr);
           if (pipeDirectFallback(reason)) {
             return;
@@ -281,6 +476,7 @@ async function startServer() {
         } catch {
           // ignore
         }
+        detachClientListeners();
         console.error('[yt-stream]', videoId, 'unexpected-upstream-host');
         res.status(502).json({error: 'Unexpected upstream media host'});
         return;
@@ -296,6 +492,7 @@ async function startServer() {
         if (failedStatus !== 404 && pipeDirectFallback(`upstream HTTP ${failedStatus}`)) {
           return;
         }
+        detachClientListeners();
         console.error('[yt-stream]', videoId, failedStatus);
         res.status(failedStatus === 404 ? 404 : 502).json({
           error: `Upstream YouTube stream returned HTTP ${failedStatus}`,
@@ -303,31 +500,14 @@ async function startServer() {
         return;
       }
 
+      if (upstream.status === 200 || upstream.status === 206) {
+        recordUpstreamDirectSuccess();
+      }
+
       const contentType = upstream.headers.get('content-type') || resolved.contentType || 'audio/mp4';
       const contentRange = upstream.headers.get('content-range');
       const contentLength = upstream.headers.get('content-length');
       const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
-
-      if (isHead) {
-        try {
-          await upstream.body?.cancel();
-        } catch {
-          // ignore
-        }
-        const totalMatch = contentRange?.match(/\/(\d+)$/);
-        res.status(200);
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Accept-Ranges', acceptRanges);
-        res.setHeader('Vary', 'Range');
-        res.setHeader('Cache-Control', 'private, max-age=1800');
-        if (totalMatch?.[1]) {
-          res.setHeader('Content-Length', totalMatch[1]);
-        } else if (contentLength) {
-          res.setHeader('Content-Length', contentLength);
-        }
-        res.end();
-        return;
-      }
 
       res.status(upstream.status);
       res.setHeader('Content-Type', contentType);
@@ -342,25 +522,33 @@ async function startServer() {
       }
 
       if (!upstream.body) {
+        detachClientListeners();
         res.end();
         return;
       }
 
       const nodeStream = Readable.fromWeb(upstream.body as unknown as NodeReadableStream<Uint8Array>);
+      const destroyNodeStream = () => {
+        detachClientListeners();
+        if (!nodeStream.destroyed) {
+          nodeStream.destroy();
+        }
+      };
+
       nodeStream.on('error', () => {
+        detachClientListeners();
         if (!res.headersSent) {
           res.status(502).end();
         } else if (!res.destroyed) {
           res.destroy();
         }
       });
-      res.on('close', () => {
-        if (!nodeStream.destroyed) {
-          nodeStream.destroy();
-        }
-      });
+      nodeStream.once('end', detachClientListeners);
+      res.once('close', destroyNodeStream);
+      res.once('error', destroyNodeStream);
       nodeStream.pipe(res);
     } catch (err) {
+      detachClientListeners();
       if (abortController.signal.aborted) {
         if (!res.writableEnded) res.end();
         return;
@@ -476,37 +664,50 @@ async function startServer() {
       return;
     }
 
-    // Prefer 16:9 thumbnails (maxresdefault, mqdefault) and cached stream artwork so covers survive stream URL expiry
+    // Prefer cached working artwork URL first, then high-res 16:9 YouTube CDN variants
     const cachedThumb = getCachedYouTubeThumbnailUrl(videoId);
-    const candidateUrls = [
-      `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-      `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
-      ...(cachedThumb && isAllowedYouTubeMediaUrl(cachedThumb) ? [cachedThumb] : []),
-      `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    ];
+    const candidateSet = new Set<string>();
+    if (cachedThumb && isAllowedYouTubeMediaUrl(cachedThumb)) {
+      candidateSet.add(cachedThumb);
+    }
+    candidateSet.add(`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`);
+    candidateSet.add(`https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`);
+    candidateSet.add(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`);
+
     try {
-      for (const thumbUrl of candidateUrls) {
-        const upstream = await fetch(thumbUrl, {
-          headers: {Accept: 'image/*'},
-          redirect: 'follow',
-        });
+      for (const thumbUrl of candidateSet) {
+        if (res.destroyed || res.writableEnded) return;
+        let upstream: globalThis.Response;
+        try {
+          upstream = await fetch(thumbUrl, {
+            headers: {Accept: 'image/*'},
+            redirect: 'follow',
+            signal: AbortSignal.timeout(4000),
+          });
+        } catch {
+          continue;
+        }
         if (!upstream.ok || !upstream.body) {
           await upstream.body?.cancel().catch(() => {});
           continue;
         }
-        if (upstream.url && !isAllowedYouTubeMediaUrl(upstream.url)) {
+        const finalThumbUrl = upstream.url || thumbUrl;
+        if (!isAllowedYouTubeMediaUrl(finalThumbUrl)) {
           await upstream.body.cancel().catch(() => {});
           res.status(502).end();
           return;
         }
+        cacheYouTubeThumbnailUrl(videoId, finalThumbUrl);
         res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
         res.setHeader('Cache-Control', 'public, max-age=86400');
         res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
         const buf = Buffer.from(await upstream.arrayBuffer());
-        res.status(200).send(buf);
+        if (!res.headersSent && !res.destroyed) {
+          res.status(200).send(buf);
+        }
         return;
       }
-      res.status(404).end();
+      if (!res.headersSent) res.status(404).end();
     } catch {
       if (!res.headersSent) res.status(502).end();
     }

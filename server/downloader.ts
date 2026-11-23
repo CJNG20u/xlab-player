@@ -121,10 +121,14 @@ async function execYtdlp(
   options: {timeout?: number; maxBuffer?: number} = {}
 ): Promise<{stdout: string; stderr: string}> {
   const primary = resolveYtdlpInvocation(false);
+  const execOpts = {
+    timeout: options.timeout ?? 30000,
+    maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+    killSignal: 'SIGKILL' as const,
+  };
   try {
     return await execFileAsync(primary.cmd, [...primary.prefixArgs, ...args], {
-      timeout: options.timeout ?? 30000,
-      maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+      ...execOpts,
       env: primary.env,
     });
   } catch (err) {
@@ -132,8 +136,7 @@ async function execYtdlp(
     if (code === 'ENOENT' && primary.cmd !== 'python3') {
       const fallback = resolveYtdlpInvocation(true);
       return await execFileAsync(fallback.cmd, [...fallback.prefixArgs, ...args], {
-        timeout: options.timeout ?? 30000,
-        maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+        ...execOpts,
         env: fallback.env,
       });
     }
@@ -1571,19 +1574,31 @@ export function spawnAudioPreviewStream(videoUrl: string) {
   const cleanup = () => {
     if (done) return;
     done = true;
-    try {
-      if (!ytProc.killed) ytProc.kill('SIGTERM');
-    } catch {
-      // ignore
-    }
-    try {
-      if (!ffProc.killed) ffProc.kill('SIGTERM');
-    } catch {
-      // ignore
-    }
+    const terminate = (child: ChildProcess) => {
+      try {
+        if (child.exitCode === null && child.signalCode === null && !child.killed) {
+          child.kill('SIGTERM');
+          const timer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              try {
+                child.kill('SIGKILL');
+              } catch {
+                // ignore
+              }
+            }
+          }, 1500);
+          timer.unref();
+          child.once('exit', () => clearTimeout(timer));
+        }
+      } catch {
+        // ignore
+      }
+    };
+    terminate(ytProc);
+    terminate(ffProc);
     if (tempCookiePath) {
       try {
-        fs.unlinkSync(tempCookiePath);
+        if (fs.existsSync(tempCookiePath)) fs.unlinkSync(tempCookiePath);
       } catch {
         // ignore
       }
@@ -1591,6 +1606,7 @@ export function spawnAudioPreviewStream(videoUrl: string) {
   };
   ytProc.on('error', cleanup);
   ffProc.on('exit', cleanup);
+  ffProc.on('close', cleanup);
   ffProc.on('error', cleanup);
   return {stream: ffProc.stdout, cleanup};
 }
@@ -1603,6 +1619,16 @@ const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
 const YT_VISITOR_DATA_TTL_MS = 30 * 60 * 1000; // Refresh session visitor_data every 30 min
 const TRACK_VIDEO_MAP_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const TRACK_VIDEO_CACHE_MAX_ENTRIES = 2000;
+
+// Strict per-attempt timeouts so slow/unresponsive upstream attempts fail fast
+const YT_EXTRACTION_FAST_TIMEOUT_MS = 8_000;
+const YT_EXTRACTION_FALLBACK_TIMEOUT_MS = 10_000;
+const YT_PROBE_TIMEOUT_MS = 4_000;
+
+// Adaptive circuit breaker: if direct HTTP proxying hits consecutive 403 rejections,
+// short-circuit directly to the fallback audio pipe for a 10-minute cooldown window.
+const DIRECT_PROXY_403_THRESHOLD = 3;
+const DIRECT_PROXY_COOLDOWN_MS = 10 * 60 * 1000;
 
 const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googlevideo.com',
@@ -1617,6 +1643,60 @@ export interface ResolvedYouTubeAudioStream {
   strategy: 'fast-path' | 'tv-fallback' | 'fallback' | 'fallback-cookies';
   thumbnailUrl: string;
   contentType: string;
+  contentLength: number | null;
+  duration: number | null;
+}
+
+export class DirectProxyCircuitOpenError extends Error {
+  readonly cooldownRemainingMs: number;
+
+  constructor(cooldownRemainingMs: number) {
+    super(
+      `Direct upstream HTTP proxy circuit open (${Math.ceil(cooldownRemainingMs / 1000)}s cooldown remaining)`
+    );
+    this.name = 'DirectProxyCircuitOpenError';
+    this.cooldownRemainingMs = cooldownRemainingMs;
+  }
+}
+
+let consecutiveUpstream403s = 0;
+let directProxyCircuitOpenUntil = 0;
+
+export function isDirectProxyCircuitOpen(): boolean {
+  if (directProxyCircuitOpenUntil === 0) return false;
+  if (Date.now() < directProxyCircuitOpenUntil) {
+    return true;
+  }
+  // Cooldown expired — reset for half-open probe on the next track
+  directProxyCircuitOpenUntil = 0;
+  consecutiveUpstream403s = 0;
+  return false;
+}
+
+export function getDirectProxyCircuitCooldownRemainingMs(): number {
+  if (!isDirectProxyCircuitOpen()) return 0;
+  return Math.max(0, directProxyCircuitOpenUntil - Date.now());
+}
+
+export function recordUpstream403Rejection(context?: string): boolean {
+  const now = Date.now();
+  if (directProxyCircuitOpenUntil > now) {
+    return true;
+  }
+  consecutiveUpstream403s += 1;
+  if (consecutiveUpstream403s >= DIRECT_PROXY_403_THRESHOLD) {
+    directProxyCircuitOpenUntil = now + DIRECT_PROXY_COOLDOWN_MS;
+    console.warn(
+      `[yt-stream-circuit] Direct HTTP proxying rejected ${consecutiveUpstream403s} consecutive times (${context || '403'}); short-circuiting to fallback pipe for 10m`
+    );
+    return true;
+  }
+  return false;
+}
+
+export function recordUpstreamDirectSuccess(): void {
+  consecutiveUpstream403s = 0;
+  directProxyCircuitOpenUntil = 0;
 }
 
 const HOP_BY_HOP_AND_EXCLUDED_HEADERS = new Set([
@@ -1656,7 +1736,7 @@ const ytStreamUrlCache = new Map<
   string,
   ResolvedYouTubeAudioStream & {expiresAt: number}
 >();
-const ytStreamInFlight = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
+const inFlightResolutions = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
 const ytThumbnailCache = new Map<string, {url: string; expiresAt: number}>();
 let ytVisitorDataCache: {value: string; expiresAt: number} | null = null;
 let ytVisitorDataInFlight: Promise<string | null> | null = null;
@@ -1688,7 +1768,7 @@ export function isAllowedYouTubeMediaUrl(rawUrl: string): boolean {
   );
 }
 
-function cacheYouTubeThumbnailUrl(videoId: string, rawUrl: string): void {
+export function cacheYouTubeThumbnailUrl(videoId: string, rawUrl: string): void {
   if (!isValidYouTubeVideoId(videoId) || !isAllowedYouTubeMediaUrl(rawUrl)) return;
   const now = Date.now();
   if (ytThumbnailCache.size >= YT_THUMB_CACHE_MAX_ENTRIES) {
@@ -1735,9 +1815,27 @@ export function invalidateYouTubeAudioStreamCache(videoId: string): void {
   ytStreamUrlCache.delete(videoId);
 }
 
-export function isYouTubeStreamCached(videoId: string): boolean {
+export function getCachedYouTubeAudioStream(videoId: string): ResolvedYouTubeAudioStream | null {
+  if (!isValidYouTubeVideoId(videoId)) return null;
   const entry = ytStreamUrlCache.get(videoId);
-  return Boolean(entry && entry.expiresAt > Date.now());
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    ytStreamUrlCache.delete(videoId);
+    return null;
+  }
+  return {
+    url: entry.url,
+    headers: {...entry.headers},
+    strategy: entry.strategy,
+    thumbnailUrl: entry.thumbnailUrl,
+    contentType: entry.contentType,
+    contentLength: entry.contentLength,
+    duration: entry.duration,
+  };
+}
+
+export function isYouTubeStreamCached(videoId: string): boolean {
+  return getCachedYouTubeAudioStream(videoId) !== null;
 }
 
 async function getSessionVisitorData(): Promise<string | null> {
@@ -1826,6 +1924,8 @@ interface RawYtdlpFormat {
   ext?: unknown;
   abr?: unknown;
   tbr?: unknown;
+  filesize?: unknown;
+  filesize_approx?: unknown;
   http_headers?: unknown;
 }
 
@@ -1836,6 +1936,8 @@ function pickDirectAudioFormat(
     acodec?: unknown;
     protocol?: unknown;
     ext?: unknown;
+    filesize?: unknown;
+    filesize_approx?: unknown;
     http_headers?: unknown;
     requested_formats?: RawYtdlpFormat[];
     formats?: RawYtdlpFormat[];
@@ -1881,7 +1983,7 @@ function pickDirectAudioFormat(
 async function probeAudioStreamUrl(
   streamUrl: string,
   streamHeaders: Record<string, string>
-): Promise<{ok: boolean; status: number; contentType: string}> {
+): Promise<{ok: boolean; status: number; contentType: string; contentLength: number | null}> {
   try {
     const headers: Record<string, string> = {
       ...streamHeaders,
@@ -1894,20 +1996,36 @@ async function probeAudioStreamUrl(
       method: 'GET',
       headers,
       redirect: 'follow',
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(YT_PROBE_TIMEOUT_MS),
     });
     const finalUrl = resp.url || streamUrl;
     const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    const contentRange = resp.headers.get('content-range');
+    const rawContentLength = resp.headers.get('content-length');
+    let parsedLength: number | null = null;
+    const rangeTotalMatch = contentRange?.match(/\/(\d+)$/);
+    if (rangeTotalMatch?.[1]) {
+      const n = Number(rangeTotalMatch[1]);
+      if (Number.isFinite(n) && n > 0) parsedLength = n;
+    } else if (resp.status === 200 && rawContentLength) {
+      const n = Number(rawContentLength);
+      if (Number.isFinite(n) && n > 0) parsedLength = n;
+    }
+
     try {
       await resp.body?.cancel();
     } catch {
       // ignore
     }
     if (!isAllowedYouTubeMediaUrl(finalUrl)) {
-      return {ok: false, status: resp.status, contentType: ct};
+      return {ok: false, status: resp.status, contentType: ct, contentLength: null};
+    }
+    if (resp.status === 403) {
+      recordUpstream403Rejection('probe');
+      return {ok: false, status: 403, contentType: ct, contentLength: null};
     }
     if (resp.status !== 200 && resp.status !== 206) {
-      return {ok: false, status: resp.status, contentType: ct};
+      return {ok: false, status: resp.status, contentType: ct, contentLength: null};
     }
     if (
       ct.includes('text/html') ||
@@ -1915,11 +2033,12 @@ async function probeAudioStreamUrl(
       ct.includes('dash+xml') ||
       ct.includes('application/json')
     ) {
-      return {ok: false, status: 415, contentType: ct};
+      return {ok: false, status: 415, contentType: ct, contentLength: null};
     }
-    return {ok: true, status: resp.status, contentType: ct};
+    recordUpstreamDirectSuccess();
+    return {ok: true, status: resp.status, contentType: ct, contentLength: parsedLength};
   } catch {
-    return {ok: false, status: 0, contentType: ''};
+    return {ok: false, status: 0, contentType: '', contentLength: null};
   }
 }
 
@@ -1931,28 +2050,23 @@ export async function resolveYouTubeAudioStreamUrl(
     throw new Error('Invalid YouTube video ID');
   }
 
-  const now = Date.now();
-  if (!options.forceRefresh && !options.skipFastPath) {
-    const cached = ytStreamUrlCache.get(videoId);
-    if (cached && cached.expiresAt > now) {
-      return {
-        url: cached.url,
-        headers: {...cached.headers},
-        strategy: cached.strategy,
-        thumbnailUrl: cached.thumbnailUrl,
-        contentType: cached.contentType,
-        fromCache: true,
-      };
-    }
-    if (cached) {
-      ytStreamUrlCache.delete(videoId);
-    }
+  // Short-circuit immediately while the 10-minute 403 circuit breaker is active
+  if (isDirectProxyCircuitOpen()) {
+    throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
+  }
 
-    const existingPromise = ytStreamInFlight.get(videoId);
-    if (existingPromise) {
-      const resolved = await existingPromise;
-      return {...resolved, headers: {...resolved.headers}, fromCache: false};
+  if (!options.forceRefresh && !options.skipFastPath) {
+    const cached = getCachedYouTubeAudioStream(videoId);
+    if (cached) {
+      return {...cached, fromCache: true};
     }
+  }
+
+  // Deduplicate concurrent requests (e.g., HEAD + GET or concurrent range probes) for the same videoId
+  const existingPromise = inFlightResolutions.get(videoId);
+  if (existingPromise) {
+    const resolved = await existingPromise;
+    return {...resolved, headers: {...resolved.headers}, fromCache: false};
   }
 
   const DIRECT_AUDIO_FORMAT_EXPR =
@@ -2003,6 +2117,9 @@ export async function resolveYouTubeAudioStreamUrl(
       acodec?: unknown;
       protocol?: unknown;
       ext?: unknown;
+      duration?: unknown;
+      filesize?: unknown;
+      filesize_approx?: unknown;
       http_headers?: unknown;
       requested_formats?: RawYtdlpFormat[];
       formats?: RawYtdlpFormat[];
@@ -2028,12 +2145,20 @@ export async function resolveYouTubeAudioStreamUrl(
       throw new Error(`Upstream probe rejected (${probe.status || 'network-error'})`);
     }
 
+    const rawSize = Number(primaryFormat.filesize || primaryFormat.filesize_approx || data.filesize || 0);
+    const contentLength =
+      probe.contentLength ?? (Number.isFinite(rawSize) && rawSize > 0 ? Math.round(rawSize) : null);
+    const rawDuration = Number(data.duration || 0);
+    const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? Math.round(rawDuration) : null;
+
     return {
       url: directUrl,
       headers,
       strategy,
       thumbnailUrl: extractedThumb || getCachedYouTubeThumbnailUrl(videoId) || '',
       contentType: probe.contentType || guessAudioContentType(primaryFormat.ext),
+      contentLength,
+      duration,
     };
   };
 
@@ -2059,7 +2184,7 @@ export async function resolveYouTubeAudioStreamUrl(
           strategy: 'fast-path',
           extractorArgs: fastArgs,
           useCookies: false,
-          timeoutMs: 12000,
+          timeoutMs: YT_EXTRACTION_FAST_TIMEOUT_MS,
         });
       }
 
@@ -2072,7 +2197,7 @@ export async function resolveYouTubeAudioStreamUrl(
         strategy: 'tv-fallback',
         extractorArgs: `youtube:player_client=${tvClients}`,
         useCookies: false,
-        timeoutMs: 16000,
+        timeoutMs: YT_EXTRACTION_FALLBACK_TIMEOUT_MS,
       });
 
       // Attempt 3: mobile/default multi-client anonymous fallback
@@ -2080,7 +2205,7 @@ export async function resolveYouTubeAudioStreamUrl(
         strategy: 'fallback',
         extractorArgs: 'youtube:player_client=ios,mweb,default',
         useCookies: false,
-        timeoutMs: 18000,
+        timeoutMs: YT_EXTRACTION_FALLBACK_TIMEOUT_MS,
       });
 
       // Attempt 4: cookies.txt fallback when configured
@@ -2089,7 +2214,7 @@ export async function resolveYouTubeAudioStreamUrl(
           strategy: 'fallback-cookies',
           extractorArgs: 'youtube:player_client=tv,default,mweb',
           useCookies: true,
-          timeoutMs: 20000,
+          timeoutMs: YT_EXTRACTION_FALLBACK_TIMEOUT_MS,
         });
       }
 
@@ -2097,6 +2222,9 @@ export async function resolveYouTubeAudioStreamUrl(
       let lastError: unknown = null;
 
       for (const step of strategies) {
+        if (isDirectProxyCircuitOpen()) {
+          throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
+        }
         try {
           let cookieArg: string | null = null;
           if (step.useCookies) {
@@ -2114,6 +2242,9 @@ export async function resolveYouTubeAudioStreamUrl(
           lastError = err;
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[yt-stream-resolve] ${videoId} ${step.strategy} failed:`, msg.slice(0, 220));
+          if (isDirectProxyCircuitOpen()) {
+            throw new DirectProxyCircuitOpenError(getDirectProxyCircuitCooldownRemainingMs());
+          }
         }
       }
 
@@ -2141,23 +2272,21 @@ export async function resolveYouTubeAudioStreamUrl(
     }
   })();
 
-  if (!options.forceRefresh && !options.skipFastPath) {
-    ytStreamInFlight.set(videoId, resolvePromise);
-  }
+  inFlightResolutions.set(videoId, resolvePromise);
 
   try {
     const resolved = await resolvePromise;
     return {...resolved, headers: {...resolved.headers}, fromCache: false};
   } finally {
-    if (ytStreamInFlight.get(videoId) === resolvePromise) {
-      ytStreamInFlight.delete(videoId);
+    if (inFlightResolutions.get(videoId) === resolvePromise) {
+      inFlightResolutions.delete(videoId);
     }
   }
 }
 
 /**
  * Live audio pipe fallback using yt-dlp directly when all direct googlevideo URLs
- * are rejected (e.g. SABR/HLS-only or strict IP-bound streams).
+ * are rejected (e.g. SABR/HLS-only or strict IP-bound streams) or during 403 circuit cooldown.
  */
 export function spawnDirectYouTubeAudioStream(videoId: string): {
   stream: NodeJS.ReadableStream;
@@ -2200,26 +2329,71 @@ export function spawnDirectYouTubeAudioStream(videoId: string): {
     stderrBuf = (stderrBuf + chunk.toString('utf-8')).slice(-1200);
   });
 
-  let cleaned = false;
-  const cleanup = () => {
-    if (cleaned) return;
-    cleaned = true;
+  const removeTempCookies = () => {
+    if (!tempCookiePath) return;
     try {
-      if (!proc.killed) proc.kill('SIGTERM');
+      if (fs.existsSync(tempCookiePath)) {
+        fs.unlinkSync(tempCookiePath);
+      }
     } catch {
       // ignore
     }
-    if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+  };
+
+  let cleaned = false;
+  let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const cleanup = () => {
+    if (cleaned) {
+      removeTempCookies();
+      return;
+    }
+    cleaned = true;
+
+    try {
+      if (!proc.stdout.destroyed) proc.stdout.destroy();
+    } catch {
+      // ignore
+    }
+    try {
+      if (!proc.stderr.destroyed) proc.stderr.destroy();
+    } catch {
+      // ignore
+    }
+
+    if (proc.exitCode === null && proc.signalCode === null) {
       try {
-        fs.unlinkSync(tempCookiePath);
+        proc.kill('SIGTERM');
       } catch {
         // ignore
       }
+      forceKillTimer = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }
+        removeTempCookies();
+      }, 1500);
+      forceKillTimer.unref();
     }
+
+    removeTempCookies();
   };
 
-  proc.on('exit', cleanup);
-  proc.on('error', cleanup);
+  const onProcDone = () => {
+    if (forceKillTimer) {
+      clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+    }
+    removeTempCookies();
+  };
+
+  proc.once('exit', onProcDone);
+  proc.once('close', onProcDone);
+  proc.once('error', cleanup);
 
   return {
     stream: proc.stdout,
@@ -2545,7 +2719,11 @@ function drainPrefetchQueue(): void {
           });
           vid = matched.videoId;
         }
-        if (isValidYouTubeVideoId(vid) && !isYouTubeStreamCached(vid)) {
+        if (
+          isValidYouTubeVideoId(vid) &&
+          !isYouTubeStreamCached(vid) &&
+          !isDirectProxyCircuitOpen()
+        ) {
           await resolveYouTubeAudioStreamUrl(vid);
         }
       } catch {
