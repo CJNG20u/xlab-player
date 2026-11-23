@@ -2035,7 +2035,6 @@ export function spawnAudioPreviewStream(videoUrl: string) {
 }
 
 export const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_streams.py
 const YT_STREAM_MEMO_TTL_MS = 5 * 60 * 1000; // 5 minutes in-memory memo TTL
 const YT_STREAM_NEGATIVE_TTL_MS = 20 * 1000; // 20 seconds negative memo TTL
 const YT_STREAM_CACHE_MAX_ENTRIES = 512;
@@ -2045,7 +2044,6 @@ const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
 const TRACK_VIDEO_MAP_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const TRACK_VIDEO_CACHE_MAX_ENTRIES = 2000;
 
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/downloader/youtube/ytdlp.py
 // Preview-tier selector: prefers low-overhead AAC 128k / Opus 160k streams first,
 // with trailing fallbacks so high-bitrate or progressive-only videos still resolve.
 export const YDL_FORMAT_AUDIO_PREVIEW =
@@ -2077,14 +2075,12 @@ const AD_GATE_HISTOGRAM_WINDOW_SIZE = 200;
 const AD_GATE_HISTOGRAM_LOG_EVERY = 50;
 
 // Short global upstream backoff — opened ONLY when the ad-gate polling window is exhausted
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_cache.py
 const DEFAULT_UPSTREAM_BACKOFF_SEC = 30;
 
 // Direct yt-dlp pipe fallback startup timeout (covers pipe's own resolve + yt-dlp ad sleep)
 const DEFAULT_PIPE_STARTUP_TIMEOUT_MS = 30_000;
 
 // Cached YouTube visitor_data from sw.js_data (1 h TTL, 60 s cooldown on rejection/error)
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/downloader/youtube/web.py
 const VISITOR_DATA_URL = 'https://www.youtube.com/sw.js_data';
 const VISITOR_DATA_TTL_MS = 60 * 60 * 1000; // 1 hour
 const VISITOR_DATA_COOLDOWN_MS = 60 * 1000; // 60 seconds
@@ -2281,7 +2277,6 @@ function isDebugCompareEnabled(): boolean {
 
 // Short global upstream backoff — opened ONLY after the ad-gate polling window is exhausted,
 // never on a first-probe 403.
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_cache.py
 let upstreamBlockedUntilMs = 0;
 
 export function upstreamBackoffRemainingSec(): number {
@@ -3154,7 +3149,6 @@ export async function requestIpv4MediaStream(
 
 // ---------------------------------------------------------------------------
 // YouTube visitor_data Cache (sw.js_data, 1 h TTL, 60 s rejection cooldown)
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/downloader/youtube/web.py
 // ---------------------------------------------------------------------------
 
 interface VisitorDataCacheState {
@@ -3296,8 +3290,6 @@ export function rejectVisitorData(value: string): void {
 
 // ---------------------------------------------------------------------------
 // Three-Layer Resolved Stream URL Cache (5m/20s Single-Flight Memo + SQLite)
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-//   shared/preview_streams.py, shared/stream_resolution.py, shared/db/media_cache.py
 // ---------------------------------------------------------------------------
 
 export function getCurrentStreamEgress(): string {
@@ -4923,7 +4915,6 @@ export async function resolveYouTubeAudioStreamUrl(
 
         // 1. Optional android_vr + cached visitor_data fast path (interactive playback only;
         // skipped by prefetch and skipped on CDN 403/410 retries).
-        // Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/downloader/youtube/streams.py
         if (!options.skipFastPath) {
           const visitor = await getVisitorData();
           if (visitor) {

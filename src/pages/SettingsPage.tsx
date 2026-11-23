@@ -11,6 +11,7 @@ import {
   KeyRound,
   Loader2,
   LogOut,
+  MonitorSpeaker,
   Palette,
   RefreshCw,
   Save,
@@ -34,6 +35,11 @@ import {THEME_OPTIONS, useTheme} from '../context/ThemeContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {apiFetch, formatBytes, getSSEUrl} from '../lib/api';
+import {
+  getDefaultDeviceName,
+  getDeviceName,
+  setDeviceName,
+} from '../lib/deviceIdentity';
 import {
   getListeningLearningEnabled,
   setListeningLearningEnabled,
@@ -111,6 +117,17 @@ export const SettingsPage: React.FC = () => {
   const [listeningFeedback, setListeningFeedback] = useState<{ok: boolean; text: string} | null>(
     null
   );
+
+  // Device Identity (All Users)
+  const [deviceNameInput, setDeviceNameInput] = useState<string>(() => getDeviceName());
+  const [deviceNameFeedback, setDeviceNameFeedback] = useState<string | null>(null);
+
+  const handleSaveDeviceName = (e: React.FormEvent) => {
+    e.preventDefault();
+    const saved = setDeviceName(deviceNameInput);
+    setDeviceNameInput(saved);
+    setDeviceNameFeedback(`Device name saved as "${saved}".`);
+  };
 
   useEffect(() => {
     setLearnFromListening(getListeningLearningEnabled(user?.id));
@@ -802,6 +819,49 @@ export const SettingsPage: React.FC = () => {
           >
             {listeningFeedback.text}
           </p>
+        )}
+      </section>
+
+      {/* 0.7 THIS DEVICE NAME FOR MULTI-DEVICE REMOTE (ALL USERS) */}
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
+            <MonitorSpeaker className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+              This device
+            </h2>
+            <p className="text-xs text-[var(--text-secondary)]">
+              Choose the name shown in the Devices sheet when controlling playback across your devices.
+            </p>
+          </div>
+        </div>
+
+        <form onSubmit={handleSaveDeviceName} className="flex flex-col sm:flex-row gap-2.5">
+          <input
+            type="text"
+            maxLength={64}
+            value={deviceNameInput}
+            onChange={(e) => {
+              setDeviceNameInput(e.target.value);
+              setDeviceNameFeedback(null);
+            }}
+            placeholder={getDefaultDeviceName()}
+            aria-label="Device name"
+            className="flex-1 rounded-md bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
+          />
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap shrink-0"
+          >
+            <Save className="w-4 h-4" />
+            Save name
+          </button>
+        </form>
+
+        {deviceNameFeedback && (
+          <p className="text-xs font-medium text-[var(--accent)]">{deviceNameFeedback}</p>
         )}
       </section>
 

@@ -398,6 +398,11 @@
     overscroll-behavior: none;
   }
 
+  html,
+  body {
+    transition: background-color 300ms;
+  }
+
   ::selection {
     background-color: var(--accent-soft);
     color: var(--text-primary);
@@ -512,7 +517,7 @@ input[type="range"].xlab-slider::-moz-range-thumb {
   display: none;
 }
 
-/* xlabplayer theme polish. Motion tokens adapted from Soundsible (MIT, (c) 2026 Arzuparreta). */
+/* xlabplayer theme polish. */
 :root {
   --dur-micro: 120ms;
   --dur-short: 220ms;
@@ -636,6 +641,7 @@ input[type="range"].xlab-slider::-moz-range-thumb {
 
 @media (prefers-reduced-motion: reduce) {
   :root { --dur-micro: 0ms; --dur-short: 0ms; --dur-medium: 0ms; }
+  html, body { transition: none; }
   .page-enter { animation: none; }
   .surface-card:hover { transform: none; }
   :where(button, [role="button"]):not(:disabled):active { transform: none; }

@@ -15,7 +15,7 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useTheme} from '../context/ThemeContext';
 import {getCoverUrl, getLocalPlayHistory, getTrackCoverUrl} from '../lib/api';
 import {
@@ -23,7 +23,7 @@ import {
   computeNowPlayingTopHex,
   extractDominantColorFromImage,
   getCachedDominantColor,
-  setDocumentThemeColor,
+  useStatusBarColor,
 } from '../lib/themeColor';
 import type {Playlist, Track} from '../types';
 import {getOfflineCoverBlobUrl} from '../utils/offlineStore';
@@ -530,9 +530,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
     return isLight ? computeLightTintedTopHex(raw, 0.24) : computeNowPlayingTopHex(raw);
   }, [featuredHero.fallbackColor, heroColorCacheKey, heroSampledColor, isLight, isTidal]);
 
-  useLayoutEffect(() => {
-    setDocumentThemeColor(heroTopHex);
-  }, [heroTopHex, theme]);
+  useStatusBarColor(heroTopHex);
 
   // Partition playlists cleanly across Row 1 (Your Playlists) and Row 2 (Mixes & Imported / Recently Played)
   const manualPlaylists = useMemo(
@@ -672,8 +670,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   };
 
   const topSafeScrim = isLight
-    ? `linear-gradient(to bottom, ${heroTopHex}e6 0%, ${heroTopHex}73 20%, transparent 45%)`
-    : `linear-gradient(to bottom, ${heroTopHex}e0 0%, ${heroTopHex}66 20%, transparent 46%)`;
+    ? `linear-gradient(to bottom, ${heroTopHex} 0%, ${heroTopHex}d9 12%, ${heroTopHex}73 24%, transparent 45%)`
+    : `linear-gradient(to bottom, ${heroTopHex} 0%, ${heroTopHex}d4 12%, ${heroTopHex}66 24%, transparent 46%)`;
 
   const renderPlaylistCard = (pl: Playlist, keyPrefix: string) => {
     const isMenuOpen = menuState?.playlist.id === pl.id;

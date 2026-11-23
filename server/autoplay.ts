@@ -2,8 +2,6 @@ import crypto from 'crypto';
 
 // ---------------------------------------------------------------------------
 // Pure Autoplay & Radio Candidate Pools and Deterministic Queue Planner
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-//   shared/listening_planner.py, shared/music_candidates.py
 // ---------------------------------------------------------------------------
 
 export type AutoplayIntent = 'autoplay' | 'radio';
@@ -28,7 +26,6 @@ export const DEFAULT_GUMBEL_TEMPERATURE = 0.2;
 
 // Gentle per-user listening-profile score adjustments (named constants so they
 // never override same-loop graph membership, pool mix ratios, or artist caps).
-// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
 export const LISTENING_PROFILE_TOP_ARTIST_MAX_BONUS = 0.08;
 export const LISTENING_PROFILE_TOP_ARTIST_SCORE_SATURATION = 6.0;
 export const LISTENING_PROFILE_SKIPPED_ARTIST_PENALTY = 0.14;
@@ -175,7 +172,6 @@ export interface PlanAutoplayOptions {
 
 // ---------------------------------------------------------------------------
 // Text, Artist & Song Identity Normalization
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/listening_planner.py
 // ---------------------------------------------------------------------------
 
 function cleanStr(value: unknown): string {
@@ -224,7 +220,6 @@ export function normalizeArtistKey(raw: unknown): string {
 
 /**
  * Split credited artists on feat./ft./featuring/&/and/x/with/,/+/// and normalize each.
- * Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — _artist_keys in listening_planner.py
  */
 export function extractArtistKeys(raw: unknown): Set<string> {
   const text = cleanStr(raw);
@@ -386,7 +381,6 @@ function sourceRankOf(kind: PlaybackSourceKind): number {
 /**
  * Deduplicate duplicate song identities within a pool, keeping the best upload:
  * official_audio > artist_audio > official_video > official_lyrics > artist_upload > unverified > third_party_lyrics
- * Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — _prefer_song_variants in listening_planner.py
  */
 export function preferBestSongVariants(rows: AutoplayCandidate[]): AutoplayCandidate[] {
   const selected = new Map<string, {index: number; row: AutoplayCandidate}>();
@@ -418,7 +412,6 @@ export function preferBestSongVariants(rows: AutoplayCandidate[]): AutoplayCandi
 
 // ---------------------------------------------------------------------------
 // Pool Builders
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/music_candidates.py
 // ---------------------------------------------------------------------------
 
 /**
@@ -684,7 +677,6 @@ export function buildDiscoveryPool(
 
 // ---------------------------------------------------------------------------
 // Deterministic Seeded PRNG + Gumbel-top-k Ranking
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — _ranked in listening_planner.py
 // ---------------------------------------------------------------------------
 
 function createSeededRng(seedStr: string): () => number {
@@ -736,7 +728,6 @@ function rankPoolCandidates(
 
 // ---------------------------------------------------------------------------
 // Pure Queue Planner
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — plan_generated_queue
 // ---------------------------------------------------------------------------
 
 /**

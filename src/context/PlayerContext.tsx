@@ -96,6 +96,21 @@ interface PlayerContextValue {
     format?: 'm4a' | 'opus'
   ) => Promise<{ok: boolean; message: string; track?: Track}>;
   getYouTubeSaveStatus: (trackId: TrackId) => 'idle' | 'saving' | 'saved';
+  // Integration surface for multi-device remote host (src/hooks/useRemoteHost.ts)
+  remoteHostApi: {
+    playLocal: () => Promise<'applied' | 'needs_gesture' | 'no_track'>;
+    pauseLocal: () => void;
+    setMuted: (muted: boolean) => void;
+    setShuffle: (enabled: boolean) => void;
+    setRepeat: (mode: RepeatMode) => void;
+    applyTransfer: (payload: {
+      queue: Track[];
+      index: number;
+      positionSec: number;
+      isPlaying: boolean;
+    }) => Promise<'applied' | 'needs_gesture'>;
+    unlockAudio: () => void;
+  };
 }
 
 const PlayerContext = createContext<PlayerContextValue | null>(null);
@@ -163,8 +178,6 @@ function getTrackMetadataKey(track: Track): string {
 
 // ---------------------------------------------------------------------------
 // Autoplay & Radio Queue Helpers
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-//   frontend/src/services/playback/generatedQueue.ts, runway.ts
 // ---------------------------------------------------------------------------
 
 const AUTOPLAY_STORAGE_KEY = 'xlabplayer_autoplay';
@@ -1921,6 +1934,207 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     });
   }, [cancelAutoplayPlan]);
 
+  // --- Multi-device remote host integration surface (used by src/hooks/useRemoteHost.ts) ---
+  const remotePlayLocal = useCallback(async (): Promise<'applied' | 'needs_gesture' | 'no_track'> => {
+    const audio = audioRef.current ?? getPersistentAudioElement();
+    const activeTrack = stateRef.current.currentTrack;
+    if (!audio || !activeTrack) return 'no_track';
+    audioRef.current = audio;
+    userPausedRef.current = false;
+    wantPlayingRef.current = true;
+    lockAutoResumeAttemptsRef.current = 0;
+    stateRef.current.isPlaying = true;
+    clearVisibilityResumeTimers();
+    activateMediaSessionForPlayback(activeTrack, false);
+    try {
+      await audio.play();
+      setIsPlaying(true);
+      syncMediaSessionPositionState(audio);
+      return 'applied';
+    } catch (err: unknown) {
+      wantPlayingRef.current = false;
+      stateRef.current.isPlaying = false;
+      setIsPlaying(false);
+      setMediaSessionPlaybackState('paused');
+      if (err instanceof DOMException && err.name === 'NotAllowedError') {
+        return 'needs_gesture';
+      }
+      return 'needs_gesture';
+    }
+  }, [
+    activateMediaSessionForPlayback,
+    clearVisibilityResumeTimers,
+    setMediaSessionPlaybackState,
+    syncMediaSessionPositionState,
+  ]);
+
+  const remotePauseLocal = useCallback(() => {
+    const audio = audioRef.current;
+    endTrackTransition();
+    clearRecoveryTimer();
+    clearVisibilityResumeTimers();
+    userPausedRef.current = true;
+    wantPlayingRef.current = false;
+    stateRef.current.isPlaying = false;
+    if (audio) {
+      audio.pause();
+      syncMediaSessionPositionState(audio);
+    }
+    setIsPlaying(false);
+    setMediaSessionPlaybackState('paused');
+  }, [
+    clearRecoveryTimer,
+    clearVisibilityResumeTimers,
+    endTrackTransition,
+    setMediaSessionPlaybackState,
+    syncMediaSessionPositionState,
+  ]);
+
+  const remoteSetShuffle = useCallback(
+    (enabled: boolean) => {
+      setShuffle(enabled);
+      stateRef.current.shuffle = enabled;
+      if (enabled) cancelAutoplayPlan(false);
+    },
+    [cancelAutoplayPlan]
+  );
+
+  const remoteSetRepeat = useCallback(
+    (mode: RepeatMode) => {
+      setRepeat(mode);
+      stateRef.current.repeat = mode;
+      if (mode !== 'off') cancelAutoplayPlan(false);
+    },
+    [cancelAutoplayPlan]
+  );
+
+  const remoteApplyTransfer = useCallback(
+    async (payload: {
+      queue: Track[];
+      index: number;
+      positionSec: number;
+      isPlaying: boolean;
+    }): Promise<'applied' | 'needs_gesture'> => {
+      const audio = audioRef.current ?? getPersistentAudioElement();
+      if (!audio || payload.queue.length === 0) return 'applied';
+      audioRef.current = audio;
+
+      const idx = Math.max(0, Math.min(payload.queue.length - 1, Math.floor(payload.index)));
+      const targetTrack = payload.queue[idx];
+      const targetPos = Number.isFinite(payload.positionSec) ? Math.max(0, payload.positionSec) : 0;
+
+      cancelAutoplayPlan(true);
+      autoplayClearedForTrackKeyRef.current = null;
+      setRadioMode(false);
+      setRadioSeed(null);
+
+      stateRef.current.queue = payload.queue;
+      stateRef.current.currentIndex = idx;
+      stateRef.current.currentTrack = targetTrack;
+
+      const sameTrack =
+        audio.dataset.trackId === String(targetTrack.id) &&
+        Boolean(audio.getAttribute('src')) &&
+        audio.getAttribute('src') !== SILENT_WAV_DATA_URI;
+
+      if (!sameTrack) {
+        beginTrackTransition();
+        audio.dataset.trackId = String(targetTrack.id);
+        audio.src = getTrackStreamUrl(targetTrack);
+      }
+
+      const applySeek = () => {
+        if (targetPos <= 0) return;
+        const maxDur =
+          Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : targetTrack.duration || targetPos;
+        try {
+          audio.currentTime = Math.min(targetPos, maxDur);
+        } catch {
+          // ignore seek errors prior to metadata
+        }
+      };
+
+      if (audio.readyState >= 1) {
+        applySeek();
+      } else if (targetPos > 0) {
+        audio.addEventListener('loadedmetadata', applySeek, {once: true});
+      }
+
+      setQueue(payload.queue);
+      setCurrentIndex(idx);
+      setCurrentTime(targetPos);
+      setDuration(targetTrack.duration || 0);
+      syncMediaSessionMetadata(targetTrack, true);
+
+      if (!payload.isPlaying) {
+        endTrackTransition();
+        userPausedRef.current = true;
+        wantPlayingRef.current = false;
+        stateRef.current.isPlaying = false;
+        audio.pause();
+        setIsPlaying(false);
+        setMediaSessionPlaybackState('paused');
+        return 'applied';
+      }
+
+      userPausedRef.current = false;
+      wantPlayingRef.current = true;
+      stateRef.current.isPlaying = true;
+      activateMediaSessionForPlayback(targetTrack, true);
+      try {
+        await audio.play();
+        setIsPlaying(true);
+        syncMediaSessionPositionState(audio);
+        return 'applied';
+      } catch (err: unknown) {
+        endTrackTransition();
+        wantPlayingRef.current = false;
+        stateRef.current.isPlaying = false;
+        setIsPlaying(false);
+        setMediaSessionPlaybackState('paused');
+        if (err instanceof DOMException && err.name === 'NotAllowedError') {
+          return 'needs_gesture';
+        }
+        return 'needs_gesture';
+      }
+    },
+    [
+      activateMediaSessionForPlayback,
+      beginTrackTransition,
+      cancelAutoplayPlan,
+      endTrackTransition,
+      setMediaSessionPlaybackState,
+      syncMediaSessionMetadata,
+      syncMediaSessionPositionState,
+    ]
+  );
+
+  const remoteUnlockAudio = useCallback(() => {
+    unlockPersistentAudioElement(audioRef.current ?? getPersistentAudioElement(), false);
+  }, []);
+
+  const remoteHostApi = React.useMemo(
+    () => ({
+      playLocal: remotePlayLocal,
+      pauseLocal: remotePauseLocal,
+      setMuted: setIsMuted,
+      setShuffle: remoteSetShuffle,
+      setRepeat: remoteSetRepeat,
+      applyTransfer: remoteApplyTransfer,
+      unlockAudio: remoteUnlockAudio,
+    }),
+    [
+      remoteApplyTransfer,
+      remotePauseLocal,
+      remotePlayLocal,
+      remoteSetRepeat,
+      remoteSetShuffle,
+      remoteUnlockAudio,
+    ]
+  );
+
   // Keep MediaSession action handlers pointed at the latest callbacks without tearing down listeners
   mediaActionsRef.current = {
     play: () => {
@@ -2357,8 +2571,6 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   }, [cancelAutoplayPlan]);
 
   // Single-flight autoplay & radio runway refiller
-  // Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-  //   frontend/src/services/playback/runway.ts, generatedQueue.ts
   useEffect(() => {
     const intent: AutoplayIntent | null = radioMode
       ? 'radio'
@@ -2582,6 +2794,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         recentlyDownloadedTracks,
         saveYouTubeTrackToLibrary,
         getYouTubeSaveStatus,
+        remoteHostApi,
       }}
     >
       {children}

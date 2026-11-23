@@ -1,4 +1,3 @@
-// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
 import type {RecommendationSource, TrackId} from '../types';
 
 export type ListeningEventType =

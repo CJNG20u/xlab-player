@@ -1,4 +1,3 @@
-// Adapted from Soundsible's tab memory / scroll history / back stack (MIT, (c) 2026 Arzuparreta)
 import {useEffect, useRef} from 'react';
 
 interface BackStackEntry {

@@ -178,7 +178,6 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_lyrics_cache_updated ON lyrics_cache(updated_at);
 
-  -- Adapted from Soundsible (MIT, (c) 2026 Arzuparreta)
   CREATE TABLE IF NOT EXISTS stream_url_cache (
     video_id TEXT PRIMARY KEY,
     url TEXT NOT NULL,
@@ -197,7 +196,6 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_stream_url_cache_expires ON stream_url_cache(expires_at);
 
-  -- Adapted from Soundsible (MIT, (c) 2026 Arzuparreta)
   CREATE TABLE IF NOT EXISTS related_mix (
     video_id TEXT PRIMARY KEY,
     rows_json TEXT NOT NULL,
@@ -206,7 +204,6 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_related_mix_fetched ON related_mix(fetched_at);
 
-  -- Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
   CREATE TABLE IF NOT EXISTS listening_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -412,7 +409,6 @@ export function getRecentPlayHistory(userId: number, limit = 30): PlayHistoryRow
 
 // ---------------------------------------------------------------------------
 // Durable Resolved Stream URL Cache
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/db/media_cache.py
 // ---------------------------------------------------------------------------
 
 export interface StreamUrlCacheRow {
@@ -528,7 +524,6 @@ export function pruneExpiredStreamUrlCache(): number {
 
 // ---------------------------------------------------------------------------
 // Related Mix Cache (6-hour TTL)
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta)
 // ---------------------------------------------------------------------------
 
 export const RELATED_MIX_TTL_MS = 6 * 60 * 60 * 1000;
@@ -596,7 +591,6 @@ export function pruneExpiredRelatedMixCache(ttlMs = RELATED_MIX_TTL_MS): number 
 
 // ---------------------------------------------------------------------------
 // Per-User Listening Signals (capped at 5,000 events per user)
-// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
 // ---------------------------------------------------------------------------
 
 export const LISTENING_EVENTS_MAX_PER_USER = 5000;

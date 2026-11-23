@@ -1,4 +1,3 @@
-// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
 import {
   getUserListeningEvents,
   LISTENING_EVENTS_MAX_PER_USER,

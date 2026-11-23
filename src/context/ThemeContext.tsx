@@ -7,12 +7,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import {
-  getThemeBaseColor,
-  getUnifiedPageHeaderTopHex,
-  isUnifiedHeaderPath,
-  setDocumentThemeColor,
-} from '../lib/themeColor';
+import {getThemeBaseColor, syncStatusBarColor} from '../lib/themeColor';
 
 export type AppTheme = 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark';
 
@@ -127,13 +122,6 @@ function readStoredTheme(): AppTheme {
   return 'spotify-dark';
 }
 
-function getInitialRouteThemeColor(theme: AppTheme): string {
-  if (typeof window !== 'undefined' && isUnifiedHeaderPath(window.location.pathname)) {
-    return getUnifiedPageHeaderTopHex(theme);
-  }
-  return getThemeBaseColor(theme);
-}
-
 let themeTransitionTimer: number | null = null;
 
 function applyThemeToDocument(theme: AppTheme, animate = false): void {
@@ -152,20 +140,15 @@ function applyThemeToDocument(theme: AppTheme, animate = false): void {
   root.setAttribute('data-theme', theme);
   root.classList.toggle('dark', theme !== 'apple-light');
 
-  const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-  if (themeColorMeta) {
-    const bgPrimary = window.getComputedStyle(root).getPropertyValue('--bg-primary').trim();
-    if (bgPrimary) {
-      themeColorMeta.setAttribute('content', bgPrimary);
-    }
-  }
-
-  const statusBarMeta = document.querySelector<HTMLMetaElement>(
+  let statusBarMeta = document.querySelector<HTMLMetaElement>(
     'meta[name="apple-mobile-web-app-status-bar-style"]'
   );
-  if (statusBarMeta) {
-    statusBarMeta.setAttribute('content', 'black-translucent');
+  if (!statusBarMeta) {
+    statusBarMeta = document.createElement('meta');
+    statusBarMeta.name = 'apple-mobile-web-app-status-bar-style';
+    document.head.appendChild(statusBarMeta);
   }
+  statusBarMeta.setAttribute('content', theme === 'apple-light' ? 'default' : 'black-translucent');
 
   if (animate) {
     themeTransitionTimer = window.setTimeout(() => {
@@ -202,14 +185,14 @@ export const ThemeProvider: React.FC<{children: React.ReactNode}> = ({children})
       // ignore storage errors
     }
     applyThemeToDocument(next, true);
-    setDocumentThemeColor(getInitialRouteThemeColor(next));
+    syncStatusBarColor(next);
   }, []);
 
   useLayoutEffect(() => {
     if (!hasAppliedInitialRef.current) {
       hasAppliedInitialRef.current = true;
       applyThemeToDocument(theme, false);
-      setDocumentThemeColor(getInitialRouteThemeColor(theme));
+      syncStatusBarColor(theme);
     }
   }, [theme]);
 

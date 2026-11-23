@@ -21,7 +21,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useLocation, useNavigate, useParams, useSearchParams} from 'react-router-dom';
 import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
@@ -50,7 +50,7 @@ import {
   extractDominantColorFromImage,
   getAlbumColorCacheKey,
   getCachedDominantColor,
-  setDocumentThemeColor,
+  useStatusBarColor,
 } from '../lib/themeColor';
 import type {Playlist, Track} from '../types';
 import {
@@ -891,11 +891,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
     viewFallbackColor,
   ]);
 
-  // Synchronously sync mobile PWA top status bar with the exact top edge of the Home hero gradient
-  useLayoutEffect(() => {
-    if (!isHomeView) return;
-    setDocumentThemeColor(heroTopHexColor);
-  }, [heroTopHexColor, isHomeView]);
+  // Claim mobile PWA top status bar color matching the exact first stop of the Home hero gradient
+  useStatusBarColor(heroTopHexColor, isHomeView);
 
   // Smooth 1:1 horizontal swipe on the Home hero square cover to skip next/previous tracks
   const handleHeroSwipeNext = useCallback(() => {
@@ -1255,6 +1252,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 {
                   '--hero-top-hex': heroTopHexColor,
                   '--hero-mid-hex': `${heroTopHexColor}88`,
+                  ...(isTidal
+                    ? {}
+                    : {
+                        background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
+                      }),
                 } as React.CSSProperties
               }
             >

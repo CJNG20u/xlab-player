@@ -60,7 +60,7 @@
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute('content', color);
           var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
-          if (appleMeta) appleMeta.setAttribute('content', 'black-translucent');
+          if (appleMeta) appleMeta.setAttribute('content', t === 'apple-light' ? 'default' : 'black-translucent');
           root.style.backgroundColor = color;
         } catch (e) {}
       })();

@@ -15,7 +15,6 @@ const CATALOG_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MEMORY_CACHE_MAX_ENTRIES = 200;
 
 // Gentle per-user listening-profile re-ranking constants for Discover "for you" rows.
-// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
 const DISCOVER_PROFILE_TOP_ARTIST_MAX_BONUS = 0.25;
 const DISCOVER_PROFILE_TOP_ARTIST_SCORE_SATURATION = 6.0;
 const DISCOVER_PROFILE_SKIPPED_ARTIST_PENALTY = 0.45;

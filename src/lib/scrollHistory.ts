@@ -1,4 +1,3 @@
-// Adapted from Soundsible's tab memory / scroll history / back stack (MIT, (c) 2026 Arzuparreta)
 import {useEffect, useLayoutEffect, useRef} from 'react';
 import {useLocation, useNavigationType} from 'react-router-dom';
 import {useMainScroll} from '../context/MainScrollContext';

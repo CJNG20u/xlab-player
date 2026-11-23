@@ -20,8 +20,6 @@ import {
 
 // ---------------------------------------------------------------------------
 // Related Videos Source (RD Mix flat extraction + title/artist search fallback)
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-//   shared/downloader/youtube/search.py (get_related_videos)
 // ---------------------------------------------------------------------------
 
 export interface RelatedVideoRow {

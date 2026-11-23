@@ -9,6 +9,7 @@ import {
   LogOut,
   Maximize2,
   Mic2,
+  MonitorSpeaker,
   Pause,
   Play,
   Plus,
@@ -22,7 +23,7 @@ import {
   VolumeX,
   WifiOff,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useLayoutEffect, useState} from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {NavLink, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {useAuth} from '../context/AuthContext';
 import {MainScrollProvider} from '../context/MainScrollContext';
@@ -30,20 +31,19 @@ import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
+import {useRemoteHost} from '../hooks/useRemoteHost';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
+import {useRemoteControl} from '../lib/remoteControl';
 import {useMainScrollRestoration} from '../lib/scrollHistory';
 import {getTabGroup, openPrimaryDestination, rememberTabLocation} from '../lib/tabMemory';
-import {
-  getUnifiedPageHeaderGradient,
-  getUnifiedPageHeaderTopHex,
-  setDocumentThemeColor,
-} from '../lib/themeColor';
-import type {Playlist} from '../types';
+import {getUnifiedPageHeaderTopHex, useStatusBarColor} from '../lib/themeColor';
+import type {Playlist, RepeatMode} from '../types';
 import {getOfflinePlaylists, subscribeOfflineStore} from '../utils/offlineStore';
 import {AlbumArt} from './AlbumArt';
 import {BrandLogo} from './BrandLogo';
 import {CreatePlaylistModal} from './CreatePlaylistModal';
+import {DeviceSheet} from './DeviceSheet';
 import {QueueDrawer} from './QueueDrawer';
 
 const MainScrollRestorationSync: React.FC = () => {
@@ -53,7 +53,7 @@ const MainScrollRestorationSync: React.FC = () => {
 
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
-  const {theme} = useTheme();
+  const {theme, baseThemeColor} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -78,7 +78,13 @@ export const AppShell: React.FC = () => {
     libraryRefreshVersion,
     saveYouTubeTrackToLibrary,
     getYouTubeSaveStatus,
+    remoteHostApi,
   } = usePlayer();
+
+  // Keep SSE device presence, command execution, and local state publishing active across all routes
+  useRemoteHost();
+  const remote = useRemoteControl();
+  const onlineOtherDeviceCount = remote.otherDevices.filter((d) => d.online).length;
 
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
@@ -96,9 +102,115 @@ export const AppShell: React.FC = () => {
     setMainElement(node);
   }, []);
 
+  // Effective transport state & handlers: route to remote target when selected (never starting local audio)
+  const displayTrack = remote.isRemoteActive
+    ? remote.targetState?.track
+      ? {
+          id: remote.targetState.track.id,
+          title: remote.targetState.track.title,
+          artist: remote.targetState.track.artist,
+          album: remote.targetState.track.album,
+          cover_file: remote.targetState.track.cover_file ?? null,
+          coverUrl: remote.targetState.track.cover ?? undefined,
+          dominant_color: remote.targetState.track.dominant_color || '#1c3b29',
+          isYouTubeStream: Boolean(
+            remote.targetState.track.isYouTubeStream || remote.targetState.track.videoId
+          ),
+          liked: false,
+          duration: remote.targetState.track.duration || 0,
+        }
+      : null
+    : currentTrack;
+
+  const displayIsPlaying = remote.isRemoteActive
+    ? Boolean(remote.targetState?.isPlaying)
+    : isPlaying;
+  const displayTime = remote.isRemoteActive ? remote.extrapolatedPositionSec : currentTime;
+  const displayDuration = remote.isRemoteActive
+    ? remote.targetState?.track?.duration || 0
+    : duration;
+  const displayVolume = remote.isRemoteActive ? (remote.targetState?.volume ?? 1) : volume;
+  const displayMuted = remote.isRemoteActive ? Boolean(remote.targetState?.muted) : isMuted;
+  const displayShuffle = remote.isRemoteActive ? Boolean(remote.targetState?.shuffle) : shuffle;
+  const displayRepeat: RepeatMode = remote.isRemoteActive
+    ? (remote.targetState?.repeat ?? 'off')
+    : repeat;
+
+  const handleTogglePlay = useCallback(() => {
+    if (remote.isRemoteActive) {
+      void remote.send('toggle');
+      return;
+    }
+    togglePlay();
+  }, [remote, togglePlay]);
+
+  const handleNextTrack = useCallback(() => {
+    if (remote.isRemoteActive) {
+      void remote.send('next');
+      return;
+    }
+    nextTrack();
+  }, [nextTrack, remote]);
+
+  const handlePrevTrack = useCallback(() => {
+    if (remote.isRemoteActive) {
+      void remote.send('prev');
+      return;
+    }
+    prevTrack();
+  }, [prevTrack, remote]);
+
+  const handleSeek = useCallback(
+    (pos: number) => {
+      if (remote.isRemoteActive) {
+        void remote.send('seek', {positionSec: pos});
+        return;
+      }
+      seek(pos);
+    },
+    [remote, seek]
+  );
+
+  const handleSetVolume = useCallback(
+    (vol: number) => {
+      if (remote.isRemoteActive) {
+        void remote.send('setVolume', {volume: vol});
+        return;
+      }
+      setVolume(vol);
+    },
+    [remote, setVolume]
+  );
+
+  const handleToggleMute = useCallback(() => {
+    if (remote.isRemoteActive) {
+      void remote.send('mute', {muted: !displayMuted});
+      return;
+    }
+    toggleMute();
+  }, [displayMuted, remote, toggleMute]);
+
+  const handleToggleShuffle = useCallback(() => {
+    if (remote.isRemoteActive) {
+      void remote.send('shuffle', {shuffle: !displayShuffle});
+      return;
+    }
+    toggleShuffle();
+  }, [displayShuffle, remote, toggleShuffle]);
+
+  const handleCycleRepeat = useCallback(() => {
+    if (remote.isRemoteActive) {
+      const nextMode: RepeatMode =
+        displayRepeat === 'off' ? 'all' : displayRepeat === 'all' ? 'one' : 'off';
+      void remote.send('repeat', {repeat: nextMode});
+      return;
+    }
+    cycleRepeat();
+  }, [cycleRepeat, displayRepeat, remote]);
+
   const miniPlayerSwipe = useSwipeTrackGesture({
-    onSwipeNext: nextTrack,
-    onSwipePrev: prevTrack,
+    onSwipeNext: handleNextTrack,
+    onSwipePrev: handlePrevTrack,
     threshold: 75,
     deadZone: 10,
     velocityThreshold: 0.55,
@@ -135,8 +247,9 @@ export const AppShell: React.FC = () => {
     });
   }, [offline, loadPlaylists]);
 
-  const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-  const volPct = (isMuted ? 0 : volume) * 100;
+  const progressPct =
+    displayDuration > 0 ? Math.min(100, (displayTime / displayDuration) * 100) : 0;
+  const volPct = (displayMuted ? 0 : displayVolume) * 100;
   const isNowPlayingPage = location.pathname === '/now-playing';
   const isHomePage = location.pathname === '/';
   const hasOwnBottomClearance =
@@ -144,10 +257,12 @@ export const AppShell: React.FC = () => {
     location.pathname === '/discover' ||
     location.pathname === '/search' ||
     location.pathname.startsWith('/playlists');
-  const stageTint = currentTrack?.dominant_color || '#1c3b29';
-  const isCurrentYouTube = Boolean(currentTrack?.isYouTubeStream);
+  const stageTint = displayTrack?.dominant_color || '#1c3b29';
+  const isCurrentYouTube = Boolean(displayTrack?.isYouTubeStream);
   const currentYtSaveStatus =
-    currentTrack && isCurrentYouTube ? getYouTubeSaveStatus(currentTrack.id) : 'idle';
+    !remote.isRemoteActive && currentTrack && isCurrentYouTube
+      ? getYouTubeSaveStatus(currentTrack.id)
+      : 'idle';
 
   const handleSaveCurrentYouTube = useCallback(async () => {
     if (!currentTrack || !currentTrack.isYouTubeStream) return;
@@ -158,15 +273,10 @@ export const AppShell: React.FC = () => {
   const isPlaylistsRootPage = location.pathname === '/playlists';
   const usesUnifiedHeader = !isNowPlayingPage && !isHomePage && !isPlaylistsRootPage;
   const unifiedHeaderTopHex = getUnifiedPageHeaderTopHex(theme);
-  const unifiedHeaderGradient = getUnifiedPageHeaderGradient(theme);
+  const unifiedHeaderGradient = `linear-gradient(180deg, ${unifiedHeaderTopHex} 0%, ${baseThemeColor} 240px, ${baseThemeColor} 100%)`;
 
-  // Synchronously match mobile status bar (`meta[name="theme-color"]` & root/body bg)
-  // to the exact top edge of the unified header gradient on Playlists, Discover, and Settings.
-  useLayoutEffect(() => {
-    if (usesUnifiedHeader) {
-      setDocumentThemeColor(unifiedHeaderTopHex);
-    }
-  }, [usesUnifiedHeader, unifiedHeaderTopHex, location.pathname, theme]);
+  // Claim mobile status bar color to match the exact first color stop of the unified header gradient.
+  useStatusBarColor(unifiedHeaderTopHex, usesUnifiedHeader);
 
   useEffect(() => {
     rememberTabLocation(location.pathname, location.search);
@@ -346,10 +456,10 @@ export const AppShell: React.FC = () => {
       </div>
 
       {/* Desktop Fixed Bottom Playback Bar (90px) */}
-      <footer className="hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(220px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] bg-[var(--footer-bg)] backdrop-blur-xl px-4 z-30">
+      <footer className="hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(240px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] bg-[var(--footer-bg)] backdrop-blur-xl px-4 z-30">
         {/* Left: Mini Cover + Title + Artist + Heart */}
         <div className="flex items-center gap-3.5 min-w-0">
-          {currentTrack ? (
+          {displayTrack ? (
             <>
               <button
                 type="button"
@@ -358,10 +468,10 @@ export const AppShell: React.FC = () => {
                 aria-label="Open Now Playing"
               >
                 <AlbumArt
-                  coverFile={currentTrack.cover_file}
-                  externalUrl={currentTrack.coverUrl}
-                  alt={currentTrack.title}
-                  color={currentTrack.dominant_color}
+                  coverFile={displayTrack.cover_file}
+                  externalUrl={displayTrack.coverUrl}
+                  alt={displayTrack.title}
+                  color={displayTrack.dominant_color}
                   className="w-14 h-14 rounded-md shadow-md"
                   iconSize={22}
                 />
@@ -372,81 +482,93 @@ export const AppShell: React.FC = () => {
                   onClick={() => navigate('/now-playing')}
                   className="block max-w-full truncate text-sm font-semibold text-[var(--text-primary)] hover:underline text-left"
                 >
-                  {currentTrack.title}
+                  {displayTrack.title}
                 </button>
                 <div className="flex items-center gap-1.5 min-w-0">
-                  {isCurrentYouTube ? (
+                  {isCurrentYouTube || remote.isRemoteActive ? (
                     <span className="truncate text-xs text-[var(--text-secondary)]">
-                      {currentTrack.artist}
+                      {displayTrack.artist}
                     </span>
                   ) : (
                     <button
                       type="button"
                       onClick={() =>
-                        navigate(`/?artist=${encodeURIComponent(currentTrack.artist)}`)
+                        navigate(`/?artist=${encodeURIComponent(displayTrack.artist)}`)
                       }
                       className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left"
                     >
-                      {currentTrack.artist}
+                      {displayTrack.artist}
                     </button>
                   )}
-                  {isCurrentYouTube && (
+                  {remote.isRemoteActive && remote.targetDevice ? (
+                    <span className="shrink-0 rounded border border-[var(--accent)] bg-[var(--accent-soft)] px-1.5 py-0.5 text-[9px] font-semibold tracking-wide leading-none text-[var(--accent)] truncate max-w-[110px]">
+                      {remote.targetDevice.name}
+                    </span>
+                  ) : isCurrentYouTube ? (
                     <span className="shrink-0 rounded border border-[var(--badge-source-border)] bg-[var(--badge-source-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--badge-source-text)]">
                       Web
                     </span>
-                  )}
+                  ) : null}
                 </div>
               </div>
-              {isCurrentYouTube ? (
-                canDownload && !offline ? (
+              {!remote.isRemoteActive && currentTrack ? (
+                isCurrentYouTube ? (
+                  canDownload && !offline ? (
+                    <button
+                      type="button"
+                      disabled={currentYtSaveStatus === 'saving'}
+                      onClick={() => void handleSaveCurrentYouTube()}
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                        currentYtSaveStatus === 'saved'
+                          ? 'text-[var(--accent)]'
+                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
+                      }`}
+                      title={
+                        currentYtSaveStatus === 'saved'
+                          ? 'Queued for library download'
+                          : 'Save to Library'
+                      }
+                      aria-label="Save to Library"
+                    >
+                      {currentYtSaveStatus === 'saving' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : currentYtSaveStatus === 'saved' ? (
+                        <Check className="w-4 h-4 stroke-[2.5]" />
+                      ) : (
+                        <Plus className="w-4 h-4 stroke-[2.5]" />
+                      )}
+                    </button>
+                  ) : null
+                ) : (
                   <button
                     type="button"
-                    disabled={currentYtSaveStatus === 'saving'}
-                    onClick={() => void handleSaveCurrentYouTube()}
+                    onClick={() => void toggleLikeTrack(currentTrack.id)}
                     className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
-                      currentYtSaveStatus === 'saved'
+                      currentTrack.liked
                         ? 'text-[var(--accent)]'
-                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                     }`}
-                    title={
-                      currentYtSaveStatus === 'saved'
-                        ? 'Queued for library download'
-                        : 'Save to Library'
-                    }
-                    aria-label="Save to Library"
+                    aria-label={currentTrack.liked ? 'Unlike track' : 'Like track'}
                   >
-                    {currentYtSaveStatus === 'saving' ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : currentYtSaveStatus === 'saved' ? (
-                      <Check className="w-4 h-4 stroke-[2.5]" />
-                    ) : (
-                      <Plus className="w-4 h-4 stroke-[2.5]" />
-                    )}
+                    <Heart className={`w-4 h-4 ${currentTrack.liked ? 'fill-current' : ''}`} />
                   </button>
-                ) : null
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => void toggleLikeTrack(currentTrack.id)}
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
-                    currentTrack.liked
-                      ? 'text-[var(--accent)]'
-                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                  }`}
-                  aria-label={currentTrack.liked ? 'Unlike track' : 'Like track'}
-                >
-                  <Heart className={`w-4 h-4 ${currentTrack.liked ? 'fill-current' : ''}`} />
-                </button>
-              )}
+                )
+              ) : null}
             </>
           ) : (
             <div className="flex items-center gap-3 text-[var(--text-muted)]">
               <div className="h-14 w-14 rounded-md bg-[var(--bg-elevated)] flex items-center justify-center">
                 <ListMusic className="w-5 h-5" />
               </div>
-              <div>
-                <p className="text-sm font-medium text-[var(--text-secondary)]">Not playing</p>
-                <p className="text-xs text-[var(--text-muted)]">Select a track to begin</p>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-[var(--text-secondary)] truncate">
+                  {remote.isRemoteActive && remote.targetDevice
+                    ? `${remote.targetDevice.name} · Idle`
+                    : 'Not playing'}
+                </p>
+                <p className="text-xs text-[var(--text-muted)]">
+                  {remote.isRemoteActive ? 'Remote control active' : 'Select a track to begin'}
+                </p>
               </div>
             </div>
           )}
@@ -457,9 +579,9 @@ export const AppShell: React.FC = () => {
           <div className="flex items-center gap-5">
             <button
               type="button"
-              onClick={toggleShuffle}
+              onClick={handleToggleShuffle}
               className={`relative p-1.5 transition-colors ${
-                shuffle
+                displayShuffle
                   ? 'text-[var(--accent)]'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               }`}
@@ -469,8 +591,8 @@ export const AppShell: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={prevTrack}
-              disabled={!currentTrack}
+              onClick={handlePrevTrack}
+              disabled={!displayTrack}
               className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors"
               aria-label="Previous track"
             >
@@ -478,12 +600,14 @@ export const AppShell: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={togglePlay}
-              disabled={!currentTrack}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--btn-contrast-bg)] text-[var(--btn-contrast-text)] hover:scale-105 active:scale-95 disabled:opacity-40 transition-transform"
-              aria-label={isPlaying ? 'Pause' : 'Play'}
+              onClick={handleTogglePlay}
+              disabled={!displayTrack}
+              className={`flex h-9 w-9 items-center justify-center rounded-full bg-[var(--btn-contrast-bg)] text-[var(--btn-contrast-text)] hover:scale-105 active:scale-95 disabled:opacity-40 transition-transform ${
+                remote.isPending ? 'opacity-70' : ''
+              }`}
+              aria-label={displayIsPlaying ? 'Pause' : 'Play'}
             >
-              {isPlaying ? (
+              {displayIsPlaying ? (
                 <Pause className="w-4 h-4 fill-current" />
               ) : (
                 <Play className="w-4 h-4 fill-current ml-0.5" />
@@ -491,8 +615,8 @@ export const AppShell: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={nextTrack}
-              disabled={!currentTrack}
+              onClick={handleNextTrack}
+              disabled={!displayTrack}
               className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors"
               aria-label="Next track"
             >
@@ -500,15 +624,15 @@ export const AppShell: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={cycleRepeat}
+              onClick={handleCycleRepeat}
               className={`p-1.5 transition-colors ${
-                repeat !== 'off'
+                displayRepeat !== 'off'
                   ? 'text-[var(--accent)]'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               }`}
-              aria-label={`Repeat: ${repeat}`}
+              aria-label={`Repeat: ${displayRepeat}`}
             >
-              {repeat === 'one' ? (
+              {displayRepeat === 'one' ? (
                 <Repeat1 className="w-4 h-4" />
               ) : (
                 <Repeat className="w-4 h-4" />
@@ -518,16 +642,16 @@ export const AppShell: React.FC = () => {
 
           <div className="xlab-slider-group flex w-full max-w-xl items-center gap-2.5">
             <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10 text-right">
-              {formatDuration(currentTime)}
+              {formatDuration(displayTime)}
             </span>
             <input
               type="range"
               min={0}
-              max={duration || 1}
+              max={displayDuration || 1}
               step={0.1}
-              value={Math.min(currentTime, duration || 1)}
-              disabled={!currentTrack}
-              onChange={(e) => seek(parseFloat(e.target.value))}
+              value={Math.min(displayTime, displayDuration || 1)}
+              disabled={!displayTrack}
+              onChange={(e) => handleSeek(parseFloat(e.target.value))}
               className="xlab-slider flex-1 h-1"
               style={{
                 background: `linear-gradient(to right, var(--accent) ${progressPct}%, var(--slider-track) ${progressPct}%)`,
@@ -536,20 +660,20 @@ export const AppShell: React.FC = () => {
               aria-label="Seek progress"
             />
             <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10">
-              {formatDuration(duration)}
+              {formatDuration(displayDuration)}
             </span>
           </div>
         </div>
 
-        {/* Right: Lyrics + Queue + Volume + Expand */}
-        <div className="flex items-center justify-end gap-3">
+        {/* Right: Lyrics + Queue + Devices + Volume + Expand */}
+        <div className="flex items-center justify-end gap-2.5">
           <button
             type="button"
             onClick={() => {
               setLyricsOpen(true);
               navigate('/now-playing');
             }}
-            disabled={!currentTrack}
+            disabled={!displayTrack}
             className="p-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors"
             title="Lyrics"
             aria-label="Open Lyrics"
@@ -569,15 +693,37 @@ export const AppShell: React.FC = () => {
           >
             <ListMusic className="w-4 h-4" />
           </button>
+          {!offline && (
+            <button
+              type="button"
+              onClick={() => remote.setDeviceSheetOpen(true)}
+              className={`relative p-2 transition-colors ${
+                remote.isRemoteActive
+                  ? 'text-[var(--accent)]'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+              title={
+                remote.isRemoteActive && remote.targetDevice
+                  ? `Controlling ${remote.targetDevice.name}`
+                  : 'Devices'
+              }
+              aria-label="Devices"
+            >
+              <MonitorSpeaker className="w-4 h-4" />
+              {(remote.isRemoteActive || onlineOtherDeviceCount > 0) && (
+                <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+              )}
+            </button>
+          )}
 
           <div className="xlab-slider-group flex items-center gap-2 w-28">
             <button
               type="button"
-              onClick={toggleMute}
+              onClick={handleToggleMute}
               className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-              aria-label={isMuted ? 'Unmute' : 'Mute'}
+              aria-label={displayMuted ? 'Unmute' : 'Mute'}
             >
-              {isMuted || volume === 0 ? (
+              {displayMuted || displayVolume === 0 ? (
                 <VolumeX className="w-4 h-4" />
               ) : (
                 <Volume2 className="w-4 h-4" />
@@ -588,8 +734,8 @@ export const AppShell: React.FC = () => {
               min={0}
               max={1}
               step={0.01}
-              value={isMuted ? 0 : volume}
-              onChange={(e) => setVolume(parseFloat(e.target.value))}
+              value={displayMuted ? 0 : displayVolume}
+              onChange={(e) => handleSetVolume(parseFloat(e.target.value))}
               className="xlab-slider flex-1 h-1"
               style={{
                 background: `linear-gradient(to right, var(--accent) ${volPct}%, var(--slider-track) ${volPct}%)`,
@@ -616,13 +762,13 @@ export const AppShell: React.FC = () => {
       </footer>
 
       {/* Mobile Floating Mini-Player (64px) above safe-area-padded 60px Bottom Nav */}
-      {!isNowPlayingPage && currentTrack && (
+      {!isNowPlayingPage && (displayTrack || remote.isRemoteActive) && (
         <div
           {...miniPlayerSwipe.handlers}
           className={miniPlayerClassName}
           style={miniPlayerSurfaceStyle}
         >
-          <div className="flex h-full items-center gap-3 px-3">
+          <div className="flex h-full items-center gap-2 px-3">
             <button
               ref={miniPlayerSwipe.ref}
               type="button"
@@ -634,22 +780,24 @@ export const AppShell: React.FC = () => {
               className="flex min-w-0 flex-1 items-center gap-3 text-left select-none"
             >
               <AlbumArt
-                coverFile={currentTrack.cover_file}
-                externalUrl={currentTrack.coverUrl}
-                alt={currentTrack.title}
-                color={currentTrack.dominant_color}
+                coverFile={displayTrack?.cover_file ?? null}
+                externalUrl={displayTrack?.coverUrl}
+                alt={displayTrack?.title || remote.targetDevice?.name || 'Playback'}
+                color={displayTrack?.dominant_color || '#1c3b29'}
                 className="w-11 h-11 rounded-md pointer-events-none shadow-sm"
                 iconSize={18}
               />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold truncate text-[var(--miniplayer-text)]">
-                  {currentTrack.title}
+                  {displayTrack ? displayTrack.title : `${remote.targetDevice?.name || 'Device'} · Idle`}
                 </p>
                 <div className="flex items-center gap-1.5 min-w-0">
                   <p className="text-xs truncate text-[var(--miniplayer-subtext)]">
-                    {currentTrack.artist}
+                    {remote.isRemoteActive && remote.targetDevice
+                      ? `${remote.targetDevice.name}${displayTrack ? ` · ${displayTrack.artist}` : ''}`
+                      : displayTrack?.artist}
                   </p>
-                  {isCurrentYouTube && (
+                  {!remote.isRemoteActive && isCurrentYouTube && (
                     <span className="shrink-0 rounded border border-[var(--miniplayer-badge-border)] bg-[var(--miniplayer-badge-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--miniplayer-badge-text)]">
                       Web
                     </span>
@@ -658,57 +806,80 @@ export const AppShell: React.FC = () => {
               </div>
             </button>
 
-            {isCurrentYouTube ? (
-              canDownload && !offline ? (
-                <button
-                  type="button"
-                  data-no-swipe="true"
-                  disabled={currentYtSaveStatus === 'saving'}
-                  onClick={() => void handleSaveCurrentYouTube()}
-                  className={`flex h-11 w-11 items-center justify-center ${
-                    currentYtSaveStatus === 'saved'
-                      ? 'text-[var(--accent)]'
-                      : 'text-[var(--miniplayer-icon)]'
-                  }`}
-                  title={
-                    currentYtSaveStatus === 'saved'
-                      ? 'Queued for library download'
-                      : 'Save to Library'
-                  }
-                  aria-label="Save to Library"
-                >
-                  {currentYtSaveStatus === 'saving' ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : currentYtSaveStatus === 'saved' ? (
-                    <Check className="w-5 h-5 stroke-[2.5]" />
-                  ) : (
-                    <Plus className="w-5 h-5 stroke-[2.5]" />
-                  )}
-                </button>
-              ) : null
-            ) : (
+            {!offline && (
               <button
                 type="button"
                 data-no-swipe="true"
-                onClick={() => void toggleLikeTrack(currentTrack.id)}
-                className={`flex h-11 w-11 items-center justify-center ${
-                  currentTrack.liked
-                    ? 'text-[var(--accent)]'
-                    : 'text-[var(--miniplayer-icon)]'
+                onClick={() => remote.setDeviceSheetOpen(true)}
+                className={`relative flex h-10 w-10 items-center justify-center ${
+                  remote.isRemoteActive ? 'text-[var(--accent)]' : 'text-[var(--miniplayer-icon)]'
                 }`}
-                aria-label="Like track"
+                aria-label="Devices"
               >
-                <Heart className={`w-5 h-5 ${currentTrack.liked ? 'fill-current' : ''}`} />
+                <MonitorSpeaker className="w-5 h-5" />
+                {(remote.isRemoteActive || onlineOtherDeviceCount > 0) && (
+                  <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                )}
               </button>
             )}
+
+            {!remote.isRemoteActive && currentTrack ? (
+              isCurrentYouTube ? (
+                canDownload && !offline ? (
+                  <button
+                    type="button"
+                    data-no-swipe="true"
+                    disabled={currentYtSaveStatus === 'saving'}
+                    onClick={() => void handleSaveCurrentYouTube()}
+                    className={`flex h-10 w-10 items-center justify-center ${
+                      currentYtSaveStatus === 'saved'
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--miniplayer-icon)]'
+                    }`}
+                    title={
+                      currentYtSaveStatus === 'saved'
+                        ? 'Queued for library download'
+                        : 'Save to Library'
+                    }
+                    aria-label="Save to Library"
+                  >
+                    {currentYtSaveStatus === 'saving' ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : currentYtSaveStatus === 'saved' ? (
+                      <Check className="w-5 h-5 stroke-[2.5]" />
+                    ) : (
+                      <Plus className="w-5 h-5 stroke-[2.5]" />
+                    )}
+                  </button>
+                ) : null
+              ) : (
+                <button
+                  type="button"
+                  data-no-swipe="true"
+                  onClick={() => void toggleLikeTrack(currentTrack.id)}
+                  className={`flex h-10 w-10 items-center justify-center ${
+                    currentTrack.liked
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--miniplayer-icon)]'
+                  }`}
+                  aria-label="Like track"
+                >
+                  <Heart className={`w-5 h-5 ${currentTrack.liked ? 'fill-current' : ''}`} />
+                </button>
+              )
+            ) : null}
+
             <button
               type="button"
               data-no-swipe="true"
-              onClick={togglePlay}
-              className="flex h-11 w-11 items-center justify-center text-[var(--miniplayer-text)]"
-              aria-label={isPlaying ? 'Pause' : 'Play'}
+              disabled={!displayTrack}
+              onClick={handleTogglePlay}
+              className={`flex h-11 w-11 items-center justify-center text-[var(--miniplayer-text)] disabled:opacity-40 ${
+                remote.isPending ? 'opacity-70' : ''
+              }`}
+              aria-label={displayIsPlaying ? 'Pause' : 'Play'}
             >
-              {isPlaying ? (
+              {displayIsPlaying ? (
                 <Pause className="w-6 h-6 fill-current" />
               ) : (
                 <Play className="w-6 h-6 fill-current ml-0.5" />
@@ -755,10 +926,23 @@ export const AppShell: React.FC = () => {
         </nav>
       )}
 
-      {shellToast && (
-        <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
-          {shellToast}
-        </div>
+      {(shellToast || remote.toast) && (
+        remote.toast?.action === 'resume_local' ? (
+          <button
+            type="button"
+            onClick={() => {
+              void remoteHostApi.playLocal();
+              remote.dismissToast();
+            }}
+            className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate hover:opacity-95 active:scale-95 transition-transform"
+          >
+            {remote.toast.message}
+          </button>
+        ) : (
+          <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
+            {remote.toast?.message || shellToast}
+          </div>
+        )
       )}
 
       {/* Offline Mode Indicator */}
@@ -775,6 +959,10 @@ export const AppShell: React.FC = () => {
 
       {/* Modals & Drawers */}
       <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} />
+      <DeviceSheet
+        open={remote.deviceSheetOpen}
+        onClose={() => remote.setDeviceSheetOpen(false)}
+      />
       <CreatePlaylistModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}

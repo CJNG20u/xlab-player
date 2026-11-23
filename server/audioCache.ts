@@ -30,8 +30,6 @@ import {
 
 // ---------------------------------------------------------------------------
 // Audio Disk Cache + Single-Flight Fill + 2-Resolve / 1-Download Prefetch Pool
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-//   shared/preview_cache.py, shared/preview_streams.py, shared/api/routes/playback.py
 // ---------------------------------------------------------------------------
 
 const DEFAULT_AUDIO_CACHE_MB = 2048;
@@ -184,8 +182,7 @@ function parseSingleByteRange(rangeHeader: string, totalBytes: number): ByteRang
 
 /**
  * Pure lookup of a completed audio file on disk.
- * Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_cache.py:
- * intentionally does NOT touch mtime so lookups/prefetches never distort LRU order.
+ * Intentionally does NOT touch mtime so lookups/prefetches never distort LRU order.
  */
 export function getCachedAudio(videoId: string): CachedAudioEntry | null {
   if (!isAudioCacheEnabled()) return null;
@@ -258,7 +255,6 @@ let enforcementScheduled = false;
 /**
  * Sweep stale `.part` / `.tmp` files (> 1 hour old, not actively written) and evict
  * oldest-mtime `.audio` + `.meta.json` pairs until total cache size <= AUDIO_CACHE_MB.
- * Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_cache.py.
  */
 export function enforceAudioCacheLimit(): {
   totalBytes: number;
@@ -369,7 +365,6 @@ function scheduleCacheEnforcement(): void {
 
 // ---------------------------------------------------------------------------
 // Single-Flight Per-Track Fill + Priority Upstream Lane
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/preview_streams.py
 // ---------------------------------------------------------------------------
 
 interface FillState {
@@ -890,7 +885,6 @@ function startOrAttachFill(
 
 // ---------------------------------------------------------------------------
 // HTTP Serving from Complete Disk File or Safely Growing `.part` File
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/api/routes/playback.py
 // ---------------------------------------------------------------------------
 
 function serveCompletedDiskFile(
@@ -1312,8 +1306,6 @@ export async function serveAudioFromDiskOrFill(
 
 // ---------------------------------------------------------------------------
 // Background Prefetch Worker Pool: 2 Resolve Workers + 1 Download Worker
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
-//   shared/preview_cache.py & shared/preview_streams.py
 // ---------------------------------------------------------------------------
 
 interface ResolveTask {

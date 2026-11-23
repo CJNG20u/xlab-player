@@ -26,7 +26,6 @@ import {getRelatedVideos} from './related.ts';
 
 // ---------------------------------------------------------------------------
 // Autoplay & Radio Orchestrator (15 s deadline + prefetch handoff)
-// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/music_candidates.py
 // ---------------------------------------------------------------------------
 
 export const AUTOPLAY_OVERALL_DEADLINE_MS = 15_000;
@@ -145,7 +144,6 @@ function enrichTrackInputFromDb(item: AutoplayContextTrackInput): AutoplayContex
 
 /**
  * Normalize and deduplicate context tracks (oldest -> newest, capped at 5) with seed as newest.
- * Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — planner_context in music_candidates.py
  */
 function buildEffectiveContext(
   seed: AutoplayContextTrackInput,

@@ -1,4 +1,3 @@
-// Listening signal rules adapted from Soundsible's ListeningLearning (MIT, (c) 2026 Arzuparreta)
 import {Router} from 'express';
 import {type AuthRequest, requireAuth} from '../auth.ts';
 import {

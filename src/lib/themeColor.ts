@@ -1,3 +1,5 @@
+import {useId, useLayoutEffect, useRef} from 'react';
+
 export const DEFAULT_APP_THEME_COLOR = '#121212';
 export const THEME_BASE_COLORS = {
   'spotify-dark': '#121212',
@@ -379,4 +381,94 @@ export function setDocumentThemeColor(hexColor: string): void {
   if (document.body) {
     document.body.style.backgroundColor = normalized;
   }
+}
+
+interface StatusBarClaim {
+  id: string;
+  hex: string;
+}
+
+const statusBarClaims: StatusBarClaim[] = [];
+
+/**
+ * Returns the winning status-bar color: the most recently registered active claim,
+ * or the active theme's base color if no claims are registered.
+ */
+export function getWinningStatusBarColor(theme?: string | null): string {
+  if (statusBarClaims.length > 0) {
+    return statusBarClaims[statusBarClaims.length - 1].hex;
+  }
+  if (theme !== undefined) {
+    return getThemeBaseColor(theme);
+  }
+  return getActiveDocumentBaseThemeColor();
+}
+
+/**
+ * Re-applies the winning status-bar color via `setDocumentThemeColor`.
+ * Call after `data-theme` changes so fallback colors update immediately.
+ */
+export function syncStatusBarColor(theme?: string | null): void {
+  setDocumentThemeColor(getWinningStatusBarColor(theme));
+}
+
+/**
+ * Registers or updates a status-bar color claim in the module-level stack and returns
+ * a release function. Updating an existing claim preserves its stack position so a
+ * parent update (e.g. theme switch) never overrides a more-recently mounted child claim.
+ */
+export function claimStatusBarColor(id: string, hex: string): () => void {
+  const normalized = normalizeHexColor(hex, getActiveDocumentBaseThemeColor());
+  const existingIdx = statusBarClaims.findIndex((claim) => claim.id === id);
+  if (existingIdx >= 0) {
+    statusBarClaims[existingIdx].hex = normalized;
+  } else {
+    statusBarClaims.push({id, hex: normalized});
+  }
+  syncStatusBarColor();
+
+  return () => {
+    const idx = statusBarClaims.findIndex((claim) => claim.id === id);
+    if (idx >= 0) {
+      statusBarClaims.splice(idx, 1);
+      syncStatusBarColor();
+    }
+  };
+}
+
+/**
+ * React hook that claims the mobile status-bar color in a layout effect,
+ * updates the claim in-place when `hex` changes, and releases it on cleanup
+ * or when `enabled` becomes false. Safe under StrictMode double effects.
+ */
+export function useStatusBarColor(hex: string | null, enabled = true): void {
+  const id = useId();
+  const releaseRef = useRef<(() => void) | null>(null);
+  const hexRef = useRef<string | null>(hex);
+  hexRef.current = hex;
+
+  useLayoutEffect(() => {
+    if (!enabled) {
+      releaseRef.current?.();
+      releaseRef.current = null;
+      return;
+    }
+    if (hexRef.current) {
+      releaseRef.current = claimStatusBarColor(id, hexRef.current);
+    }
+    return () => {
+      releaseRef.current?.();
+      releaseRef.current = null;
+    };
+  }, [id, enabled]);
+
+  useLayoutEffect(() => {
+    if (!enabled) return;
+    if (hex) {
+      releaseRef.current = claimStatusBarColor(id, hex);
+    } else {
+      releaseRef.current?.();
+      releaseRef.current = null;
+    }
+  }, [id, hex, enabled]);
 }

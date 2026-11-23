@@ -105,7 +105,6 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   const touchStartPosRef = useRef<{x: number; y: number} | null>(null);
   const didLongPressRef = useRef(false);
 
-  // Virtualization approach inspired by Soundsible (MIT, (c) 2026 Arzuparreta)
   const isVirtualized = tracks.length > VIRTUALIZATION_THRESHOLD;
 
   const estimateRowSize = useCallback(() => {

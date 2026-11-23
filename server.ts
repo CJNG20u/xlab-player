@@ -41,6 +41,7 @@ import {
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
+import {deviceRouter} from './server/routes/deviceRoutes.ts';
 import {discoverRouter, downloadRouter} from './server/routes/downloadRoutes.ts';
 import {libraryRouter} from './server/routes/libraryRoutes.ts';
 import {listeningRouter} from './server/routes/listeningRoutes.ts';
@@ -152,6 +153,7 @@ async function startServer() {
   app.use('/api', libraryRouter);
   app.use('/api', discoverRouter);
   app.use('/api', listeningRouter);
+  app.use('/api', deviceRouter);
   app.use('/api/download', downloadRouter);
   app.use('/api/admin', adminRouter);
 
@@ -808,7 +810,6 @@ async function startServer() {
 
   // Dedicated prefetch endpoint: accepts { videoIds: string[] } (max 3), rate-limited to 60/min.
   // Runs in background 2-resolve / 1-download workers without android_vr so ad gates clear ahead of play.
-  // Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) — shared/api/routes/playback.py
   app.post('/api/prefetch', requireAuth, (req: AuthRequest, res) => {
     const rateKey = req.user?.id ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
     const rate = checkPrefetchRateLimit(rateKey);

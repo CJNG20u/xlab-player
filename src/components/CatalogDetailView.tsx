@@ -9,7 +9,7 @@ import {
   Play,
   RefreshCw,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
 import {
@@ -25,7 +25,7 @@ import {
   extractDominantColorFromImage,
   getCachedDominantColor,
   getUnifiedPageHeaderTopHex,
-  setDocumentThemeColor,
+  useStatusBarColor,
 } from '../lib/themeColor';
 import type {
   DiscoverAlbumDetail,
@@ -540,14 +540,9 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
       : computeNowPlayingTopHex(sampledHeroColor);
   }, [error, isLight, isTidal, sampledHeroColor, theme]);
 
-  // Synchronously match mobile status bar (`meta[name="theme-color"]` & root/body bg)
-  // to the top edge of the Artist/Album hero backdrop and restore on Back/unmount.
-  useLayoutEffect(() => {
-    setDocumentThemeColor(detailTopHexColor);
-    return () => {
-      setDocumentThemeColor(getUnifiedPageHeaderTopHex(theme));
-    };
-  }, [detailTopHexColor, theme]);
+  // Claim mobile status bar color matching the exact top edge of the Artist/Album hero backdrop.
+  // Automatically releases on Back/unmount so AppShell's unified header claim wins again.
+  useStatusBarColor(detailTopHexColor);
 
   const latestRelease = useMemo(() => {
     if (!artist) return null;
