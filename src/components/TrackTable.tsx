@@ -23,6 +23,11 @@ import type {Playlist, Track} from '../types';
 import {AlbumArt} from './AlbumArt';
 import {ConfirmDeleteModal} from './ConfirmDeleteModal';
 
+function formatDisplayTrackTitle(title: string): string {
+  const cleaned = title.replace(/^\s*\d{1,3}(?:\.|\)|\s+-)\s+/, '').trim();
+  return cleaned || title;
+}
+
 interface TrackTableProps {
   tracks: Track[];
   playlists: Playlist[];
@@ -410,7 +415,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                       isActive ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
                     }`}
                   >
-                    {track.title}
+                    {formatDisplayTrackTitle(track.title)}
                   </button>
                   <div className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)] truncate">
                     {isTidal && track.format && (
@@ -432,8 +437,6 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     ) : (
                       <span className="truncate">{track.artist}</span>
                     )}
-                    <span className="md:hidden text-[var(--text-muted)]">·</span>
-                    <span className="md:hidden truncate text-[var(--text-muted)]">{track.album}</span>
                   </div>
                 </div>
               </div>

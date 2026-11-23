@@ -38,6 +38,7 @@ import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {
   apiFetch,
   formatDuration,
+  getLocalPlayHistory,
   getTrackCoverUrl,
   getYouTubeThumbProxyUrl,
   getYouTubeVideoId,
@@ -68,7 +69,7 @@ const HOME_VIEW_META: Record<
   {title: string; fallbackColor: string; gradient: string}
 > = {
   all: {
-    title: 'All Tracks',
+    title: 'Songs',
     fallbackColor: '#1f4a34',
     gradient: 'from-[#1DB954]/80 via-[#1b4a33] to-[#121212]',
   },
@@ -123,6 +124,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   } = useOfflineLibrary();
   const {
     currentTrack,
+    lastPlayed,
     queue,
     shuffle,
     toggleShuffle,
@@ -340,16 +342,90 @@ export const PlaylistsLibraryPage: React.FC = () => {
     });
   }, [activeTab, offline, loadContent]);
 
+  const isHomeView = !playlistIdParam && activeTab !== 'playlists';
+  const activeHomeTab: HomeViewTab = activeTab === 'playlists' ? 'all' : activeTab;
+
   const filteredTracks = useMemo(() => {
-    if (!searchQuery.trim()) return tracks;
-    const q = searchQuery.toLowerCase();
-    return tracks.filter(
-      (t) =>
-        t.title.toLowerCase().includes(q) ||
-        t.artist.toLowerCase().includes(q) ||
-        t.album.toLowerCase().includes(q)
-    );
-  }, [tracks, searchQuery]);
+    let list = tracks;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = tracks.filter(
+        (t) =>
+          t.title.toLowerCase().includes(q) ||
+          t.artist.toLowerCase().includes(q) ||
+          t.album.toLowerCase().includes(q)
+      );
+    }
+
+    // Sort "Songs" (default Home tab) by most recently played first,
+    // merging persisted SQLite play_history, localStorage history, and live playback.
+    if (isHomeView && activeHomeTab === 'all') {
+      const localHistory = getLocalPlayHistory();
+      const byTrackId = new Map<number, number>();
+      const byMetaKey = new Map<string, number>();
+
+      const recordTimestamp = (
+        trackId: number | null | undefined,
+        artist: string | undefined,
+        title: string | undefined,
+        playedAt: number
+      ) => {
+        if (!Number.isFinite(playedAt) || playedAt <= 0) return;
+        if (typeof trackId === 'number' && trackId > 0) {
+          const prev = byTrackId.get(trackId) ?? 0;
+          if (playedAt > prev) byTrackId.set(trackId, playedAt);
+        }
+        const key = `${(artist || '').trim().toLowerCase()}::${(title || '').trim().toLowerCase()}`;
+        if (key !== '::') {
+          const prev = byMetaKey.get(key) ?? 0;
+          if (playedAt > prev) byMetaKey.set(key, playedAt);
+        }
+      };
+
+      for (const entry of localHistory) {
+        recordTimestamp(entry.trackId, entry.artist, entry.title, entry.playedAt);
+      }
+      if (lastPlayed) {
+        recordTimestamp(
+          lastPlayed.trackId,
+          lastPlayed.artist,
+          lastPlayed.title,
+          lastPlayed.playedAt
+        );
+      }
+
+      const getLastPlayedTimestamp = (track: Track): number => {
+        let best =
+          typeof track.last_played_at === 'number' && Number.isFinite(track.last_played_at)
+            ? track.last_played_at
+            : 0;
+        if (typeof track.id === 'number') {
+          const localById = byTrackId.get(track.id) ?? 0;
+          if (localById > best) best = localById;
+        }
+        const metaKey = `${track.artist.trim().toLowerCase()}::${track.title.trim().toLowerCase()}`;
+        const localByMeta = byMetaKey.get(metaKey) ?? 0;
+        if (localByMeta > best) best = localByMeta;
+        return best;
+      };
+
+      return list
+        .map((track, originalIndex) => ({
+          track,
+          originalIndex,
+          lastPlayedAt: getLastPlayedTimestamp(track),
+        }))
+        .sort((a, b) => {
+          if (a.lastPlayedAt !== b.lastPlayedAt) {
+            return b.lastPlayedAt - a.lastPlayedAt;
+          }
+          return a.originalIndex - b.originalIndex;
+        })
+        .map((item) => item.track);
+    }
+
+    return list;
+  }, [tracks, searchQuery, isHomeView, activeHomeTab, lastPlayed]);
 
   const totalDuration = useMemo(
     () => filteredTracks.reduce((sum, t) => sum + (t.duration || 0), 0),
@@ -634,16 +710,13 @@ export const PlaylistsLibraryPage: React.FC = () => {
       offline
         ? [{id: 'offline', label: 'Offline'}]
         : [
-            {id: 'all', label: 'All Tracks'},
+            {id: 'all', label: 'Songs'},
             {id: 'liked', label: 'Liked Songs'},
             {id: 'recent', label: 'Recently Downloaded'},
             {id: 'offline', label: 'Offline'},
           ],
     [offline]
   );
-
-  const isHomeView = !playlistIdParam && activeTab !== 'playlists';
-  const activeHomeTab: HomeViewTab = activeTab === 'playlists' ? 'all' : activeTab;
 
   // Determine active hero track (prefer active/playing track so swipes immediately update cover & gradient)
   const heroTrack = useMemo(() => {
@@ -1287,27 +1360,30 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)] truncate">
                     {activeHomeTitle}
                   </h1>
-                  <p className="text-xs sm:text-sm text-[var(--text-secondary)]">
-                    <span className="font-mono tabular-nums text-[var(--text-primary)]">
-                      {filteredTracks.length}
-                    </span>{' '}
-                    {filteredTracks.length === 1 ? 'track' : 'tracks'}
-                    {totalDuration > 0 && (
-                      <>
-                        <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
+                  {activeHomeTab === 'all' && !artistFilter ? (
+                    totalDuration > 0 ? (
+                      <p className="text-xs sm:text-sm text-[var(--text-secondary)]">
                         <span className="font-mono tabular-nums">
                           {formatHumanDuration(totalDuration)}
                         </span>
-                      </>
-                    )}
-                    {!artistFilter && !searchQuery && activeHomeTab === 'all' && playlists.length > 0 && (
-                      <>
-                        <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
-                        <span className="font-mono tabular-nums">{playlists.length}</span>{' '}
-                        {playlists.length === 1 ? 'playlist' : 'playlists'}
-                      </>
-                    )}
-                  </p>
+                      </p>
+                    ) : null
+                  ) : (
+                    <p className="text-xs sm:text-sm text-[var(--text-secondary)]">
+                      <span className="font-mono tabular-nums text-[var(--text-primary)]">
+                        {filteredTracks.length}
+                      </span>{' '}
+                      {filteredTracks.length === 1 ? 'track' : 'tracks'}
+                      {totalDuration > 0 && (
+                        <>
+                          <span className="mx-1.5 text-[var(--text-muted)]" aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums">
+                            {formatHumanDuration(totalDuration)}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  )}
                 </div>
 
                 {/* Clean Single-Row Action Bar: Left (Select + Search Toggle + Active Chips) | Right (Shuffle + Circular Accent Play) */}

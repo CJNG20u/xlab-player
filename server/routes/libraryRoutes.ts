@@ -284,11 +284,18 @@ libraryRouter.get('/tracks', requireAuth, (req: AuthRequest, res) => {
       t.id, t.rel_path, t.title, t.artist, t.album, t.track_number, t.year,
       t.duration, t.format, t.bitrate, t.size_bytes, t.cover_file, t.dominant_color,
       t.added_at,
-      CASE WHEN lt.track_id IS NOT NULL THEN 1 ELSE 0 END AS liked
+      CASE WHEN lt.track_id IS NOT NULL THEN 1 ELSE 0 END AS liked,
+      ph.last_played_at AS last_played_at
     FROM tracks t
     LEFT JOIN liked_tracks lt ON lt.track_id = t.id AND lt.user_id = ?
+    LEFT JOIN (
+      SELECT track_id, MAX(played_at) AS last_played_at
+      FROM play_history
+      WHERE user_id = ? AND track_id IS NOT NULL
+      GROUP BY track_id
+    ) ph ON ph.track_id = t.id
   `;
-  const params: unknown[] = [userId];
+  const params: unknown[] = [userId, userId];
   const conditions: string[] = [];
 
   if (filter === 'liked') {
@@ -313,7 +320,8 @@ libraryRouter.get('/tracks', requireAuth, (req: AuthRequest, res) => {
   } else if (filter === 'liked') {
     sql += ' ORDER BY lt.liked_at DESC';
   } else {
-    sql += ' ORDER BY t.artist COLLATE NOCASE ASC, t.album COLLATE NOCASE ASC, COALESCE(t.track_number, 9999) ASC, t.title COLLATE NOCASE ASC';
+    sql +=
+      ' ORDER BY CASE WHEN ph.last_played_at IS NULL THEN 1 ELSE 0 END ASC, ph.last_played_at DESC, t.artist COLLATE NOCASE ASC, t.album COLLATE NOCASE ASC, COALESCE(t.track_number, 9999) ASC, t.title COLLATE NOCASE ASC';
   }
 
   const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;

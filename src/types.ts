@@ -24,6 +24,7 @@ export interface Track {
   dominant_color: string;
   added_at: string;
   liked: boolean;
+  last_played_at?: number | null;
   coverUrl?: string;
   streamUrl?: string;
   isYouTubeStream?: boolean;
