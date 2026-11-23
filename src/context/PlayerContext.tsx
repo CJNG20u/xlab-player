@@ -1,4 +1,12 @@
-import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   apiFetch,
   appendLocalPlayHistory,
@@ -19,6 +27,7 @@ import {
   ListeningLearning,
   sendListeningEvent,
 } from '../lib/listeningLearning';
+import {playbackClock} from '../lib/playbackClock';
 import {useAuth} from './AuthContext';
 import {
   getCachedCanvasArtwork,
@@ -50,7 +59,6 @@ interface PlayerContextValue {
   currentIndex: number;
   isPlaying: boolean;
   isBuffering: boolean;
-  currentTime: number;
   duration: number;
   volume: number;
   isMuted: boolean;
@@ -355,7 +363,6 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const [currentIndex, setCurrentIndex] = useState<number>(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolumeState] = useState<number>(() => {
     try {
@@ -1128,7 +1135,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
 
       setIsPlaying(true);
-      setCurrentTime(0);
+      playbackClock.setTime(0);
       setDuration(track.duration || 0);
     },
     [
@@ -1215,7 +1222,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       audio.load();
       setIsPlaying(false);
       setIsBuffering(false);
-      setCurrentTime(0);
+      playbackClock.setTime(0);
       setDuration(0);
       syncMediaSessionMetadata(null);
       setMediaSessionPlaybackState('none');
@@ -1271,7 +1278,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       } else {
         audio.currentTime = clamped;
       }
-      setCurrentTime(clamped);
+      playbackClock.setTime(clamped);
       syncMediaSessionPositionState(audio);
     },
     [syncMediaSessionPositionState]
@@ -1346,7 +1353,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           setIsPlaying(false);
           setMediaSessionPlaybackState('paused');
         });
-        setCurrentTime(0);
+        playbackClock.setTime(0);
         setIsPlaying(true);
         syncMediaSessionPositionState(audio);
         return;
@@ -1418,7 +1425,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     if (audio.currentTime > 3) {
       audio.currentTime = 0;
-      setCurrentTime(0);
+      playbackClock.setTime(0);
       syncMediaSessionPositionState(audio);
       return;
     }
@@ -1438,7 +1445,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setCurrentIndex(prevIdx);
     } else {
       audio.currentTime = 0;
-      setCurrentTime(0);
+      playbackClock.setTime(0);
       syncMediaSessionPositionState(audio);
     }
   }, [loadAndPlayTrackSync, syncMediaSessionPositionState]);
@@ -1571,7 +1578,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         audioRef.current.load();
         setIsPlaying(false);
         setIsBuffering(false);
-        setCurrentTime(0);
+        playbackClock.setTime(0);
         setDuration(0);
         syncMediaSessionMetadata(null);
         setMediaSessionPlaybackState('none');
@@ -2064,7 +2071,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
       setQueue(payload.queue);
       setCurrentIndex(idx);
-      setCurrentTime(targetPos);
+      playbackClock.setTime(targetPos);
       setDuration(targetTrack.duration || 0);
       syncMediaSessionMetadata(targetTrack, true);
 
@@ -2339,7 +2346,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration
           : stateRef.current.duration;
-      setCurrentTime(pos);
+      playbackClock.setTime(pos);
       listeningLearningRef.current?.update(
         stateRef.current.currentTrack,
         pos,
@@ -2359,7 +2366,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration
           : stateRef.current.duration;
-      setCurrentTime(pos);
+      playbackClock.setTime(pos);
       lifecycleRef.current.prefetchNextTrackIfReady(pos, dur);
       lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
@@ -2742,64 +2749,110 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     syncMediaSessionPositionState(audioRef.current);
   }, [currentTrack, isPlaying, setMediaSessionPlaybackState, syncMediaSessionPositionState]);
 
-  return (
-    <PlayerContext.Provider
-      value={{
-        currentTrack,
-        lastPlayed,
-        queue,
-        currentIndex,
-        isPlaying,
-        isBuffering,
-        currentTime,
-        duration,
-        volume,
-        isMuted,
-        shuffle,
-        repeat,
-        autoplayEnabled,
-        setAutoplayEnabled,
-        toggleAutoplay,
-        autoplayLoading,
-        radioMode,
-        radioSeed,
-        startRadio,
-        stopRadio,
-        clearGeneratedQueue,
-        queueOpen,
-        lyricsOpen,
-        playTrack,
-        playTrackById,
-        togglePlay,
-        nextTrack,
-        prevTrack,
-        seek,
-        setVolume,
-        toggleMute,
-        toggleShuffle,
-        cycleRepeat,
-        addToQueue,
-        addManyToQueue,
-        playNextInQueue,
-        removeFromQueue,
-        reorderQueue,
-        clearUpcomingQueue,
-        handleDeletedTracks,
-        toggleLikeTrack,
-        setQueueOpen,
-        setLyricsOpen,
-        syncTrackLikeState,
-        libraryRefreshVersion,
-        bumpLibraryRefresh,
-        recentlyDownloadedTracks,
-        saveYouTubeTrackToLibrary,
-        getYouTubeSaveStatus,
-        remoteHostApi,
-      }}
-    >
-      {children}
-    </PlayerContext.Provider>
+  const contextValue = useMemo<PlayerContextValue>(
+    () => ({
+      currentTrack,
+      lastPlayed,
+      queue,
+      currentIndex,
+      isPlaying,
+      isBuffering,
+      duration,
+      volume,
+      isMuted,
+      shuffle,
+      repeat,
+      autoplayEnabled,
+      setAutoplayEnabled,
+      toggleAutoplay,
+      autoplayLoading,
+      radioMode,
+      radioSeed,
+      startRadio,
+      stopRadio,
+      clearGeneratedQueue,
+      queueOpen,
+      lyricsOpen,
+      playTrack,
+      playTrackById,
+      togglePlay,
+      nextTrack,
+      prevTrack,
+      seek,
+      setVolume,
+      toggleMute,
+      toggleShuffle,
+      cycleRepeat,
+      addToQueue,
+      addManyToQueue,
+      playNextInQueue,
+      removeFromQueue,
+      reorderQueue,
+      clearUpcomingQueue,
+      handleDeletedTracks,
+      toggleLikeTrack,
+      setQueueOpen,
+      setLyricsOpen,
+      syncTrackLikeState,
+      libraryRefreshVersion,
+      bumpLibraryRefresh,
+      recentlyDownloadedTracks,
+      saveYouTubeTrackToLibrary,
+      getYouTubeSaveStatus,
+      remoteHostApi,
+    }),
+    [
+      addManyToQueue,
+      addToQueue,
+      autoplayEnabled,
+      autoplayLoading,
+      bumpLibraryRefresh,
+      clearGeneratedQueue,
+      clearUpcomingQueue,
+      currentIndex,
+      currentTrack,
+      cycleRepeat,
+      duration,
+      getYouTubeSaveStatus,
+      handleDeletedTracks,
+      isBuffering,
+      isMuted,
+      isPlaying,
+      lastPlayed,
+      libraryRefreshVersion,
+      lyricsOpen,
+      nextTrack,
+      playNextInQueue,
+      playTrack,
+      playTrackById,
+      prevTrack,
+      queue,
+      queueOpen,
+      radioMode,
+      radioSeed,
+      recentlyDownloadedTracks,
+      remoteHostApi,
+      removeFromQueue,
+      reorderQueue,
+      repeat,
+      saveYouTubeTrackToLibrary,
+      seek,
+      setAutoplayEnabled,
+      setVolume,
+      shuffle,
+      startRadio,
+      stopRadio,
+      syncTrackLikeState,
+      toggleAutoplay,
+      toggleLikeTrack,
+      toggleMute,
+      togglePlay,
+      toggleShuffle,
+      volume,
+    ]
   );
+
+  return <PlayerContext.Provider value={contextValue}>{children}</PlayerContext.Provider>;
 };
 
 export function usePlayer(): PlayerContextValue {

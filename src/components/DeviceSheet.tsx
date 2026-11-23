@@ -14,6 +14,7 @@ import {
 import React, {useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
 import {useBackClose} from '../lib/backStack';
+import {playbackClock} from '../lib/playbackClock';
 import {
   buildTransferQueueSlice,
   useRemoteControl,
@@ -36,7 +37,6 @@ export const DeviceSheet: React.FC<DeviceSheetProps> = ({open, onClose}) => {
     currentTrack,
     queue,
     currentIndex,
-    currentTime,
     isPlaying,
     remoteHostApi,
   } = usePlayer();
@@ -77,7 +77,9 @@ export const DeviceSheet: React.FC<DeviceSheetProps> = ({open, onClose}) => {
           track: slice.track,
           queue: slice.queue,
           index: slice.index,
-          positionSec: Number.isFinite(currentTime) ? Math.max(0, currentTime) : 0,
+          positionSec: Number.isFinite(playbackClock.getTime())
+            ? Math.max(0, playbackClock.getTime())
+            : 0,
           isPlaying,
         },
         device.deviceId

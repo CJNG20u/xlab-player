@@ -36,6 +36,7 @@ import {
   getYouTubeVideoId,
   parseLrc,
 } from '../lib/api';
+import {usePlaybackTime} from '../lib/playbackClock';
 import {useRemoteControl} from '../lib/remoteControl';
 import {useScrollReady} from '../lib/scrollHistory';
 import type {RepeatMode, Track} from '../types';
@@ -78,7 +79,6 @@ export const NowPlayingPage: React.FC = () => {
   const {
     currentTrack,
     isPlaying,
-    currentTime,
     duration,
     volume,
     isMuted,
@@ -131,9 +131,10 @@ export const NowPlayingPage: React.FC = () => {
     };
   }, [isRemoteActive, remote.targetState?.track]);
 
+  const localTime = usePlaybackTime();
   const activeTrack = isRemoteActive ? remoteTrackObj : currentTrack;
   const activeIsPlaying = isRemoteActive ? Boolean(remote.targetState?.isPlaying) : isPlaying;
-  const activeTime = isRemoteActive ? remote.extrapolatedPositionSec : currentTime;
+  const activeTime = isRemoteActive ? remote.extrapolatedPositionSec : localTime;
   const activeDuration = isRemoteActive ? remote.targetState?.track?.duration || 0 : duration;
   const activeVolume = isRemoteActive ? (remote.targetState?.volume ?? 1) : volume;
   const activeMuted = isRemoteActive ? Boolean(remote.targetState?.muted) : isMuted;

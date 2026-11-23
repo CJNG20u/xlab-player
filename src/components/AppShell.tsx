@@ -23,7 +23,7 @@ import {
   VolumeX,
   WifiOff,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {Suspense, useCallback, useEffect, useState} from 'react';
 import {NavLink, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {useAuth} from '../context/AuthContext';
 import {MainScrollProvider} from '../context/MainScrollContext';
@@ -34,6 +34,7 @@ import {usePWAInstall} from '../hooks/usePWAInstall';
 import {useRemoteHost} from '../hooks/useRemoteHost';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
+import {usePlaybackTime} from '../lib/playbackClock';
 import {useRemoteControl} from '../lib/remoteControl';
 import {useMainScrollRestoration} from '../lib/scrollHistory';
 import {getTabGroup, openPrimaryDestination, rememberTabLocation} from '../lib/tabMemory';
@@ -51,13 +52,83 @@ const MainScrollRestorationSync: React.FC = () => {
   return null;
 };
 
+interface DesktopPlaybackScrubberProps {
+  isRemoteActive: boolean;
+  remoteTime: number;
+  duration: number;
+  disabled: boolean;
+  onSeek: (pos: number) => void;
+}
+
+const DesktopPlaybackScrubber: React.FC<DesktopPlaybackScrubberProps> = React.memo(
+  ({isRemoteActive, remoteTime, duration, disabled, onSeek}) => {
+    const localTime = usePlaybackTime();
+    const displayTime = isRemoteActive ? remoteTime : localTime;
+    const progressPct = duration > 0 ? Math.min(100, (displayTime / duration) * 100) : 0;
+
+    return (
+      <div className="xlab-slider-group flex w-full max-w-xl items-center gap-2.5">
+        <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10 text-right">
+          {formatDuration(displayTime)}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={duration || 1}
+          step={0.1}
+          value={Math.min(displayTime, duration || 1)}
+          disabled={disabled}
+          onChange={(e) => onSeek(parseFloat(e.target.value))}
+          className="xlab-slider flex-1 h-1"
+          style={{
+            background: `linear-gradient(to right, var(--accent) ${progressPct}%, var(--slider-track) ${progressPct}%)`,
+            borderRadius: '9999px',
+          }}
+          aria-label="Seek progress"
+        />
+        <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10">
+          {formatDuration(duration)}
+        </span>
+      </div>
+    );
+  }
+);
+
+interface MobileMiniProgressBarProps {
+  isRemoteActive: boolean;
+  remoteTime: number;
+  duration: number;
+}
+
+const MobileMiniProgressBar: React.FC<MobileMiniProgressBarProps> = React.memo(
+  ({isRemoteActive, remoteTime, duration}) => {
+    const localTime = usePlaybackTime();
+    const displayTime = isRemoteActive ? remoteTime : localTime;
+    const progressPct = duration > 0 ? Math.min(100, (displayTime / duration) * 100) : 0;
+
+    return (
+      <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[var(--miniplayer-progress-track)]">
+        <div
+          className="h-full bg-[var(--accent)] transition-[width] duration-150"
+          style={{width: `${progressPct}%`}}
+        />
+      </div>
+    );
+  }
+);
+
+const RouteLoadingFallback: React.FC = () => (
+  <div className="flex h-full min-h-[60vh] w-full items-center justify-center">
+    <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
+  </div>
+);
+
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
   const {theme, baseThemeColor} = useTheme();
   const {
     currentTrack,
     isPlaying,
-    currentTime,
     duration,
     volume,
     isMuted,
@@ -125,7 +196,6 @@ export const AppShell: React.FC = () => {
   const displayIsPlaying = remote.isRemoteActive
     ? Boolean(remote.targetState?.isPlaying)
     : isPlaying;
-  const displayTime = remote.isRemoteActive ? remote.extrapolatedPositionSec : currentTime;
   const displayDuration = remote.isRemoteActive
     ? remote.targetState?.track?.duration || 0
     : duration;
@@ -247,8 +317,6 @@ export const AppShell: React.FC = () => {
     });
   }, [offline, loadPlaylists]);
 
-  const progressPct =
-    displayDuration > 0 ? Math.min(100, (displayTime / displayDuration) * 100) : 0;
   const volPct = (displayMuted ? 0 : displayVolume) * 100;
   const isNowPlayingPage = location.pathname === '/now-playing';
   const isHomePage = location.pathname === '/';
@@ -449,7 +517,9 @@ export const AppShell: React.FC = () => {
                     : 'pb-mobile-stage md:pb-8'
               }
             >
-              <Outlet />
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <Outlet />
+              </Suspense>
             </div>
           </main>
         </div>
@@ -640,29 +710,13 @@ export const AppShell: React.FC = () => {
             </button>
           </div>
 
-          <div className="xlab-slider-group flex w-full max-w-xl items-center gap-2.5">
-            <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10 text-right">
-              {formatDuration(displayTime)}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={displayDuration || 1}
-              step={0.1}
-              value={Math.min(displayTime, displayDuration || 1)}
-              disabled={!displayTrack}
-              onChange={(e) => handleSeek(parseFloat(e.target.value))}
-              className="xlab-slider flex-1 h-1"
-              style={{
-                background: `linear-gradient(to right, var(--accent) ${progressPct}%, var(--slider-track) ${progressPct}%)`,
-                borderRadius: '9999px',
-              }}
-              aria-label="Seek progress"
-            />
-            <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] w-10">
-              {formatDuration(displayDuration)}
-            </span>
-          </div>
+          <DesktopPlaybackScrubber
+            isRemoteActive={remote.isRemoteActive}
+            remoteTime={remote.extrapolatedPositionSec}
+            duration={displayDuration}
+            disabled={!displayTrack}
+            onSeek={handleSeek}
+          />
         </div>
 
         {/* Right: Lyrics + Queue + Devices + Volume + Expand */}
@@ -887,12 +941,11 @@ export const AppShell: React.FC = () => {
             </button>
           </div>
           {/* Thin progress strip along bottom of mini-player */}
-          <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-[var(--miniplayer-progress-track)]">
-            <div
-              className="h-full bg-[var(--accent)] transition-[width] duration-150"
-              style={{width: `${progressPct}%`}}
-            />
-          </div>
+          <MobileMiniProgressBar
+            isRemoteActive={remote.isRemoteActive}
+            remoteTime={remote.extrapolatedPositionSec}
+            duration={displayDuration}
+          />
         </div>
       )}
 

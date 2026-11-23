@@ -7,6 +7,7 @@ import {
   getYouTubeThumbProxyUrl,
   isValidYouTubeVideoId,
 } from '../lib/api';
+import {playbackClock} from '../lib/playbackClock';
 import {
   buildTransferQueueSlice,
   remoteControl,
@@ -96,7 +97,6 @@ export function useRemoteHost(): void {
     queue,
     currentIndex,
     isPlaying,
-    currentTime,
     volume,
     isMuted,
     shuffle,
@@ -117,7 +117,6 @@ export function useRemoteHost(): void {
     queue,
     currentIndex,
     isPlaying,
-    currentTime,
     volume,
     isMuted,
     shuffle,
@@ -136,7 +135,6 @@ export function useRemoteHost(): void {
     queue,
     currentIndex,
     isPlaying,
-    currentTime,
     volume,
     isMuted,
     shuffle,
@@ -153,9 +151,10 @@ export function useRemoteHost(): void {
 
   const publishNow = () => {
     const s = latestRef.current;
+    const pos = playbackClock.getTime();
     void remoteControl.publishState({
       track: s.currentTrack ? serializeTrackForRemote(s.currentTrack) : null,
-      positionSec: Number.isFinite(s.currentTime) ? Math.max(0, s.currentTime) : 0,
+      positionSec: Number.isFinite(pos) ? Math.max(0, pos) : 0,
       isPlaying: s.isPlaying,
       volume: s.volume,
       muted: s.isMuted,
@@ -346,7 +345,8 @@ export function useRemoteHost(): void {
                 await remoteControl.ackCommand(commandId, 'rejected', 'no_track');
                 return;
               }
-              const pos = Number.isFinite(api.currentTime) ? Math.max(0, api.currentTime) : 0;
+              const rawPos = playbackClock.getTime();
+              const pos = Number.isFinite(rawPos) ? Math.max(0, rawPos) : 0;
               api.remoteHostApi.pauseLocal();
               await remoteControl.ackCommand(commandId, 'applied');
               void remoteControl.send(
@@ -447,7 +447,7 @@ export function useRemoteHost(): void {
       debounceTimerRef.current = null;
       prevPublishedPosRef.current = {
         trackId: currentTrackId,
-        pos: latestRef.current.currentTime,
+        pos: playbackClock.getTime(),
         at: Date.now(),
       };
       publishNowRef.current();
@@ -471,26 +471,32 @@ export function useRemoteHost(): void {
     queueLength,
   ]);
 
-  // Detect manual seek jumps on currentTime and publish (debounced 250ms)
+  // Detect manual seek jumps on playbackClock and publish (debounced 250ms) without re-rendering
   useEffect(() => {
     if (!user || offline || !currentTrackId) return;
-    const prev = prevPublishedPosRef.current;
-    const now = Date.now();
-    const elapsedSec = prev.at > 0 ? (now - prev.at) / 1000 : 0;
-    const expected = prev.trackId === currentTrackId && isPlaying ? prev.pos + elapsedSec : prev.pos;
-    if (Math.abs(currentTime - expected) > 2.2) {
-      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = setTimeout(() => {
-        debounceTimerRef.current = null;
-        prevPublishedPosRef.current = {
-          trackId: currentTrackId,
-          pos: latestRef.current.currentTime,
-          at: Date.now(),
-        };
-        publishNowRef.current();
-      }, STATE_DEBOUNCE_MS);
-    }
-  }, [user, offline, currentTrackId, currentTime, isPlaying]);
+    return playbackClock.subscribe(() => {
+      const currentPos = playbackClock.getTime();
+      const prev = prevPublishedPosRef.current;
+      const now = Date.now();
+      const elapsedSec = prev.at > 0 ? (now - prev.at) / 1000 : 0;
+      const expected =
+        prev.trackId === currentTrackId && latestRef.current.isPlaying
+          ? prev.pos + elapsedSec
+          : prev.pos;
+      if (Math.abs(currentPos - expected) > 2.2) {
+        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = setTimeout(() => {
+          debounceTimerRef.current = null;
+          prevPublishedPosRef.current = {
+            trackId: currentTrackId,
+            pos: playbackClock.getTime(),
+            at: Date.now(),
+          };
+          publishNowRef.current();
+        }, STATE_DEBOUNCE_MS);
+      }
+    });
+  }, [user, offline, currentTrackId]);
 
   // 4. Periodic 5s state publish while playing
   useEffect(() => {
@@ -498,7 +504,7 @@ export function useRemoteHost(): void {
     const intervalId = window.setInterval(() => {
       prevPublishedPosRef.current = {
         trackId: latestRef.current.currentTrack ? String(latestRef.current.currentTrack.id) : null,
-        pos: latestRef.current.currentTime,
+        pos: playbackClock.getTime(),
         at: Date.now(),
       };
       publishNowRef.current();
