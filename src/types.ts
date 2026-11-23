@@ -33,6 +33,8 @@ export interface Track {
   deezerAlbumId?: string;
   deezerArtistId?: string;
   filePath?: string;
+  queueSource?: 'autoplay' | 'radio';
+  sourcePool?: 'related' | 'discovery' | 'local';
 }
 
 export interface Playlist {
@@ -291,4 +293,63 @@ export interface DiscoverArtistDetail {
   cached: boolean;
 }
 
+export type AutoplayIntent = 'autoplay' | 'radio';
+export type AutoplayPoolName = 'related' | 'discovery' | 'local';
 
+export interface AutoplaySeedInput {
+  videoId?: string;
+  trackId?: number | string | null;
+  title?: string;
+  artist?: string;
+  album?: string;
+  duration?: number;
+}
+
+export interface AutoplayPlanRequest {
+  seed: AutoplaySeedInput;
+  context?: AutoplaySeedInput[];
+  exclude?: string[];
+  intent: AutoplayIntent;
+  limit?: number;
+  entropy?: string;
+}
+
+export interface AutoplayPlanItem {
+  id: string | number;
+  videoId: string | null;
+  trackId: number | null;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  coverUrl?: string;
+  cover_file?: string | null;
+  dominant_color?: string;
+  rel_path?: string;
+  track_number?: number | null;
+  year?: number | null;
+  format?: string;
+  bitrate?: number;
+  size_bytes?: number;
+  added_at?: string;
+  liked?: boolean;
+  isYouTubeStream: boolean;
+  streamUrl?: string;
+  youtubeUrl?: string;
+  deezerTrackId?: string;
+  deezerAlbumId?: string;
+  deezerArtistId?: string;
+  sourcePool: AutoplayPoolName;
+  score: number;
+  semanticScore: number;
+}
+
+export interface AutoplayPlanResponse {
+  items: AutoplayPlanItem[];
+  poolCounts: {
+    related: number;
+    discovery: number;
+    local: number;
+  };
+  degraded: boolean;
+}

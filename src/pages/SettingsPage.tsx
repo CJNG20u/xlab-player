@@ -15,6 +15,7 @@ import {
   Save,
   Shield,
   Smartphone,
+  Sparkles,
   Terminal,
   Trash2,
   Upload,
@@ -45,7 +46,7 @@ export const SettingsPage: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
-  const {bumpLibraryRefresh} = usePlayer();
+  const {bumpLibraryRefresh, autoplayEnabled, setAutoplayEnabled} = usePlayer();
   const {theme, setTheme} = useTheme();
   const {isInstallable, isInstalled, isIOS, install} = usePWAInstall();
   const isAdmin = user?.role === 'admin' && !offline;
@@ -599,6 +600,45 @@ export const SettingsPage: React.FC = () => {
               </button>
             );
           })}
+        </div>
+      </section>
+
+      {/* 0.5 PLAYBACK / AUTOPLAY PREFERENCES (ALL USERS) */}
+      <section className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
+                Autoplay
+              </h2>
+              <p className="text-xs text-[var(--text-secondary)]">
+                Automatically queue similar songs when your queue runs low (disabled while Repeat or Shuffle is on).
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoplayEnabled}
+            aria-label="Toggle Autoplay"
+            onClick={() => setAutoplayEnabled(!autoplayEnabled)}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              autoplayEnabled
+                ? 'bg-[var(--accent)]'
+                : 'bg-[var(--bg-elevated)] border border-[var(--border-strong)]'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full transition-transform ${
+                autoplayEnabled
+                  ? 'translate-x-6 bg-[var(--accent-contrast)]'
+                  : 'translate-x-1 bg-[var(--text-secondary)]'
+              }`}
+            />
+          </button>
         </div>
       </section>
 

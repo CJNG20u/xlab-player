@@ -1608,3 +1608,109 @@ export async function searchCatalog(rawQuery: string): Promise<DiscoverSearchRes
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// 5. Related Artists + Top Tracks for Autoplay / Radio Pools
+//    Reuses the existing Deezer API client and 2-tier catalog_cache.
+// ---------------------------------------------------------------------------
+
+export interface CatalogRelatedArtistNeighborhood {
+  seedArtistId: string | null;
+  seedArtistName: string;
+  relatedArtists: Array<{id: string; name: string}>;
+  topTracks: DiscoverAlbumTrack[];
+  cached: boolean;
+}
+
+export async function getCatalogRelatedArtistsWithTopTracks(
+  artistName: string,
+  options: {trackTitleHint?: string; artistLimit?: number} = {}
+): Promise<CatalogRelatedArtistNeighborhood> {
+  const query = getSearchableArtistQuery(artistName);
+  const artistLimit = Math.max(1, Math.min(12, Math.floor(options.artistLimit ?? 6)));
+  if (!query) {
+    return {
+      seedArtistId: null,
+      seedArtistName: '',
+      relatedArtists: [],
+      topTracks: [],
+      cached: false,
+    };
+  }
+
+  const cacheKey = `deezer:autoplay-related:v1:${normalizeKey(query)}:${artistLimit}`;
+  const {data, cached} = await withCatalogCache<Omit<CatalogRelatedArtistNeighborhood, 'cached'>>(
+    cacheKey,
+    false,
+    async () => {
+      const seedArtist = await resolveDeezerArtist(query, options.trackTitleHint);
+      if (!seedArtist?.id) {
+        return {
+          seedArtistId: null,
+          seedArtistName: query,
+          relatedArtists: [],
+          topTracks: [],
+        };
+      }
+
+      const relRes = await fetchDeezerJson<{data?: RawDeezerArtist[]}>(
+        `/artist/${seedArtist.id}/related?limit=${Math.max(8, artistLimit)}`
+      ).catch(() => ({data: []}));
+
+      const rawRelated = (relRes.data || [])
+        .filter((a) => Boolean(a?.id && a.name?.trim()))
+        .slice(0, artistLimit);
+
+      const relatedArtists = rawRelated.map((a) => ({
+        id: String(a.id),
+        name: a.name.trim(),
+      }));
+
+      // Fetch 1-2 top tracks per related artist in parallel
+      const topTrackGroups = await Promise.all(
+        rawRelated.map(async (rel) => {
+          const topRes = await fetchDeezerJson<{data?: RawDeezerTrack[]}>(
+            `/artist/${rel.id}/top?limit=2`
+          ).catch(() => ({data: []}));
+          const artistPic = pickHighResPicture(rel as unknown as Record<string, unknown>);
+          return (topRes.data || []).slice(0, 2).map((t, index): DiscoverAlbumTrack => {
+            const trackCover =
+              pickHighResCover(t.album as unknown as Record<string, unknown>) || artistPic;
+            const primaryTrackArtist = t.artist?.name?.trim() || rel.name.trim();
+            return {
+              id: `dz-track-${t.id}`,
+              deezerTrackId: String(t.id),
+              trackNumber: index + 1,
+              diskNumber: 1,
+              title: (t.title || 'Untitled').trim(),
+              artist: primaryTrackArtist,
+              artistId: t.artist?.id ? String(t.artist.id) : String(rel.id),
+              album: t.album?.title?.trim() || 'Single',
+              albumId: t.album?.id ? String(t.album.id) : '',
+              duration: Number(t.duration) || 0,
+              explicit: Boolean(t.explicit_lyrics),
+              coverUrl: trackCover,
+            };
+          });
+        })
+      );
+
+      // Interleave 1st top track from each artist before 2nd top tracks for diversity
+      const topTracks = interleaveBuckets(topTrackGroups, artistLimit * 2);
+
+      return {
+        seedArtistId: String(seedArtist.id),
+        seedArtistName: seedArtist.name.trim() || query,
+        relatedArtists,
+        topTracks,
+      };
+    }
+  );
+
+  return {
+    ...data,
+    topTracks: attachCachedVideoIdsToTracks(data.topTracks),
+    cached,
+  };
+}
+

@@ -196,6 +196,15 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_stream_url_cache_expires ON stream_url_cache(expires_at);
+
+  -- Adapted from Soundsible (MIT, (c) 2026 Arzuparreta)
+  CREATE TABLE IF NOT EXISTS related_mix (
+    video_id TEXT PRIMARY KEY,
+    rows_json TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_related_mix_fetched ON related_mix(fetched_at);
 `);
 
 // Safe incremental migrations for existing databases
@@ -497,5 +506,74 @@ export function pruneExpiredStreamUrlCache(): number {
   const result = pruneStreamUrlCacheStmt.run(Date.now() / 1000);
   return result.changes || 0;
 }
+
+// ---------------------------------------------------------------------------
+// Related Mix Cache (6-hour TTL)
+// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta)
+// ---------------------------------------------------------------------------
+
+export const RELATED_MIX_TTL_MS = 6 * 60 * 60 * 1000;
+
+export interface RelatedMixCacheRow {
+  video_id: string;
+  rows_json: string;
+  fetched_at: number;
+}
+
+const getRelatedMixStmt = db.prepare(
+  `SELECT video_id, rows_json, fetched_at
+   FROM related_mix
+   WHERE video_id = ? AND fetched_at > ?`
+);
+
+const upsertRelatedMixStmt = db.prepare(
+  `INSERT INTO related_mix (video_id, rows_json, fetched_at)
+   VALUES (?, ?, ?)
+   ON CONFLICT(video_id) DO UPDATE SET
+     rows_json = excluded.rows_json,
+     fetched_at = excluded.fetched_at`
+);
+
+const pruneRelatedMixStmt = db.prepare(
+  'DELETE FROM related_mix WHERE fetched_at <= ?'
+);
+
+export function getRelatedMixCacheRow<T = unknown>(
+  videoId: string,
+  ttlMs = RELATED_MIX_TTL_MS
+): {videoId: string; rows: T[]; fetchedAt: number} | null {
+  if (!videoId || !STRICT_YOUTUBE_VIDEO_ID_RE.test(videoId)) return null;
+  const cutoff = Date.now() - Math.max(1000, ttlMs);
+  const row = getRelatedMixStmt.get(videoId, cutoff) as RelatedMixCacheRow | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.rows_json);
+    if (!Array.isArray(parsed)) return null;
+    return {videoId: row.video_id, rows: parsed as T[], fetchedAt: row.fetched_at};
+  } catch {
+    return null;
+  }
+}
+
+export function setRelatedMixCacheRow(
+  videoId: string,
+  rows: unknown[],
+  fetchedAt = Date.now()
+): void {
+  if (!videoId || !STRICT_YOUTUBE_VIDEO_ID_RE.test(videoId)) return;
+  if (!Array.isArray(rows)) return;
+  const ts = Number.isFinite(fetchedAt) && fetchedAt > 0 ? Math.floor(fetchedAt) : Date.now();
+  upsertRelatedMixStmt.run(videoId, JSON.stringify(rows), ts);
+  if (Math.random() < 0.05) {
+    pruneRelatedMixStmt.run(ts - RELATED_MIX_TTL_MS);
+  }
+}
+
+export function pruneExpiredRelatedMixCache(ttlMs = RELATED_MIX_TTL_MS): number {
+  const cutoff = Date.now() - Math.max(1000, ttlMs);
+  const result = pruneRelatedMixStmt.run(cutoff);
+  return result.changes || 0;
+}
+
 
 

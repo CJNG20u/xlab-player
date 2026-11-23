@@ -1,0 +1,2136 @@
+
+
+######## FILE: LICENSE ########
+
+MIT License
+
+Copyright (c) 2026 Arzuparreta
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+######## FILE: shared/listening_planner.py ########
+
+"""Deterministic queue planning shared by every generated music experience.
+
+Candidate discovery stays provider-specific. This module owns the product-level
+ordering contract: one ranked, diversified sequence for Autoplay, Radio, or
+Auto Mode.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+import hashlib
+import math
+import random
+import re
+from typing import Any
+
+from shared.music_identity import clean_artist
+
+LISTENING_INTENTS = {"autoplay", "radio", "auto_mode"}
+AUTO_PROFILES = {"familiar", "balanced", "explore"}
+PLANNER_POOLS = ("local", "related", "discovery")
+# Generated listening must remain song-shaped.  Explicit selections, seeds,
+# source sets and DJ requests bypass this planner and therefore remain able to
+# play concerts, operas and mixes of any length.
+MAX_GENERATED_DURATION_SECONDS = 30 * 60
+
+_AUTO_SEQUENCES = {
+    "familiar": ("local", "local", "local", "local", "related", "related", "related", "discovery"),
+    "balanced": ("local", "local", "related", "related", "related", "discovery", "discovery", "discovery"),
+    "explore": ("local", "related", "related", "related", "discovery", "discovery", "discovery", "discovery"),
+}
+_INTENT_SEQUENCES = {
+    "autoplay": ("related", "related", "related", "related", "related", "related", "related", "discovery"),
+    "radio": ("related", "related", "related", "related", "related", "related", "discovery", "local"),
+}
+_AUTO_TEMPERATURE = {
+    "familiar": 0.12,
+    "balanced": 0.32,
+    "explore": 0.55,
+}
+_SOURCE_RANK = {
+    "official_audio": 70,
+    "artist_audio": 65,
+    "official_video": 55,
+    "official_lyrics": 48,
+    "artist_upload": 45,
+    "unverified": 30,
+    "third_party_lyrics": 15,
+}
+
+
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _candidate_identity(row: Mapping[str, Any]) -> str:
+    external = row.get("external_ids") if isinstance(row.get("external_ids"), Mapping) else {}
+    return (
+        _clean(row.get("recommendation_identity"))
+        or _clean(external.get("youtube_id"))
+        or _clean(row.get("youtube_id"))
+        or _clean(row.get("track_id"))
+        or _clean(row.get("id"))
+    )
+
+
+def _candidate_keys(row: Mapping[str, Any]) -> set[str]:
+    external = row.get("external_ids") if isinstance(row.get("external_ids"), Mapping) else {}
+    return {
+        value
+        for value in (
+            _candidate_identity(row),
+            _clean(row.get("id")),
+            _clean(row.get("track_id")),
+            _clean(row.get("youtube_id")),
+            _clean(external.get("youtube_id")),
+            _clean(row.get("canonical_identity")),
+        )
+        if value
+    }
+
+
+def _score(row: Mapping[str, Any]) -> float:
+    try:
+        return float(row.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _generated_duration_allowed(row: Mapping[str, Any]) -> bool:
+    """Unknown duration is admissible; a known value over 30 min is not."""
+    raw = row.get("duration_sec", row.get("duration"))
+    if raw in (None, ""):
+        return True
+    try:
+        return float(raw) <= MAX_GENERATED_DURATION_SECONDS
+    except (TypeError, ValueError):
+        # Provider uncertainty is not evidence that a candidate is too long.
+        return True
+
+
+def _source_rank(row: Mapping[str, Any]) -> int:
+    return _SOURCE_RANK.get(_clean(row.get("playback_source_kind")), 0)
+
+
+def _prefer_song_variants(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the best upload for duplicate song identities, never the song out."""
+    selected: dict[str, tuple[int, dict[str, Any]]] = {}
+    passthrough: list[tuple[int, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        identity = _clean(row.get("canonical_identity"))
+        if not identity:
+            passthrough.append((index, row))
+            continue
+        previous = selected.get(identity)
+        if previous is None or (_source_rank(row), _score(row)) > (
+            _source_rank(previous[1]),
+            _score(previous[1]),
+        ):
+            selected[identity] = (index, row)
+    combined = [*passthrough, *selected.values()]
+    combined.sort(key=lambda item: item[0])
+    return [row for _, row in combined]
+
+
+def _artist_key(value: Any) -> str:
+    # The one channel-label rule every surface shares: "X (Oficial)", "X - Topic"
+    # and "X" must spend the same per-artist budget.
+    return clean_artist(value).casefold()
+
+
+def _artist_keys(value: Any) -> set[str]:
+    raw = _clean(value)
+    parts = re.split(
+        r"\s+(?:and|x|with|feat\.?|featuring)\s+|[,&/+]",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    keys = {_artist_key(part) for part in parts if _artist_key(part)}
+    return keys or ({_artist_key(raw)} if _artist_key(raw) else set())
+
+
+def _ranked(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    entropy: str | None = None,
+    temperature: float = 0.0,
+    pool: str = "",
+) -> list[dict[str, Any]]:
+    prepared = [dict(row) for row in rows if isinstance(row, Mapping) and _candidate_identity(row)]
+    if entropy:
+        rng = random.Random(
+            int.from_bytes(
+                hashlib.sha256(f"{entropy}:{pool}".encode("utf-8", "ignore")).digest()[:8],
+                "big",
+            )
+        )
+        scored: list[tuple[float, int, dict[str, Any]]] = []
+        for index, row in enumerate(prepared):
+            # Gumbel-top-k produces a stable weighted sample. The score remains
+            # the dominant term; profile temperature only changes how readily
+            # similarly good candidates exchange places between sessions.
+            uniform = min(1 - 1e-9, max(1e-9, rng.random()))
+            gumbel = -math.log(-math.log(uniform))
+            weighted = math.log(max(0.0001, _score(row))) + temperature * gumbel
+            scored.append((weighted, -index, row))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [row for _, _, row in scored]
+    return [
+        row
+        for _, row in sorted(
+            enumerate(prepared),
+            key=lambda pair: (-_score(pair[1]), pair[0]),
+        )
+    ]
+
+
+def plan_generated_queue(
+    pools: Mapping[str, Iterable[Mapping[str, Any]]],
+    *,
+    intent: str,
+    profile: str = "balanced",
+    limit: int = 8,
+    exclude: Iterable[str] = (),
+    entropy: str | None = None,
+    context_artists: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Return the final generated order for one listening intent.
+
+    The function is deliberately pure so route code can gather candidates from
+    any provider while queue policy remains testable and identical everywhere.
+    """
+    if intent not in LISTENING_INTENTS:
+        raise ValueError(f"unsupported intent: {intent}")
+    if profile not in AUTO_PROFILES:
+        raise ValueError(f"unsupported profile: {profile}")
+    limit = max(1, min(24, int(limit)))
+    sequence = (
+        auto_source_sequence(profile, entropy=entropy)
+        if intent == "auto_mode"
+        else _INTENT_SEQUENCES[intent]
+    )
+    seen = {_clean(value) for value in exclude if _clean(value)}
+    raw_pools = {
+        pool: _prefer_song_variants([
+            dict(row)
+            for row in (pools.get(pool) or ())
+            if (
+                isinstance(row, Mapping)
+                and _generated_duration_allowed(row)
+                and not (_candidate_keys(row) & seen)
+            )
+        ])
+        for pool in PLANNER_POOLS
+    }
+    if intent == "auto_mode" and entropy:
+        desired_local = sequence.count("local")
+        eligible_local = raw_pools["local"]
+        # A shallow compatible library pool must not make its sole song
+        # mandatory in every fresh session. Exact route ratios only make sense
+        # when there is enough depth to vary which local songs fill them.
+        if 0 < len(eligible_local) <= desired_local:
+            admission = math.sqrt(desired_local / len(sequence))
+            rng = random.Random(
+                int.from_bytes(
+                    hashlib.sha256(f"{entropy}:local-admission".encode()).digest()[:8],
+                    "big",
+                )
+            )
+            raw_pools["local"] = [row for row in eligible_local if rng.random() < admission]
+    temperature = _AUTO_TEMPERATURE[profile] if intent == "auto_mode" and entropy else 0.0
+    queues = {
+        pool: _ranked(
+            raw_pools[pool],
+            entropy=entropy if intent == "auto_mode" else None,
+            temperature=temperature,
+            pool=pool,
+        )
+        for pool in PLANNER_POOLS
+    }
+    artist_counts: dict[str, int] = {}
+    selected: list[dict[str, Any]] = []
+    cursor = 0
+    misses = 0
+    artist_cap = (
+        3
+        if intent == "radio"
+        else 1
+        if intent == "auto_mode" and profile in {"balanced", "explore"}
+        else 2
+    )
+    if intent == "auto_mode":
+        for value in context_artists:
+            for artist in _artist_keys(value):
+                artist_counts[artist] = artist_cap
+
+    while len(selected) < limit and misses < len(sequence) * 3:
+        preferred = sequence[cursor % len(sequence)]
+        cursor += 1
+        order = (preferred, *(pool for pool in PLANNER_POOLS if pool != preferred))
+        picked: tuple[str, dict[str, Any]] | None = None
+        for pool in order:
+            while queues[pool]:
+                candidate = queues[pool].pop(0)
+                keys = _candidate_keys(candidate)
+                artists = _artist_keys(candidate.get("artist") or candidate.get("channel"))
+                if keys & seen or any(artist_counts.get(artist, 0) >= artist_cap for artist in artists):
+                    continue
+                picked = pool, candidate
+                seen.update(keys)
+                for artist in artists:
+                    artist_counts[artist] = artist_counts.get(artist, 0) + 1
+                break
+            if picked:
+                break
+        if not picked:
+            misses += 1
+            continue
+        misses = 0
+        pool, candidate = picked
+        candidate["source_pool"] = pool
+        candidate["recommendation_source"] = intent
+        selected.append(candidate)
+
+    return selected
+
+
+def auto_source_sequence(profile: str, *, entropy: str | None = None) -> tuple[str, ...]:
+    """Public route-ordering view of Auto's source contract."""
+    if profile not in AUTO_PROFILES:
+        raise ValueError(f"unsupported profile: {profile}")
+    sequence = _AUTO_SEQUENCES[profile]
+    if not entropy:
+        return sequence
+    offset = int.from_bytes(
+        hashlib.sha256(f"{entropy}:source-order".encode()).digest()[:4],
+        "big",
+    ) % len(sequence)
+    return (*sequence[offset:], *sequence[:offset])
+
+
+######## FILE: shared/discovery_seeds.py ########
+
+"""Shared discovery seed selection and per-user rotation memory."""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+import threading
+
+from shared.discovery_intelligence import (
+    is_artist_demoted,
+    load_listening_event_rollups,
+)
+from shared.text_utils import fold_text
+from shared.user_context import current_user_id, user_context
+
+_MAX_TRACKED_USERS = 128
+_MAX_RECENT_TASTE_SEEDS = 10
+_MAX_RECENT_GRAPH_SEEDS = 12
+_DEFAULT_ROTATION_PENALTY = 0.02
+_DEEZER_ARTIST_KEY_PREFIX = "artist:deezer:"
+
+_SEED_LOCK = threading.Lock()
+_RECENT_TASTE_SEEDS: OrderedDict[str, list[str]] = OrderedDict()
+_RECENT_GRAPH_SEEDS: OrderedDict[str, list[str]] = OrderedDict()
+
+
+def _scope_key(user_id: str | None) -> str:
+    resolved = user_id if user_id is not None else current_user_id()
+    return str(resolved or "__default__")
+
+
+def _get_recent(store: OrderedDict[str, list[str]], user_id: str | None) -> set[str]:
+    scope = _scope_key(user_id)
+    with _SEED_LOCK:
+        values = store.get(scope)
+        if not values:
+            return set()
+        store.move_to_end(scope)
+        return set(values)
+
+
+def _record_recent(
+    store: OrderedDict[str, list[str]],
+    user_id: str | None,
+    entries: list[str],
+    max_entries: int,
+) -> None:
+    cleaned = [entry for entry in dict.fromkeys(entries) if entry]
+    if not cleaned:
+        return
+    scope = _scope_key(user_id)
+    with _SEED_LOCK:
+        existing = store.get(scope, [])
+        merged = [*cleaned, *[item for item in existing if item not in cleaned]][:max_entries]
+        store[scope] = merged
+        store.move_to_end(scope)
+        while len(store) > _MAX_TRACKED_USERS:
+            store.popitem(last=False)
+
+
+def record_recent_taste_seeds(user_id: str | None, artists: list[str]) -> None:
+    """Remember recently used artist seeds (stored as diacritic-folded keys)."""
+    _record_recent(
+        _RECENT_TASTE_SEEDS,
+        user_id,
+        [fold_text(name) for name in artists if fold_text(name)],
+        _MAX_RECENT_TASTE_SEEDS,
+    )
+
+
+def record_recent_graph_seeds(user_id: str | None, track_ids: list[str]) -> None:
+    """Remember recently used library track seeds for graph/feed rotation."""
+    _record_recent(
+        _RECENT_GRAPH_SEEDS,
+        user_id,
+        [str(track_id).strip() for track_id in track_ids if str(track_id).strip()],
+        _MAX_RECENT_GRAPH_SEEDS,
+    )
+
+
+def clear_recent_seeds(user_id: str | None = None, *, clear_all: bool = False) -> None:
+    """Clear seed rotation history for one account or all tracked accounts."""
+    with _SEED_LOCK:
+        if clear_all:
+            _RECENT_TASTE_SEEDS.clear()
+            _RECENT_GRAPH_SEEDS.clear()
+            return
+        scope = _scope_key(user_id)
+        _RECENT_TASTE_SEEDS.pop(scope, None)
+        _RECENT_GRAPH_SEEDS.pop(scope, None)
+
+
+def load_saved_entity_artists(user_id: str | None = None) -> list[dict[str, str]]:
+    """Return artist seeds extracted from bookmarked artists and albums, newest first."""
+    try:
+        from player.saved_entities import get_entries
+
+        if user_id is not None:
+            with user_context(user_id):
+                entries = get_entries()
+        else:
+            entries = get_entries()
+    except Exception:
+        return []
+
+    out: list[dict[str, str]] = []
+    by_folded: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "").strip()
+        if kind == "artist":
+            name = str(entry.get("name") or "").strip()
+            deezer_id = ""
+            for key in entry.get("keys") or ():
+                if isinstance(key, str) and key.startswith(_DEEZER_ARTIST_KEY_PREFIX):
+                    candidate = key[len(_DEEZER_ARTIST_KEY_PREFIX):].strip()
+                    if candidate.isdigit():
+                        deezer_id = candidate
+                        break
+        elif kind == "album":
+            name = str(entry.get("artist") or "").strip()
+            deezer_id = ""
+        else:
+            continue
+        folded = fold_text(name)
+        if not folded:
+            continue
+        existing = by_folded.get(folded)
+        if existing is not None:
+            if kind == "artist" and existing["kind"] != "artist":
+                existing["kind"] = "artist"
+                existing["name"] = name
+            if deezer_id and not existing["deezer_id"]:
+                existing["deezer_id"] = deezer_id
+            continue
+        item = {"name": name, "deezer_id": deezer_id, "kind": kind}
+        by_folded[folded] = item
+        out.append(item)
+    return out
+
+
+def select_taste_artists(
+    metadata,
+    fav_ids: list[str],
+    limit: int = 5,
+    *,
+    user_id: str | None = None,
+    rotate: bool = False,
+    penalty: float = _DEFAULT_ROTATION_PENALTY,
+) -> list[str]:
+    """Rank taste seed artists across favourites, bookmarks, playlists, library, and listens."""
+    tracks = list(metadata.tracks if metadata and metadata.tracks else [])
+    rollup = load_listening_event_rollups()
+    saved_artists = load_saved_entity_artists(user_id)
+    by_id = {track.id: track for track in tracks}
+    scores: dict[str, float] = {}
+    display: dict[str, str] = {}
+
+    def add_artist(raw: object, score: float, *, title_fallback: bool = False) -> None:
+        name = str(raw or "").strip()
+        key = fold_text(name)
+        if not key:
+            return
+        scores[key] = scores.get(key, 0.0) + score
+        display.setdefault(key, name.title() if title_fallback else name)
+
+    for idx, tid in enumerate(fav_ids):
+        track = by_id.get(str(tid))
+        if track:
+            add_artist(track.album_artist or track.artist, 9.0 - min(idx, 8) * 0.35)
+
+    for idx, saved in enumerate(saved_artists):
+        if saved["kind"] == "artist":
+            add_artist(saved["name"], 8.5 - min(idx, 8) * 0.35)
+        else:
+            add_artist(saved["name"], 5.5 - min(idx, 8) * 0.25)
+
+    playlists = metadata.playlists if metadata and isinstance(metadata.playlists, dict) else {}
+    playlist_track_ids: set[str] = set()
+    for ids in playlists.values():
+        if isinstance(ids, list):
+            playlist_track_ids.update(str(x) for x in ids)
+    for tid in playlist_track_ids:
+        track = by_id.get(tid)
+        if track:
+            add_artist(track.album_artist or track.artist, 3.0)
+
+    artist_counts: dict[str, int] = {}
+    for track in tracks:
+        name = str(track.album_artist or track.artist or "").strip()
+        key = fold_text(name)
+        if not key:
+            continue
+        artist_counts[key] = artist_counts.get(key, 0) + 1
+        display.setdefault(key, name)
+    for key, count in artist_counts.items():
+        scores[key] = scores.get(key, 0.0) + min(8.0, count * 1.4)
+
+    for raw_key, count in rollup.artist_plays.items():
+        add_artist(raw_key, min(12.0, count * 2.0), title_fallback=True)
+    for raw_key, count in rollup.artist_saves.items():
+        add_artist(raw_key, min(10.0, count * 3.0), title_fallback=True)
+
+    deezer_by_folded = {
+        fold_text(item["name"]): item["deezer_id"]
+        for item in saved_artists
+        if fold_text(item["name"]) and item["deezer_id"]
+    }
+    for key in list(scores):
+        if _is_artist_excluded(
+            display.get(key, key),
+            user_id,
+            deezer_artist_id=deezer_by_folded.get(key, ""),
+        ):
+            scores.pop(key, None)
+
+    if rotate:
+        recent = _get_recent(_RECENT_TASTE_SEEDS, user_id)
+        for key in recent:
+            if key in scores:
+                scores[key] *= penalty
+
+    ranked = sorted(scores, key=lambda key: scores[key], reverse=True)
+    return [display[key] for key in ranked[:limit] if display.get(key)]
+
+
+def _is_artist_excluded(artist: str, user_id: str | None = None, *, deezer_artist_id: str = "") -> bool:
+    try:
+        if user_id is not None:
+            with user_context(user_id):
+                return is_artist_demoted(artist, deezer_artist_id=deezer_artist_id)
+        return is_artist_demoted(artist, deezer_artist_id=deezer_artist_id)
+    except Exception:
+        return False
+
+
+def select_release_seed_artists(
+    metadata,
+    fav_ids: list[str],
+    limit: int = 8,
+    *,
+    user_id: str | None = None,
+) -> list[dict[str, str]]:
+    """Return unrotated artist seeds for release-radar checks, prioritizing bookmarks."""
+    saved_artists = load_saved_entity_artists(user_id)
+    deezer_by_folded = {
+        fold_text(item["name"]): item["deezer_id"]
+        for item in saved_artists
+        if fold_text(item["name"]) and item["deezer_id"]
+    }
+
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def push(name: str, deezer_id: str = "") -> None:
+        folded = fold_text(name)
+        if not folded or folded in seen:
+            return
+        seen.add(folded)
+        candidates.append({"name": name, "deezer_id": deezer_id or deezer_by_folded.get(folded, "")})
+
+    for kind in ("artist", "album"):
+        for item in saved_artists:
+            if item["kind"] == kind:
+                push(item["name"], item["deezer_id"])
+
+    for name in select_taste_artists(metadata, fav_ids, limit=max(limit * 2, 16), user_id=user_id, rotate=False):
+        push(name)
+
+    filtered = [
+        item
+        for item in candidates
+        if not _is_artist_excluded(
+            item["name"],
+            user_id,
+            deezer_artist_id=item["deezer_id"],
+        )
+    ]
+    return filtered[:limit]
+
+
+def select_graph_seed_tracks(
+    metadata,
+    fav_ids: list[str],
+    limit: int = 8,
+    *,
+    user_id: str | None = None,
+    rotate: bool = False,
+    require_youtube_id: bool = False,
+    penalty: float = _DEFAULT_ROTATION_PENALTY,
+) -> list:
+    """Rank non-podcast library tracks as graph expansion seeds with soft rotation."""
+    tracks = list(metadata.tracks if metadata and metadata.tracks else [])
+    if not tracks:
+        return []
+
+    rollup = load_listening_event_rollups()
+    recent_artists = {fold_text(name) for name in rollup.recent_artists if fold_text(name)}
+    recent_seeds = _get_recent(_RECENT_GRAPH_SEEDS, user_id) if rotate else set()
+    fav_order = {str(tid): idx for idx, tid in enumerate(fav_ids)}
+
+    # Sort newest first with stable original order tiebreak before scoring.
+    indexed = sorted(
+        enumerate(tracks),
+        key=lambda pair: (str(getattr(pair[1], "added_at", None) or ""), pair[0]),
+        reverse=True,
+    )
+
+    scored: list[tuple[float, int, object]] = []
+    for recency_rank, (_, track) in enumerate(indexed):
+        if getattr(track, "media_kind", None) == "podcast_episode":
+            continue
+        if require_youtube_id and not str(getattr(track, "youtube_id", "") or "").strip():
+            continue
+        if not require_youtube_id and (
+            not str(getattr(track, "artist", "") or "").strip()
+            or not str(getattr(track, "title", "") or "").strip()
+        ):
+            continue
+
+        score = 1.0 / (1.0 + recency_rank * 0.05)
+        tid = str(getattr(track, "id", "") or "")
+        if tid in fav_order:
+            score += 2.0 + max(0.0, 0.2 - fav_order[tid] * 0.01)
+        artist_key = fold_text(
+            getattr(track, "album_artist", None) or getattr(track, "artist", None)
+        )
+        if artist_key and artist_key in recent_artists:
+            score += 1.0
+        if rotate and tid in recent_seeds:
+            score *= penalty
+        scored.append((score, recency_rank, track))
+
+    scored.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [track for _, _, track in scored[:limit]]
+
+
+######## FILE: ui_web/src/lib/generatedQueue.ts ########
+
+import type {
+  DjTransitionPlan,
+  ListeningPlanIntent,
+  ListeningPlanProfile,
+  ListeningPlanResponse,
+} from './api';
+import type { LiveTransitionPlan } from './audio';
+import type { PlaybackQueueEntry } from './playbackQueue';
+import { runwayReplacement } from './djRoute';
+import type { Track } from '../types/music';
+
+export type AutoProfile = ListeningPlanProfile;
+export type AutoPool = 'local' | 'related' | 'discovery';
+export interface AutoMusicSet {
+  id: string;
+  label: string;
+  tracks: Track[];
+  /** Monotonic order used to favour recent direction changes without erasing
+   * older sources. */
+  activation: number;
+}
+
+export type AutoPhase = 'idle' | 'following_queue' | 'planning' | 'ready' | 'exhausted' | 'warming' | 'degraded';
+
+export interface AutoActivity {
+  id: number;
+  status: 'working' | 'done' | 'error';
+  key: string;
+  values?: Record<string, string | number>;
+}
+
+export interface AutoPlanItem {
+  trackId: string;
+  source: AutoPool;
+  reasonKey: string;
+  reasonValues?: Record<string, string | number>;
+  /**
+   * Identity of the track this entry's transition was planned *out of*.
+   *
+   * A route's cues are chained, and `out_cue` is a position in the outgoing
+   * track's timeline. Without this the player has no way to tell whether a cue
+   * belongs to the song that is actually playing — which is how a transition
+   * planned for a five-minute track ended up cutting a two-minute one in half.
+   */
+  fromKey: string;
+  transition?: DjTransitionPlan;
+  bpm?: number;
+  key?: string | null;
+  sourceSetId?: string;
+  sourceSetLabel?: string;
+  lineage?: string[];
+}
+
+export interface AutoModeState {
+  active: boolean;
+  profile: AutoProfile;
+  sources: AutoMusicSet[];
+  heard: Track[];
+  exploration?: Track[];
+  directionRevision?: number;
+  avoidedIdentities: string[];
+  transition: {
+    /** `armed`: the next track is loaded, cued and no longer replannable.
+     * `mixing`: the incoming deck already owns playback. */
+    status: 'idle' | 'armed' | 'mixing';
+    technique?: LiveTransitionPlan['technique'];
+    nextTrackId?: string;
+    /** Position in the playing track at which the blend begins, so the booth can
+     * count down to a mix the listener can already see coming. */
+    at?: number;
+  };
+  /** A direction change is waiting out its debounce before the runway is
+   * rewritten. The UI uses it to promise "from the next track". */
+  pendingDirection: boolean;
+  /** A route repair is in flight. Reactive rather than a module flag because
+   * the button that starts one has to disable itself while it runs. */
+  repairing: boolean;
+  phase: AutoPhase;
+  activity: AutoActivity | null;
+  plan: Record<string, AutoPlanItem>;
+  /**
+   * Occurrences whose incoming transition is no longer the one that was planned.
+   *
+   * Reordering the route opens joins the DJ never chose, and re-seaming them
+   * costs a round trip nobody asked for mid-drag. Naming them instead lets the
+   * route show where the mix is waiting on a repair, rather than leaving a
+   * plain fade to be discovered when it fires.
+   */
+  staleSeams: string[];
+}
+
+export interface GeneratedSnapshot {
+  currentTrack: Track | null;
+  queue: PlaybackQueueEntry[];
+  index: number;
+  committedQueueId?: string | null;
+}
+
+export interface GeneratedQueueDeps {
+  snapshot: () => GeneratedSnapshot;
+  requestPlan: (
+    intent: ListeningPlanIntent,
+    profile: AutoProfile,
+    seed: Track,
+    limit: number,
+    exclude: string[],
+    signal: AbortSignal,
+    session?: {
+      id: string;
+      segmentIndex: number;
+      context: Track[];
+    },
+  ) => Promise<ListeningPlanResponse>;
+  applyPlan: (
+    intent: ListeningPlanIntent,
+    response: ListeningPlanResponse,
+    replace: boolean,
+    /** The track the returned route continues from. Auto Mode chains its
+     * transitions from this one, so the caller needs to know it. */
+    anchor: Track,
+  ) => number;
+  onStatus: (
+    intent: ListeningPlanIntent,
+    status: 'planning' | 'ready' | 'exhausted' | 'warming' | 'degraded' | 'idle',
+    response?: ListeningPlanResponse,
+    replacing?: boolean,
+  ) => void;
+  identity: (track: Track) => string;
+  planningContext?: () => string;
+}
+
+interface GeneratedSession {
+  intent: ListeningPlanIntent;
+  profile: AutoProfile;
+  seed: Track;
+  continuous: boolean;
+  id?: string;
+  segmentIndex: number;
+}
+
+const TARGET_LOOKAHEAD = 8;
+/**
+ * How thin the generated lane may get before it is refilled.
+ *
+ * Sized for a bad connection rather than a good one: on a drive, the refill that
+ * matters is the one that had time to fail, back off and succeed before the
+ * listener reaches the end of the lane. Three tracks of warning was enough on
+ * Wi-Fi and not enough on a phone changing cells.
+ */
+const REFILL_THRESHOLD: Record<ListeningPlanIntent, number> = {
+  autoplay: 5,
+  radio: 5,
+  auto_mode: 5,
+};
+
+function sessionId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi?.randomUUID) return cryptoApi.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (!cryptoApi?.getRandomValues) {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+  cryptoApi.getRandomValues(bytes);
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+const RETRY_DELAYS = [2_000, 5_000, 15_000, 30_000, 60_000];
+const RECENT_MAX = 80;
+
+/** One lifecycle owner for every generated queue.
+ *
+ * The server owns candidate assembly and final ordering. This controller owns
+ * only session-local concerns: cancellation, stale-result protection, refill,
+ * retry, and atomic replacement after an Auto Mode profile change.
+ */
+export class GeneratedQueueController {
+  private session: GeneratedSession | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private aborter: AbortController | null = null;
+  private inFlight: Promise<boolean> | null = null;
+  private generation = 0;
+  private retryStep = 0;
+  private recent: string[] = [];
+  private settledInput: string | null = null;
+
+  constructor(private readonly deps: GeneratedQueueDeps) {}
+
+  activeIntent(): ListeningPlanIntent | null {
+    return this.session?.intent ?? null;
+  }
+
+  start(
+    intent: Exclude<ListeningPlanIntent, 'autoplay'>,
+    seed: Track,
+    profile: AutoProfile = 'balanced',
+  ): Promise<boolean> {
+    this.stop();
+    this.session = {
+      intent,
+      seed,
+      profile,
+      continuous: true,
+      id: intent === 'auto_mode' ? sessionId() : undefined,
+      segmentIndex: 0,
+    };
+    return this.sync(true);
+  }
+
+  /** Adopt a route the server already planned while choosing an opening.
+   *
+   * Source-only DJ starts return the opening and its first runway atomically.
+   * Registering that session here avoids immediately asking for a second route
+   * and lets ordinary refill ownership take over from then on. */
+  adopt(
+    intent: Exclude<ListeningPlanIntent, 'autoplay'>,
+    seed: Track,
+    profile: AutoProfile = 'balanced',
+    continuity?: { sessionId?: string | null; nextSegmentIndex?: number },
+  ): void {
+    this.stop();
+    this.session = {
+      intent,
+      seed,
+      profile,
+      continuous: true,
+      id: intent === 'auto_mode' ? (continuity?.sessionId || sessionId()) : undefined,
+      segmentIndex: intent === 'auto_mode' ? Math.max(1, continuity?.nextSegmentIndex ?? 1) : 0,
+    };
+    this.deps.onStatus(intent, 'ready');
+  }
+
+  ensureAutoplay(seed: Track, force = false): Promise<boolean> {
+    if (this.session && this.session.intent !== 'autoplay') return Promise.resolve(false);
+    if (!this.session) {
+      this.session = {
+        intent: 'autoplay',
+        seed,
+        profile: 'balanced',
+        continuous: false,
+        segmentIndex: 0,
+      };
+    } else {
+      this.session.seed = seed;
+    }
+    return this.sync(force);
+  }
+
+  stop(intent?: ListeningPlanIntent): void {
+    if (intent && this.session?.intent !== intent) return;
+    const stoppedIntent = this.session?.intent;
+    this.generation += 1;
+    this.aborter?.abort();
+    this.aborter = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.inFlight = null;
+    this.retryStep = 0;
+    this.recent = [];
+    this.settledInput = null;
+    this.session = null;
+    if (stoppedIntent) this.deps.onStatus(stoppedIntent, 'idle');
+  }
+
+  /** Rewrite the uncommitted runway — everything the listener has not started
+   * hearing yet — after a direction, DJ or request change. */
+  replan(profile: AutoProfile): Promise<boolean> {
+    if (this.session?.intent !== 'auto_mode') return Promise.resolve(false);
+    this.session.profile = profile;
+    this.aborter?.abort();
+    this.inFlight = null;
+    return this.sync(true, true);
+  }
+
+  rememberCurrent(): void {
+    const current = this.deps.snapshot().currentTrack;
+    if (!current) return;
+    this.remember(this.deps.identity(current));
+  }
+
+  /** Keep an acquisition-rejected candidate out of subsequent refills in this
+   * session. The route may replace it, but it must not immediately choose the
+   * same dead media identity again. */
+  exclude(track: Track): void {
+    this.remember(this.deps.identity(track));
+    if (track.recommendation?.identity) this.remember(track.recommendation.identity);
+    if (track.youtube_id) this.remember(track.youtube_id);
+    if (track.id) this.remember(track.id);
+  }
+
+  retry(): Promise<boolean> {
+    this.retryStep = 0;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.settledInput = null;
+    return this.refillNow();
+  }
+
+  async refillNow(): Promise<boolean> {
+    this.rememberCurrent();
+    return this.sync(true);
+  }
+
+  ensureRunway(): Promise<boolean> {
+    return this.sync();
+  }
+
+  private remember(identity: string): void {
+    if (!identity) return;
+    this.recent = [identity, ...this.recent.filter((value) => value !== identity)].slice(0, RECENT_MAX);
+  }
+
+  /**
+   * Try again after a failed plan.
+   *
+   * Runs for every intent, including Autoplay. It used to be limited to
+   * `continuous` sessions, which meant a single failed request — one tunnel, one
+   * cell handover — left the invisible lane empty for good, and the music simply
+   * ended when the queue ran out. Autoplay is no less continuous to the listener
+   * than Radio is; it just does not say so on screen.
+   */
+  private scheduleRetry(retryAfter?: number | null): void {
+    if (!this.session || this.retryTimer) return;
+    const delay = Math.max(
+      RETRY_DELAYS[Math.min(this.retryStep, RETRY_DELAYS.length - 1)],
+      retryAfter != null && Number.isFinite(retryAfter) ? Math.max(0, retryAfter * 1000) : 0,
+    );
+    this.retryStep += 1;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.settledInput = null;
+      void this.sync(true);
+    }, delay);
+  }
+
+  private generatedRemaining(intent: ListeningPlanIntent): number {
+    const snapshot = this.deps.snapshot();
+    return snapshot.queue
+      .slice(Math.max(0, snapshot.index + 1))
+      .filter((entry) => entry.queueLane === 'generated' && entry.queueSource === intent)
+      .length;
+  }
+
+  private exclusions(retained: readonly Track[]): string[] {
+    const values = new Set(this.recent);
+    for (const track of retained) {
+      const identity = this.deps.identity(track);
+      if (identity) values.add(identity);
+      if (track.recommendation?.identity) values.add(track.recommendation.identity);
+      if (track.youtube_id) values.add(track.youtube_id);
+      if (track.id) values.add(track.id);
+    }
+    return [...values];
+  }
+
+  private sync(force = false, replace = false): Promise<boolean> {
+    const session = this.session;
+    if (!session) return Promise.resolve(false);
+    if (this.inFlight) return this.inFlight;
+    const remaining = this.generatedRemaining(session.intent);
+    if (!force && remaining >= REFILL_THRESHOLD[session.intent]) {
+      if (session.intent === 'auto_mode') {
+        this.deps.onStatus(session.intent, 'ready');
+      }
+      return Promise.resolve(true);
+    }
+    const needed = replace ? TARGET_LOOKAHEAD : Math.max(0, TARGET_LOOKAHEAD - remaining);
+    if (needed === 0) return Promise.resolve(true);
+
+    const snapshot = this.deps.snapshot();
+    const replacement = replace ? runwayReplacement(snapshot.queue, snapshot.index, snapshot.committedQueueId) : null;
+    const retained = replacement?.retained ?? snapshot.queue;
+    const anchor = (replacement ? replacement.anchor : snapshot.queue.at(-1)) ?? snapshot.currentTrack ?? session.seed;
+    const exclusions = this.exclusions(retained);
+    const input = JSON.stringify([replace, session.profile, this.deps.planningContext?.(), exclusions, this.deps.identity(anchor)]);
+    if (session.intent === 'auto_mode' && this.settledInput === input) return Promise.resolve(false);
+    const generation = ++this.generation;
+    this.aborter?.abort();
+    const aborter = new AbortController();
+    this.aborter = aborter;
+    this.deps.onStatus(session.intent, 'planning', undefined, replace);
+    // Auto Mode continues from the append or replacement seam. Radio
+    // remains anchored to the song the listener explicitly chose, so a manual
+    // request inserted ahead of its generated lane cannot silently retune the
+    // station. Autoplay's caller advances `session.seed` to the tail it is
+    // extending.
+    const seed = session.intent === 'auto_mode' ? anchor : session.seed;
+    const task = this.deps.requestPlan(
+      session.intent,
+      session.profile,
+      seed,
+      needed,
+      exclusions,
+      aborter.signal,
+      session.intent === 'auto_mode' && session.id
+        ? {
+            id: session.id,
+            segmentIndex: session.segmentIndex,
+            context: retained.slice(-5),
+          }
+        : undefined,
+    ).then((response) => {
+      if (generation !== this.generation || aborter.signal.aborted || this.session !== session) return false;
+      const accepted = this.deps.applyPlan(session.intent, response, replace, seed);
+      if (accepted === 0) {
+        const exhausted = session.intent === 'auto_mode'
+          && response.empty_reason === 'exhausted' && !response.warming && !response.degraded;
+        this.settledInput = input;
+        if (exhausted) {
+          if (this.retryTimer) clearTimeout(this.retryTimer);
+          this.retryTimer = null;
+        }
+        this.deps.onStatus(session.intent, exhausted ? 'exhausted' : response.warming ? 'warming' : 'degraded', response, replace);
+        if (!exhausted) this.scheduleRetry(response.retry_after);
+        return false;
+      }
+      this.settledInput = null;
+      for (const item of response.items) this.remember(item.recommendation_identity || item.id);
+      if (session.intent === 'auto_mode') session.segmentIndex += 1;
+      this.retryStep = 0;
+      if (this.retryTimer) clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+      // `degraded` means one or more source pools were unavailable. If the
+      // planner still produced playable tracks, the listener has a healthy
+      // runway and should not see a false retry/error state.
+      this.deps.onStatus(session.intent, 'ready', response, replace);
+      return true;
+    }).catch(() => {
+      if (generation !== this.generation || aborter.signal.aborted || this.session !== session) return false;
+      this.deps.onStatus(session.intent, 'degraded', undefined, replace);
+      this.scheduleRetry();
+      return false;
+    }).finally(() => {
+      if (generation === this.generation) {
+        this.aborter = null;
+        this.inFlight = null;
+      }
+    });
+    this.inFlight = task;
+    return task;
+  }
+}
+
+
+######## FILE: ui_web/src/stores/runway.ts ########
+
+import type { RuntimeLifetime } from '../lib/runtimeLifetime';
+import { api, type ListeningPlanItem, type ListeningPlanResponse, type PreviewPreparation } from '../lib/api';
+import { audioService } from '../lib/audio';
+import { playbackYoutubeId } from '../lib/media';
+import { toast } from '../lib/toast';
+import { isPodcastTrack } from '../lib/track';
+import { queueIdentity, queueIndexOf } from '../lib/queueDiscovery';
+import { GeneratedQueueController } from '../lib/generatedQueue';
+import { t as tr } from '../lib/i18n';
+import { createQueueEntry, futureEntries, isPendingEntry, type PlaybackQueueEntry } from '../lib/playbackQueue';
+import { replanRunway, routeKind, routeRows, runwayReplacement } from '../lib/djRoute';
+import { planItemTrack, planSeed } from '../lib/planItems';
+import type { Track } from '../types/music';
+import { state, setState } from './core';
+import type { PlayerActions } from './contracts';
+
+type PlanStatus = 'planning' | 'ready' | 'exhausted' | 'warming' | 'degraded' | 'idle';
+type GeneratedSessionContext = { id: string; segmentIndex: number; context: Track[] };
+
+/** What the generated lanes need from the DJ session that owns Auto Mode. */
+export interface DjRunwayPort {
+  /** The occurrence whose handoff is loaded and cued, if any. */
+  committedQueueId(): string | null;
+  /** Called whenever the planner is touched while Auto Mode is on. */
+  activateWork(): void;
+  syncEvidence(): void;
+  planningContext(): string;
+  /** A DJ plan request, or null when the client has no DJ planner. */
+  requestPlan(seed: ReturnType<typeof planSeed>, limit: number, exclude: string[], signal: AbortSignal, session?: GeneratedSessionContext): Promise<ListeningPlanResponse> | null;
+  /** False for an answer to a direction the listener has since changed. */
+  acceptsPlan(response: ListeningPlanResponse): boolean;
+  /** A planned track as a DJ route occurrence. */
+  routeEntry(track: Track): PlaybackQueueEntry;
+  /** The route was written: record each entry's seam and provenance. */
+  planApplied(response: ListeningPlanResponse, accepted: Map<ListeningPlanItem, PlaybackQueueEntry>, replace: boolean, anchor: Track): void;
+  status(status: PlanStatus, response: ListeningPlanResponse | undefined, replacing: boolean | undefined): void;
+  dropOccurrence(queueId: string): PlaybackQueueEntry | null;
+  confirmNormalMode(kind: 'podcast' | 'radio', proceed: () => void | Promise<void>): Promise<void>;
+}
+
+export interface RunwayPorts {
+  dj: DjRunwayPort;
+  actions: Pick<PlayerActions, 'playFrom' | 'startRadio'>;
+  prefetchUpcoming: () => void;
+  stageNext: () => void;
+  discardFutureAutoplay: () => void;
+  cancelPendingRadio: () => void;
+  abandonContextMatches: (keep?: (queueId: string) => boolean) => void;
+  previewLookahead: () => string[];
+  nextEntry: () => PlaybackQueueEntry | undefined;
+  stagedEntry: { queueId: string; attemptId: string; url: string } | null;
+  trackPrepared: (track: Track) => boolean;
+  loadIndex: (i: number, opts?: { trigger?: 'ended' }) => void;
+  emitPlaybackEvent: (phase: string, extra?: Record<string, number | boolean>, strings?: Record<string, string | undefined>) => void;
+  runWhenAudible: (() => void) | null;
+}
+
+const AUTOPLAY_TARGET = 8;
+const AUTOPLAY_PREPARE_THRESHOLD = 2;
+const AUTOPLAY_REFILL_THRESHOLD = 5;
+const RUNWAY_LEAD_SECONDS = 60;
+const EMPTY_RUNWAY_RETRY_MS = 5_000;
+const PREMATURE_END_SECONDS = 3;
+
+/**
+ * Owns the generated lanes — Autoplay, Radio and the DJ route's runway — and
+ * what happens when they run dry. The DJ session plugs its own planning in
+ * through `ports.dj`; everything here is shared by the three intents.
+ */
+export function createRunway(ports: RunwayPorts, lifetime: RuntimeLifetime) {
+  let generatedQueue: GeneratedQueueController | null = null;
+
+  function applyPlan(intent: 'autoplay' | 'radio' | 'auto_mode', response: ListeningPlanResponse, replace: boolean, anchor: Track): number {
+    const dj = intent === 'auto_mode' ? ports.dj : null;
+    if (dj && !dj.acceptsPlan(response)) return 0;
+    const pb = state.playback;
+    // What a replacing plan keeps: everything already played, the handoff that
+    // is already loaded and cued, and every request with its bridges.
+    const replacement = replace ? runwayReplacement(pb.queue, pb.index, ports.dj.committedQueueId()) : null;
+    const retained = replacement?.retained ?? pb.queue;
+    const candidates = response.items
+      .map(item => ({ item, track: planItemTrack(item, state.library) }))
+      .filter(({ track }) => queueIndexOf(retained, track) === -1);
+    const planned = candidates.map(({ item, track }) => ({
+      item,
+      entry: dj ? dj.routeEntry(track) : createQueueEntry(track, 'generated', intent),
+    }));
+    if (replacement) {
+      const { head, previous, future, kept } = replacement;
+      const entries = planned.map(({ entry }) => entry);
+      const order = replanRunway(future, routeRows(entries), kept);
+      const placed = new Set(order);
+      const written = planned.filter(({ entry }) => placed.has(entry.queueId));
+      if (written.length === 0) return 0;
+      const byKey = new Map([...previous, ...entries].map(entry => [entry.queueId, entry] as const));
+      setState('playback', 'queue', [...head, ...order.map(key => byKey.get(key)!)]);
+      return planWritten(response, written, true, anchor, dj);
+    }
+    if (planned.length === 0) return 0;
+    setState('playback', 'queue', queue => [...queue, ...planned.map(({ entry }) => entry)]);
+    return planWritten(response, planned, false, anchor, dj);
+  }
+
+  function planWritten(response: ListeningPlanResponse, written: Array<{ item: ListeningPlanItem; entry: PlaybackQueueEntry }>,
+    replace: boolean, anchor: Track, dj: DjRunwayPort | null): number {
+    if (dj) dj.planApplied(response, new Map(written.map(({ item, entry }) => [item, entry] as const)), replace, anchor);
+    ports.prefetchUpcoming();
+    // New runway. If the music ran out waiting for exactly this, start it
+    // again — the plan arriving is the event, and nothing else is watching.
+    ports.stageNext();
+    resumeFromStarved();
+    return written.length;
+  }
+
+  function ensureGeneratedQueue(): GeneratedQueueController {
+    if (state.autoMode.active) ports.dj.activateWork();
+    if (generatedQueue) return generatedQueue;
+    generatedQueue = new GeneratedQueueController({
+      snapshot: () => ({
+        currentTrack: state.playback.currentTrack,
+        queue: state.playback.queue.slice(),
+        index: state.playback.index,
+        committedQueueId: ports.dj.committedQueueId(),
+      }),
+      identity: queueIdentity,
+      planningContext: () => ports.dj.planningContext(),
+      requestPlan: (intent, profile, seed, limit, exclude, signal, generatedSession) => {
+        const seedBody = planSeed(seed);
+        const planned = intent === 'auto_mode' ? ports.dj.requestPlan(seedBody, limit, exclude, signal, generatedSession) : null;
+        return planned ?? api.planMusicQueue({ intent, profile, seed: seedBody, exclude, limit }, signal);
+      },
+      applyPlan,
+      onStatus: (intent, status, response, replacing) => {
+        if (intent === 'autoplay') setState('playback', 'autoplayLoading', status === 'planning');
+        else if (intent === 'radio') setState('playback', 'radioLoading', status === 'planning');
+        else ports.dj.status(status, response, replacing);
+      },
+    });
+    return generatedQueue;
+  }
+
+  async function ensureAutoplay(force = false): Promise<boolean> {
+    const pb = state.playback;
+    const current = pb.currentTrack;
+    if (!pb.autoplayEnabled || !current || isPendingEntry(current) || isPodcastTrack(current) || pb.radioMode || state.autoMode.active || pb.repeat !== 'off') {
+      return false;
+    }
+    const upcoming = futureEntries(pb.queue, pb.index);
+    const generated = upcoming.filter(entry => entry.queueLane === 'generated' && entry.queueSource === 'autoplay');
+    const deterministic = upcoming.filter(entry => !(entry.queueLane === 'generated' && entry.queueSource === 'autoplay'));
+    if (!force && deterministic.length > AUTOPLAY_PREPARE_THRESHOLD) return false;
+    if (!force && generated.length >= AUTOPLAY_REFILL_THRESHOLD) return false;
+    // A context song still waiting on its match has nothing to seed a plan with.
+    const seed = generated.at(-1) ?? deterministic.filter(entry => !isPendingEntry(entry)).at(-1) ?? current;
+    if (generated.length >= AUTOPLAY_TARGET) return true;
+    return ensureGeneratedQueue().ensureAutoplay(seed, force);
+  }
+
+  let starvedQueueId: string | null = null;
+  function enterStarved(): void {
+    starvedQueueId = state.playback.queue[state.playback.index]?.queueId ?? null;
+    setState('playback', { isPlaying: false, isLoading: false, phase: 'starved' });
+    ports.emitPlaybackEvent('ui_queue_starved', {
+      lane_remaining: futureEntries(state.playback.queue, state.playback.index).length,
+      auto_mode: state.autoMode.active,
+      radio: state.playback.radioMode,
+      // Starving in the foreground is a spinner; starving with the phone locked is
+      // a drive that goes quiet, because the refill it waits on cannot complete.
+      hidden: typeof document !== 'undefined' && document.visibilityState === 'hidden',
+    });
+  }
+
+  function resumeFromStarved(): void {
+    if (state.playback.phase !== 'starved') return;
+    const pb = state.playback;
+    if (pb.queue[pb.index]?.queueId !== starvedQueueId) return;
+    if (pb.index >= pb.queue.length - 1) {
+      // Nothing yet. Ask again — for autoplay this is also what re-arms the
+      // controller's own retry, which is otherwise only started by a failure.
+      void ensureAutoplay(true);
+      void generatedQueue?.refillNow();
+      return;
+    }
+    if (state.autoMode.active) promotePreparedAutoSuccessor();
+    const next = state.playback.queue[state.playback.index + 1];
+    if (!next || !ports.trackPrepared(next)) {
+      ports.prefetchUpcoming();
+      return;
+    }
+    starvedQueueId = null;
+    ports.loadIndex(state.playback.index + 1, { trigger: 'ended' });
+  }
+
+  /** Bring the nearest prepared generated entry forward when the next one is
+   * not ready yet. True when the next entry can play. */
+  function promotePreparedAutoSuccessor(): boolean {
+    const pb = state.playback;
+    const immediate = pb.queue[pb.index + 1];
+    if (!immediate) return false;
+    if (ports.trackPrepared(immediate)) return true;
+    if (immediate.queueLane !== 'generated' || routeKind(immediate) !== 'generated'
+      || ports.dj.committedQueueId() === immediate.queueId) return false;
+    let readyIndex = -1;
+    for (let index = pb.index + 2; index < pb.queue.length; index += 1) {
+      const candidate = pb.queue[index];
+      // Moving a single ready song must not split or overtake an explicit request.
+      if (candidate.queueLane !== 'generated' || routeKind(candidate) !== 'generated') break;
+      if (ports.trackPrepared(candidate)) {
+        readyIndex = index;
+        break;
+      }
+    }
+    if (readyIndex === -1) return false;
+    setState('playback', 'queue', queue => {
+      const copy = queue.slice();
+      const [ready] = copy.splice(readyIndex, 1);
+      copy.splice(pb.index + 1, 0, ready);
+      return copy;
+    });
+    return true;
+  }
+
+  let runwayCheckedFor = '';
+  let lastEmptyRefillAt = 0;
+  function watchRunway(snapshot: { position: number; duration: number }): void {
+    ports.dj.syncEvidence();
+    const pb = state.playback;
+    const duration = snapshot.duration;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    if (duration - snapshot.position > RUNWAY_LEAD_SECONDS) return;
+    const key = pb.queue[pb.index]?.queueId ?? '';
+    if (!key) return;
+    // The check is latched per track, but an empty runway un-latches it: a lane
+    // that was long enough a moment ago and is not any more has to be asked about
+    // again, and this last minute is the only chance to fix it before `ended`
+    // arrives and there is nothing to play.
+    const empty = pb.index >= pb.queue.length - 1;
+    if (runwayCheckedFor === key && !empty) return;
+    // `timeupdate` arrives four times a second, so the un-latched case needs a
+    // rate of its own or a lane that stays empty becomes a request storm.
+    if (empty && Date.now() - lastEmptyRefillAt < EMPTY_RUNWAY_RETRY_MS) return;
+    if (empty) lastEmptyRefillAt = Date.now();
+    runwayCheckedFor = key;
+    // Also re-stages: an entry that landed after this track started would not
+    // otherwise be cued up on the idle deck in time to matter.
+    ports.stageNext();
+    // Forced when the lane is actually empty. Waiting for `ended` to discover it
+    // means asking the network from a page iOS has already frozen, which is how a
+    // drive ends in silence — the answer arrives when the phone is unlocked.
+    void ensureAutoplay(empty);
+    if (pb.radioMode || state.autoMode.active) {
+      void (empty ? generatedQueue?.refillNow() : generatedQueue?.ensureRunway());
+    }
+  }
+
+  function boundaryFacts(): Record<string, boolean> {
+    const next = ports.nextEntry();
+    return {
+      hidden: typeof document !== 'undefined' && document.visibilityState === 'hidden',
+      handoff_dj: audioService.mixPhase() !== 'idle',
+      handoff_staged: !!next && ports.stagedEntry?.queueId === next.queueId,
+      starved: !next,
+    };
+  }
+
+  function onPreviewPreparation(videoId: string, status: PreviewPreparation): void {
+    const pb = state.playback;
+    const currentId = pb.currentTrack && playbackYoutubeId(pb.currentTrack);
+    const wanted = ports.previewLookahead().slice(0, 3);
+    if (videoId !== currentId && !wanted.includes(videoId)) return;
+    if (pb.currentTrack && currentId === videoId) {
+      setState('playback', 'previewPreparation', status);
+    }
+    if (ports.runWhenAudible) return;
+    const future = pb.queue.slice(Math.max(0, pb.index + 1));
+    const matching = future.filter(entry => playbackYoutubeId(entry) === videoId);
+    if (status.state === 'unavailable' && matching.length > 0) {
+      const failedIds = new Set(matching.map(entry => entry.queueId));
+      for (const entry of matching) generatedQueue?.exclude(entry);
+      if (state.autoMode.active) {
+        for (const entry of matching) {
+          if (entry.queueLane === 'generated') ports.dj.dropOccurrence(entry.queueId);
+        }
+      }
+      // Auto's route helper may already have removed generated entries and their
+      // bridges. This second pass owns manual/context and non-Auto generated
+      // lanes, and is intentionally occurrence-scoped.
+      setState('playback', 'queue', queue => queue.filter(entry => !failedIds.has(entry.queueId)));
+      if (ports.stagedEntry && failedIds.has(ports.stagedEntry.queueId)) {
+        ports.stagedEntry = null;
+        audioService.clearStaged();
+      }
+      ports.emitPlaybackEvent('ui_preview_unavailable', {
+        occurrences: matching.length,
+        retry_after_sec: status.retry_after ?? 0,
+      }, {
+        video_id: videoId,
+        queue_lane: matching[0]?.queueLane,
+        queue_source: matching[0]?.queueSource,
+      });
+      if (matching.some(entry => entry.queueLane === 'generated')) {
+        void generatedQueue?.refillNow();
+      }
+      ports.prefetchUpcoming();
+    }
+    if (status.state === 'ready') promotePreparedAutoSuccessor();
+    ports.stageNext();
+    resumeFromStarved();
+  }
+
+  function normalQueueAfterRadio(): void {
+    const cur = state.playback.queue[state.playback.index];
+    const manual = futureEntries(state.playback.queue, state.playback.index, 'manual');
+    setState('playback', {
+      radioMode: false,
+      radioLoading: false,
+      radioSeedId: null,
+      queue: cur ? [cur, ...manual] : manual,
+      index: cur ? 0 : -1,
+    });
+  }
+
+  const actions = {
+    async startRadio(seed: Track): Promise<void> {
+      const isCurrent = lifetime.capture();
+      if (isPodcastTrack(seed)) {
+        toast.error(tr('toast.radioUnavailable'));
+        return;
+      }
+      if (state.autoMode.active) {
+        await ports.dj.confirmNormalMode('radio', () => ports.actions.startRadio(seed));
+        return;
+      }
+      const t = toast.loading(tr('toast.startingRadio'));
+      ports.discardFutureAutoplay();
+      ports.cancelPendingRadio();
+      setState('playback', { radioMode: true, radioLoading: true, radioSeedId: seed.id });
+      const isCurrentPlaying = state.playback.currentTrack?.id === seed.id && state.playback.isPlaying;
+      if (isCurrentPlaying) {
+        ports.abandonContextMatches();
+        const manual = futureEntries(state.playback.queue, state.playback.index, 'manual');
+        setState('playback', {
+          queue: [createQueueEntry(seed, 'context', 'radio', { id: `radio:${seed.id}`, kind: 'single', label: seed.title }), ...manual],
+          index: 0,
+        });
+      } else {
+        ports.actions.playFrom([seed], 0, { radio: true });
+      }
+      const ready = await ensureGeneratedQueue().start('radio', seed);
+      if (!isCurrent()) return;
+      if (generatedQueue?.activeIntent() !== 'radio' || !state.playback.radioMode || state.playback.radioSeedId !== seed.id) {
+        t.dismiss();
+        return;
+      }
+      if (ready) {
+        void api.emitDiscoveryEvent('music_started_radio', {
+          track_id: seed.source === 'preview' ? undefined : seed.id,
+          title: seed.title,
+          artist: seed.artist,
+          album: seed.album,
+          youtube_id: seed.youtube_id ?? (seed.source === 'preview' ? seed.id : undefined),
+          source: seed.source ?? 'library',
+        }).catch(lifetime.guard(() => {}));
+        t.update('success', tr('toast.radioStarted'));
+      } else {
+        t.update('error', tr('toast.radioFailed', { ytId: seed.youtube_id || tr('toast.radioFailedFallback') }));
+        generatedQueue.stop('radio');
+        normalQueueAfterRadio();
+      }
+    },
+    stopRadio(): void {
+      ports.cancelPendingRadio();
+      normalQueueAfterRadio();
+    },
+    async setAutoplayEnabled(enabled: boolean): Promise<boolean> {
+      const isCurrent = lifetime.capture();
+      const previous = state.playback.autoplayEnabled;
+      if (enabled === previous) return true;
+      setState('playback', 'autoplayEnabled', enabled);
+      if (enabled) queueMicrotask(() => void ensureAutoplay(true));
+      else ports.discardFutureAutoplay();
+      try {
+        await api.setAutoplayEnabled(enabled);
+        return isCurrent();
+      } catch {
+        if (!isCurrent()) return false;
+        setState('playback', 'autoplayEnabled', previous);
+        if (previous) queueMicrotask(() => void ensureAutoplay(true));
+        toast.error(tr('toast.updateFailed'));
+        return false;
+      }
+    },
+  };
+
+  return {
+    actions,
+    dispose() {
+      generatedQueue?.stop();
+      generatedQueue = null;
+    },
+    get generatedQueue() {
+      return generatedQueue;
+    },
+    set generatedQueue(value: GeneratedQueueController | null) {
+      generatedQueue = value;
+    },
+    ensureGeneratedQueue,
+    ensureAutoplay,
+    enterStarved,
+    resumeFromStarved,
+    promotePreparedAutoSuccessor,
+    watchRunway,
+    boundaryFacts,
+    onPreviewPreparation,
+    PREMATURE_END_SECONDS,
+  };
+}
+
+
+######## FILE: shared/music_candidates.py (lines 1-60 and 160-300 and 388-700) ########
+
+"""Candidate pools for generated queues: Autoplay, Radio and the DJ.
+
+A seed becomes candidates drawn from the local library, the related-video graph
+and related artists, each reconciled to the listener's own copy and resolved to
+a playable source. `music_plan` ranks them into a queue; `shared.dj.planning`
+orders them into a DJ route.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import threading
+from concurrent.futures import Future, wait
+from typing import NamedTuple
+
+
+from shared import catalog_resolution, deezer_catalog, request_scope
+from shared.database import instance_db
+from shared.discovery_intelligence import (
+    rank_recommendation_rows,
+)
+from shared.music_identity import canonical_music_identity, clean_artist, youtube_music_metadata
+from shared.url_utils import validate_youtube_video_id
+
+from shared import work
+from concurrent.futures import ThreadPoolExecutor
+
+from shared.download_pump import get_downloader, queue_manager_dl, start_downloader_pump
+from shared.download_queue import parse_intake_item
+from shared.realtime import emit_to_user
+from shared.user_context import current_user_id
+from shared.user_cores import favourite_library_ids, get_library
+
+logger = logging.getLogger(__name__)
+
+# Resolution of generated candidates to playable sources runs off the request
+# thread. Related extraction has a shared demand-owned lane in shared/related_work.py.
+_PLAN_RESOLVE_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="soundsible-plan-resolve")
+CANONICAL_RESOLVE_BUDGET_SEC = 2.5
+AUTO_CONTEXT_MAX = 5
+AUTO_GRAPH_ANCHORS = 4
+AUTO_GRAPH_FETCH_MISSES = 4
+# How long a caller waits for a cold related mix before answering "still
+# warming". The fetch it started is never thrown away: it keeps running, fills
+# the cache, and the next call is a hit.
+AUTO_GRAPH_WAIT_SEC = 8
+AUTO_GRAPH_RETRY_AFTER_SEC = 2.0
+AUTO_RAW_LIMIT = 100
+AUTO_SHORTLIST_LIMIT = 48
+AUTO_ROUTER_LIMIT = 24
+
+
+def engine_api() -> dict:
+    """The engine services the planner calls, looked up at call time.
+
+    One module attribute, so a test can replace every planner and DJ caller's
+    view of the library and downloader at once.
+    """
+    return {
+
+
+def collection_item_id(video_id, supplied=None, file_id=None):
+    from shared.collection import Collection
+    return request_scope.scoped(f'collection_item:{video_id}:{supplied or ""}:{file_id or ""}',
+        lambda: Collection().identify(([f'item:{supplied}'] if supplied else []) + ([f'lib:{file_id}'] if file_id else []) + [f'yt:{video_id}']))
+
+
+def item_from_related(row: dict) -> dict | None:
+    video_id = str(row.get("video_id") or row.get("id") or "").strip()
+    if not validate_youtube_video_id(video_id):
+        return None
+    music = youtube_music_metadata(row)
+    return {
+        "id": video_id,
+        "item_id": collection_item_id(video_id),
+        "youtube_id": video_id,
+        "discovery_youtube_id": video_id,
+        **music,
+        "duration": int(row.get("duration") or 0),
+        "cover": str(row.get("thumbnail") or ""),
+        "source": "preview",
+        "source_pool": "related",
+        "reason": row.get("reason"),
+        "reason_code": row.get("reason_code") or "seed_related",
+        "recommendation_identity": row.get("recommendation_identity") or f"music:youtube:{video_id}",
+        "score": float(row.get("score") or 0.5),
+        "external_ids": {"youtube_id": video_id},
+    }
+
+
+def item_from_feed(item: dict, *, pool: str) -> dict | None:
+    external = item.get("external_ids") if isinstance(item.get("external_ids"), dict) else {}
+    video_id = str(external.get("youtube_id") or item.get("youtube_id") or "").strip()
+    track_id = str(item.get("track_id") or "").strip()
+    if not track_id and not validate_youtube_video_id(video_id):
+        return None
+    item_id = track_id or video_id
+    title = str(item.get("title") or "Unknown")
+    artist = str(item.get("artist") or "")
+    source_title = str(item.get("source_title") or title)
+    source_artist = str(item.get("source_artist") or artist)
+    identity = canonical_music_identity(
+        artist,
+        title,
+        channel=source_artist,
+        authoritative=bool(track_id) or item.get("artist_is_channel") is False,
+        source_title=source_title,
+    )
+    return {
+        "id": item_id,
+        "item_id": item.get("item_id") or collection_item_id(video_id),
+        "track_id": track_id or None,
+        "youtube_id": video_id or None,
+        "title": identity.title,
+        "artist": identity.artist,
+        "source_title": source_title,
+        "source_artist": source_artist,
+        "playback_source_kind": identity.source_kind,
+        "canonical_identity": identity.key,
+        "artist_is_channel": item.get("artist_is_channel", False),
+        "artists": item.get("artists"),
+        "deezer_artist_id": item.get("deezer_artist_id") or external.get("deezer_artist_id"),
+        "deezer_album_id": item.get("deezer_album_id") or external.get("deezer_album_id"),
+        "album": str(item.get("album") or ""),
+        "duration": int(item.get("duration") or 0),
+        "cover": str(item.get("cover") or ""),
+        "source": "library" if track_id else "preview",
+        "source_pool": pool,
+        "reason": item.get("reason"),
+        "reason_code": item.get("reason_code"),
+        "recommendation_identity": item.get("recommendation_identity")
+        or (f"music:track:{track_id}" if track_id else f"music:youtube:{video_id}"),
+        "score": float(item.get("score") or 0.5),
+        "external_ids": {**external, **({"youtube_id": video_id} if video_id else {})},
+    }
+
+
+def candidate_keys(item: dict) -> set[str]:
+    """Every id a planner candidate can legitimately be recognised by.
+
+    The browser excludes what it already holds using raw playback ids
+    (`youtube_id or id`), while the planner names the same song
+    `music:youtube:<id>` or `music:track:<id>`. Comparing only the namespaced
+    form let the seed of a session come back as its own route: the browser
+    dropped it as a duplicate and then read the empty result as a dry pool.
+    """
+    external = item.get("external_ids") if isinstance(item.get("external_ids"), dict) else {}
+    values = (
+        item.get("recommendation_identity"),
+        item.get("canonical_identity"),
+        item.get("track_id"),
+        item.get("youtube_id"),
+        item.get("discovery_youtube_id"),
+        external.get("youtube_id"),
+        item.get("id"),
+    )
+    return {str(value) for value in values if value}
+
+
+class GraphWalk(NamedTuple):
+    """One related-graph expansion, and how much of it actually arrived.
+
+    `warming` is the difference between "this neighbourhood is empty" and "we
+    have not finished reading it yet" — the distinction the route panel needs
+    before it tells a listener there is nothing left to play.
+    """
+
+    items: list[dict]
+    degraded: bool
+    warming: bool
+    cache_hit: int = 0
+    cache_miss: int = 0
+
+
+def planner_artist_key(value: object) -> str:
+    return clean_artist(value).casefold()
+
+
+def video_id_for(metadata, item: dict) -> str:
+    video_id = str(
+        item.get("discovery_youtube_id")
+        or item.get("youtube_id")
+        or (
+            (item.get("external_ids") or {}).get("youtube_id")
+            if isinstance(item.get("external_ids"), dict)
+            else ""
+        )
+        or (item.get("id") if item.get("source") == "preview" else "")
+        or ""
+    ).strip()
+    if validate_youtube_video_id(video_id):
+        return video_id
+    track_id = str(item.get("track_id") or (item.get("id") if item.get("source") != "preview" else "") or "")
+    track = track_by_id(metadata, track_id) if track_id else None
+    candidate = str(getattr(track, "youtube_id", "") or "")
+    return candidate if validate_youtube_video_id(candidate) else ""
+
+
+def resolve_generated_playback(item: dict, user_id: str | None) -> dict:
+    """Prefer a canonical upload while retaining the discovery graph identity."""
+def planner_context(seed: dict, raw_context: object) -> list[dict]:
+    rows = [
+        dict(item)
+        for item in (raw_context if isinstance(raw_context, list) else [])
+        if isinstance(item, dict)
+    ][-AUTO_CONTEXT_MAX:]
+    rows.append(dict(seed))
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for item in rows:
+        identity = str(
+            item.get("youtube_id")
+            or item.get("track_id")
+            or item.get("id")
+            or f"{item.get('artist', '')}:{item.get('title', '')}"
+        ).strip()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(item)
+    return deduped[-AUTO_CONTEXT_MAX:]
+
+
+def uncached_related(video_id: str) -> list[dict]:
+    api = engine_api()
+    rows = api["get_downloader"](open_browser=False).downloader.get_related_videos(
+        video_id,
+        max_results=25,
+        enrich=False,
+    )
+    return rows
+
+
+_GRAPH_INFLIGHT: dict[str, Future] = {}
+_GRAPH_INFLIGHT_LOCK = threading.Lock()
+
+
+def related_future(video_id: str) -> Future:
+    """One fetch per seed, however many callers want it.
+
+    A cold seed outlives the caller that asked for it: the wait expires, the
+    listener retries, and without this every retry queued *another* copy of the
+    same fetch against the same threads — so the retries were competing with the
+    work that would have answered them. Joining the live future instead means a
+    retry either finds the cache warm or waits on the fetch already running.
+    """
+    with _GRAPH_INFLIGHT_LOCK:
+        from shared.related_work import submit
+        future = submit(video_id, lambda: uncached_related(video_id))
+        _GRAPH_INFLIGHT[video_id] = future
+
+    def _release(_done: Future, key: str = video_id) -> None:
+        with _GRAPH_INFLIGHT_LOCK:
+            if _GRAPH_INFLIGHT.get(key) is _done:
+                _GRAPH_INFLIGHT.pop(key, None)
+
+    future.add_done_callback(_release)
+    return future
+
+
+def context_related(
+    metadata,
+    context: list[dict],
+    *,
+    personalise: bool = True,
+) -> GraphWalk:
+    """Collect a bounded semantic neighbourhood around the route that survives."""
+    anchors: list[tuple[str, float]] = []
+    for index, item in enumerate(context[-AUTO_GRAPH_ANCHORS:]):
+        video_id = video_id_for(metadata, item)
+        if not video_id:
+            continue
+        recency = 0.64 + 0.36 * ((index + 1) / min(len(context), AUTO_GRAPH_ANCHORS))
+        if all(existing != video_id for existing, _ in anchors):
+            anchors.append((video_id, recency))
+
+    mixes: dict[str, list[dict]] = {}
+    misses: list[str] = []
+    cached_mixes = instance_db().get_related_mixes(video_id for video_id, _ in anchors)
+    for video_id, _ in anchors:
+        cached = cached_mixes.get(video_id)
+        if cached is None:
+            misses.append(video_id)
+        else:
+            mixes[video_id] = cached
+
+    warming = len(misses) > AUTO_GRAPH_FETCH_MISSES
+    futures = {
+        related_future(video_id): video_id
+        for video_id in misses[:AUTO_GRAPH_FETCH_MISSES]
+    }
+    if futures:
+        done, pending = wait(futures, timeout=AUTO_GRAPH_WAIT_SEC)
+        # A warming response lets an identical retry keep these seed interests.
+        # Changed/cancelled requests retire them through the work scope.
+        warming = warming or bool(pending)
+        for future in done:
+            try:
+                mixes[futures[future]] = future.result()
+            except Exception as exc:
+                logger.info("Auto context graph unavailable for %s: %s", futures[future], exc)
+
+    candidates: dict[str, dict] = {}
+    for video_id, recency in anchors:
+        rows = mixes.get(video_id) or []
+        ranked_rows = rank_recommendation_rows(rows, source="auto_mode") if personalise else rows
+        for rank, raw in enumerate(ranked_rows[:25]):
+            item = item_from_related(raw)
+            if not item:
+                continue
+            semantic = max(0.18, recency * (1 - min(rank, 24) / 36))
+            identity = str(item["recommendation_identity"])
+            previous = candidates.get(identity)
+            if previous and float(previous.get("semantic_score") or 0) >= semantic:
+                continue
+            item.update({
+                "semantic_score": round(semantic, 6),
+                "semantic_basis": "related_track",
+                "score": round(
+                    max(0.0001, float(item.get("score") or 0.5) * (0.7 + semantic * 0.3)),
+                    6,
+                ),
+            })
+            candidates[identity] = item
+            if len(candidates) >= AUTO_RAW_LIMIT:
+                break
+        if len(candidates) >= AUTO_RAW_LIMIT:
+            break
+    return GraphWalk(
+        reconcile_library_sources(metadata, list(candidates.values())),
+        any(video_id not in mixes for video_id, _ in anchors),
+        warming,
+        len(anchors) - len(misses),
+        len(misses),
+    )
+
+
+def related_artist_pool(
+    seed_artist: str,
+    user_id: str | None,
+    limit: int = 6,
+) -> tuple[list[str], list[dict]]:
+    """Return related artist names plus one playable representative per artist."""
+    if not seed_artist:
+        return [], []
+    try:
+        artist_id, _ = deezer_catalog.resolve_artist_id(seed_artist)
+        if not artist_id:
+            return [], []
+        related_rows = deezer_catalog.related_artists(artist_id, max(6, limit))[:limit]
+    except Exception as exc:
+        logger.info("Auto related artists unavailable for %s: %s", seed_artist, exc)
+        return [], []
+
+    names = [str(row.get("name") or "").strip() for row in related_rows if str(row.get("name") or "").strip()]
+    futures = {
+        submit_resolution(deezer_catalog.artist_top_tracks, str(row["deezer_id"]), 1): index
+        for index, row in enumerate(related_rows)
+        if row.get("deezer_id")
+    }
+    done, pending = wait(futures, timeout=5)
+    if work.current() is None:
+        for future in pending:
+            future.cancel()
+    seeds: list[tuple[int, dict]] = []
+    for future in done:
+        try:
+            top = future.result()
+        except Exception:
+            top = []
+        if not top:
+            continue
+        item = dict(top[0])
+        item.update({
+            "score": 0.62,
+            "semantic_score": 0.62,
+            "semantic_basis": "related_artist",
+            "reason": f"Related to {seed_artist}.",
+            "reason_code": "related_artist",
+        })
+        seeds.append((futures[future], item))
+    seeds.sort(key=lambda pair: pair[0])
+
+    resolution_futures = {
+        submit_resolution(resolve_artist_candidate, item, user_id): index
+        for index, item in seeds
+    }
+    done, pending = wait(resolution_futures, timeout=8)
+    if work.current() is None:
+        for future in pending:
+            future.cancel()
+    resolved: list[tuple[int, dict]] = []
+    for future in done:
+        try:
+            item = future.result()
+        except Exception:
+            item = None
+        if item:
+            item["source_pool"] = "discovery"
+            item["semantic_score"] = 0.62
+            item["semantic_basis"] = "related_artist"
+            resolved.append((resolution_futures[future], item))
+    resolved.sort(key=lambda pair: pair[0])
+    return names, [item for _, item in resolved[:limit]]
+
+
+def local_item(track, *, semantic_score: float, basis: str, favourite: bool) -> dict:
+    video_id = str(getattr(track, "youtube_id", "") or "")
+    score = min(1.0, semantic_score * 0.82 + (0.16 if favourite else 0.06))
+    return {
+        "id": str(track.id),
+        "item_id": getattr(track, "item_id", None),
+        "track_id": str(track.id),
+        "youtube_id": video_id or None,
+        "title": str(track.title or "Unknown"),
+        "artist": str(track.artist or track.album_artist or ""),
+        "album": str(track.album or ""),
+        "duration": int(track.duration or 0),
+        "cover": str(getattr(track, "cover_art_key", "") or ""),
+        "source": "library",
+        "source_pool": "local",
+        "canonical_identity": library_identity(track),
+        "reason": "From your library and inside this session's musical path.",
+        "reason_code": "session_library",
+        "recommendation_identity": f"music:track:{track.id}",
+        "score": round(score, 6),
+        "semantic_score": round(semantic_score, 6),
+        "semantic_basis": basis,
+        "personal_score": 1.0 if favourite else 0.55,
+        "external_ids": {"youtube_id": video_id} if video_id else {},
+    }
+
+
+def build_auto_pools(
+    metadata,
+    context: list[dict],
+    *,
+    favourite_ids: set[str],
+    user_id: str | None,
+) -> tuple[dict[str, list[dict]], bool]:
+    walk = context_related(metadata, context)
+    related = list(walk.items)
+    # This pool feeds the legacy plan and the discovery feed, neither of which
+    # has a "still warming" state to show. For them an unfinished walk is simply
+    # one more way of being degraded.
+    graph_degraded = walk.degraded or walk.warming
+    seed_artist = str(context[-1].get("artist") or "") if context else ""
+    related_artists, discovery = related_artist_pool(seed_artist, user_id)
+    related_artist_keys = {planner_artist_key(name) for name in related_artists}
+    context_artist_keys = {
+        planner_artist_key(item.get("artist"))
+        for item in context
+        if planner_artist_key(item.get("artist"))
+    }
+    semantic_by_video = {
+        str(item.get("youtube_id") or ""): float(item.get("semantic_score") or 0)
+        for item in related
+        if item.get("youtube_id")
+    }
+
+    local: list[dict] = []
+    for track in list(metadata.tracks if metadata and metadata.tracks else []):
+        artist_key = planner_artist_key(track.artist or track.album_artist)
+        video_id = str(getattr(track, "youtube_id", "") or "")
+        if video_id and video_id in semantic_by_video:
+            semantic = semantic_by_video[video_id]
+            basis = "related_track"
+        elif artist_key and artist_key in context_artist_keys:
+            semantic = 0.76
+            basis = "same_artist"
+        elif artist_key and artist_key in related_artist_keys:
+            semantic = 0.62
+            basis = "related_artist"
+        else:
+            continue
+        local.append(local_item(
+            track,
+            semantic_score=semantic,
+            basis=basis,
+            favourite=str(track.id) in favourite_ids,
+        ))
+
+    local.sort(
+        key=lambda item: (
+            float(item.get("semantic_score") or 0),
+            float(item.get("personal_score") or 0),
+            float(item.get("score") or 0),
+        ),
+        reverse=True,
+    )
+    owned_video_ids = {
+        str(item.get("youtube_id") or "")
+        for item in local
+        if item.get("youtube_id")
+    }
+    related = [
+        item for item in related
+        if str(item.get("youtube_id") or "") not in owned_video_ids
+    ]
+    discovery = [
+        item for item in discovery
+        if str(item.get("youtube_id") or "") not in owned_video_ids
+    ]
+    related.sort(key=lambda item: float(item.get("semantic_score") or 0), reverse=True)
+    discovery.sort(key=lambda item: float(item.get("semantic_score") or 0), reverse=True)
+    return {
+        "local": local[:AUTO_SHORTLIST_LIMIT],
+        "related": related[:AUTO_SHORTLIST_LIMIT],
+        "discovery": discovery[:AUTO_SHORTLIST_LIMIT],
+    }, graph_degraded
+
+
+def resolve_artist_candidate(item: dict, user_id: str | None) -> dict | None:
+
+
+######## FILE: shared/downloader/youtube/search.py (get_related_videos, lines 331-420) ########
+
+def get_related_videos(
+    seed_video_id: str,
+    cookies: Cookies,
+    max_results: int = 25,
+    enrich: bool = True,
+) -> List[Dict[str, Any]]:
+    """Related videos for a seed, in the search row shape.
+
+    Order of attempts:
+      1. RD mix playlist (flat extraction) — one yt-dlp call, deterministic,
+         matches YouTube's official "Radio" mix for the seed. No fan-out.
+      2. A search by the seed's own title and artist. `enrich=False` skips
+         the creator fan-out, which can add several seconds.
+      3. RD mix without flat extraction (full per-entry extract) — last resort.
+    """
+    if not is_valid_video_id(seed_video_id):
+        return []
+
+    def _try_extract(ydl_opts: dict, url: str) -> List[Dict[str, Any]]:
+        check()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            result = ydl.extract_info(url, download=False)
+        if not result or "entries" not in result:
+            logger.debug(
+                "[Discover] get_related_videos: no entries in result (keys: %s)",
+                list(result.keys()) if result else "None",
+            )
+            return []
+        check()
+        rows = (_related_row(entry) for entry in islice(result.get("entries") or [], max_results))
+        return [row for row in rows if row is not None]
+
+    base_opts = _extract_options(socket_timeout=12, playlistend=max_results,
+                                 lazy_playlist=True, **cookies.ydl_options())
+    mix_url = f"{watch_url(seed_video_id)}&list=RD{seed_video_id}&start_radio=1"
+
+    try:
+        results = _try_extract({**base_opts, "extract_flat": "in_playlist", "noplaylist": False}, mix_url)
+        if results:
+            return results
+    except WorkCancelled:
+        raise
+    except Exception as e:
+        logger.debug("[Discover] get_related_videos RD flat failed: %s", e)
+
+    try:
+        check()
+        info = peek_video_metadata(watch_url(seed_video_id), cookies)
+        if info:
+            title = str(info.get("track") or info.get("title") or "").strip()
+            raw_artist = info.get("artist") or info.get("channel") or info.get("uploader") or ""
+            if isinstance(raw_artist, (list, tuple)):
+                artist = ", ".join(str(x) for x in raw_artist if x)
+            else:
+                artist = str(raw_artist).strip() if isinstance(raw_artist, str) else ""
+            query = f"{title} {artist}".strip()
+            if query:
+                results = search_youtube(
+                    query,
+                    cookies,
+                    max_results=max_results,
+                    use_ytmusic=prefer_ytmusic(),
+                    enrich_missing=enrich,
+                )
+                results = [r for r in results if str(r.get("id", "")) != seed_video_id]
+                if results:
+                    return results
+    except WorkCancelled:
+        raise
+    except Exception as e:
+        logger.debug("[Discover] get_related_videos search fallback failed: %s", e)
+
+    try:
+        results = _try_extract({**base_opts, "noplaylist": False}, mix_url)
+        if results:
+            return results
+    except WorkCancelled:
+        raise
+    except Exception as e:
+        logger.debug("[Discover] get_related_videos RD full failed: %s", e)
+
+    return []

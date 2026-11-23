@@ -10,6 +10,7 @@ import {
   Pause,
   Play,
   Plus,
+  Radio,
   Trash2,
 } from 'lucide-react';
 import React, {useEffect, useRef, useState} from 'react';
@@ -73,6 +74,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     togglePlay,
     addToQueue,
     playNextInQueue,
+    startRadio,
     toggleLikeTrack,
     handleDeletedTracks,
     bumpLibraryRefresh,
@@ -580,6 +582,20 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     <ListPlus className="w-4 h-4 text-[var(--text-secondary)]" />
                     Add to Queue
                   </button>
+                  {!offline && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        startRadio(track);
+                        setMenuTrackId(null);
+                        flashToast('Starting radio...');
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                    >
+                      <Radio className="w-4 h-4 text-[var(--accent)]" />
+                      Start Radio
+                    </button>
+                  )}
 
                   <button
                     type="button"

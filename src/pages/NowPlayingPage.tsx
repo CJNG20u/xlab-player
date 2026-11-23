@@ -9,6 +9,7 @@ import {
   Music2,
   Pause,
   Play,
+  Radio,
   Repeat,
   Repeat1,
   Shuffle,
@@ -80,6 +81,9 @@ export const NowPlayingPage: React.FC = () => {
     lyricsOpen,
     setLyricsOpen,
     setQueueOpen,
+    radioMode,
+    startRadio,
+    stopRadio,
     togglePlay,
     nextTrack,
     prevTrack,
@@ -482,6 +486,32 @@ export const NowPlayingPage: React.FC = () => {
               <Mic2 className="w-4 h-4" />
               <span className="hidden sm:inline">Lyrics</span>
             </button>
+            {!offline && currentTrack && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (radioMode) {
+                    stopRadio();
+                    flashToast('Radio stopped');
+                  } else {
+                    startRadio(currentTrack);
+                    flashToast('Starting radio...');
+                  }
+                }}
+                aria-pressed={radioMode}
+                className={`flex h-11 px-3.5 items-center gap-2 rounded-full text-xs font-semibold transition-colors ${
+                  radioMode
+                    ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-md'
+                    : isLight
+                      ? 'bg-white/75 backdrop-blur-md border border-black/[0.08] text-[#1C1C1E] hover:bg-white'
+                      : 'bg-black/30 text-white hover:bg-black/50'
+                }`}
+                aria-label={radioMode ? 'Stop Radio' : 'Start Radio'}
+              >
+                <Radio className="w-4 h-4" />
+                <span className="hidden sm:inline">{radioMode ? 'Radio On' : 'Radio'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setQueueOpen(true)}

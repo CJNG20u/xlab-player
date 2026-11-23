@@ -81,12 +81,12 @@ const RECOVERABLE_COOKIE_ERROR_PATTERNS = [
   'private video',
 ];
 
-function isRecoverableCookieError(errMessage: string): boolean {
+export function isRecoverableCookieError(errMessage: string): boolean {
   const lower = (errMessage || '').toLowerCase();
   return RECOVERABLE_COOKIE_ERROR_PATTERNS.some((pattern) => lower.includes(pattern));
 }
 
-function hasConfiguredCookies(): boolean {
+export function hasConfiguredCookies(): boolean {
   try {
     return fs.existsSync(COOKIES_FILE) && fs.statSync(COOKIES_FILE).size > 0;
   } catch {
@@ -128,7 +128,7 @@ function resolveYtdlpInvocation(forcePythonModule = false): YtdlpInvocation {
   return {cmd: ytdlpPath, prefixArgs: [], env};
 }
 
-async function execYtdlp(
+export async function execYtdlp(
   args: string[],
   options: {timeout?: number; maxBuffer?: number} = {}
 ): Promise<{stdout: string; stderr: string}> {
@@ -221,7 +221,7 @@ export async function checkBinariesStatus(): Promise<{
   };
 }
 
-function createTempCookiesCopy(): string | null {
+export function createTempCookiesCopy(): string | null {
   if (!fs.existsSync(COOKIES_FILE)) return null;
   const stat = fs.statSync(COOKIES_FILE);
   if (stat.size === 0) return null;
@@ -301,7 +301,7 @@ function findDuplicateInLibrary(artist: string, title: string) {
   return titleMatch || null;
 }
 
-function extractThumbnailUrl(entry: Record<string, unknown>): string {
+export function extractThumbnailUrl(entry: Record<string, unknown>): string {
   if (typeof entry.thumbnail === 'string' && entry.thumbnail.trim()) {
     return entry.thumbnail.trim();
   }
@@ -2440,7 +2440,7 @@ function drainResolveWaitQueue(): void {
   }
 }
 
-async function withYtdlpResolveSlot<T>(
+export async function withYtdlpResolveSlot<T>(
   fn: () => Promise<T>,
   priority: StreamResolvePriority = 'playback',
   videoId?: string

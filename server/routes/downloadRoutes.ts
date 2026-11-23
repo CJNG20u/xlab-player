@@ -12,6 +12,10 @@ import {
   searchCatalog,
 } from '../catalog.ts';
 import {
+  planAutoplayForUser,
+  type AutoplayContextTrackInput,
+} from '../autoplayService.ts';
+import {
   cancelDownloadJob,
   downloadEvents,
   downloadTrackToNas,
@@ -152,6 +156,195 @@ discoverRouter.get('/discover/artist/:id', requireAuth, async (req: AuthRequest,
     const msg = err instanceof Error ? err.message : 'Failed to load artist details';
     console.error('[discover-artist]', artistId, msg);
     res.status(msg === 'Artist not found' ? 404 : 502).json({error: msg});
+  }
+});
+
+// Per-user sliding-window rate limiter for POST /api/discover/autoplay/plan (60 req/min)
+const AUTOPLAY_RATE_LIMIT_MAX = 60;
+const AUTOPLAY_RATE_LIMIT_WINDOW_MS = 60_000;
+const autoplayRateBuckets = new Map<string, number[]>();
+
+function checkAutoplayRateLimit(key: string): {allowed: boolean; retryAfterSec: number} {
+  const now = Date.now();
+  const cutoff = now - AUTOPLAY_RATE_LIMIT_WINDOW_MS;
+  const prev = autoplayRateBuckets.get(key) || [];
+  const active = prev.filter((ts) => ts > cutoff);
+  if (active.length >= AUTOPLAY_RATE_LIMIT_MAX) {
+    const oldest = active[0] ?? now;
+    const retryAfterSec = Math.max(
+      1,
+      Math.ceil((oldest + AUTOPLAY_RATE_LIMIT_WINDOW_MS - now) / 1000)
+    );
+    autoplayRateBuckets.set(key, active);
+    return {allowed: false, retryAfterSec};
+  }
+  active.push(now);
+  autoplayRateBuckets.set(key, active);
+  if (autoplayRateBuckets.size > 1000) {
+    for (const [bucketKey, timestamps] of autoplayRateBuckets.entries()) {
+      if (timestamps.length === 0 || timestamps[timestamps.length - 1] <= cutoff) {
+        autoplayRateBuckets.delete(bucketKey);
+      }
+    }
+  }
+  return {allowed: true, retryAfterSec: 0};
+}
+
+function parseAutoplayTrackInput(
+  raw: unknown
+): {ok: true; value: AutoplayContextTrackInput} | {ok: false; error: string} {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {ok: false, error: 'Track entry must be an object'};
+  }
+  const rec = raw as Record<string, unknown>;
+  const rawVideoId = typeof rec.videoId === 'string' ? rec.videoId.trim() : '';
+  if (rawVideoId && !isValidYouTubeVideoId(rawVideoId)) {
+    return {ok: false, error: 'Invalid YouTube video ID'};
+  }
+
+  let trackId: number | string | null = null;
+  if (typeof rec.trackId === 'number') {
+    if (!Number.isInteger(rec.trackId) || rec.trackId <= 0) {
+      return {ok: false, error: 'Invalid trackId'};
+    }
+    trackId = rec.trackId;
+  } else if (typeof rec.trackId === 'string' && rec.trackId.trim()) {
+    const trimmedTid = rec.trackId.trim().slice(0, 64);
+    if (trimmedTid.startsWith('yt-')) {
+      const vid = trimmedTid.slice(3);
+      if (!isValidYouTubeVideoId(vid)) {
+        return {ok: false, error: 'Invalid YouTube video ID'};
+      }
+      trackId = trimmedTid;
+    } else if (/^\d+$/.test(trimmedTid)) {
+      const num = Number(trimmedTid);
+      if (!Number.isSafeInteger(num) || num <= 0) {
+        return {ok: false, error: 'Invalid trackId'};
+      }
+      trackId = num;
+    } else {
+      trackId = trimmedTid;
+    }
+  }
+
+  const title = typeof rec.title === 'string' ? rec.title.trim().slice(0, 200) : '';
+  const artist = typeof rec.artist === 'string' ? rec.artist.trim().slice(0, 200) : '';
+  const album = typeof rec.album === 'string' ? rec.album.trim().slice(0, 200) : '';
+  const rawDuration = Number(rec.duration);
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? Math.min(86400, rawDuration) : 0;
+
+  return {
+    ok: true,
+    value: {
+      videoId: rawVideoId || undefined,
+      trackId,
+      title,
+      artist,
+      album,
+      duration,
+    },
+  };
+}
+
+discoverRouter.post('/discover/autoplay/plan', requireAuth, async (req: AuthRequest, res) => {
+  const rateKey = req.user?.id ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
+  const rate = checkAutoplayRateLimit(rateKey);
+  if (!rate.allowed) {
+    res.setHeader('Retry-After', String(rate.retryAfterSec));
+    res.status(429).json({error: 'Too many autoplay plan requests'});
+    return;
+  }
+
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+
+  // Validate seed
+  const parsedSeed = parseAutoplayTrackInput(body.seed);
+  if (!parsedSeed.ok) {
+    res.status(400).json({error: parsedSeed.error});
+    return;
+  }
+  const seed = parsedSeed.value;
+  if (!seed.videoId && !seed.trackId && !seed.title && !seed.artist) {
+    res.status(400).json({error: 'seed must include videoId, trackId, title, or artist'});
+    return;
+  }
+
+  // Validate intent
+  const rawIntent = body.intent === undefined ? 'autoplay' : body.intent;
+  if (rawIntent !== 'autoplay' && rawIntent !== 'radio') {
+    res.status(400).json({error: "intent must be 'autoplay' or 'radio'"});
+    return;
+  }
+
+  // Validate context (array, max 5 entries)
+  const context: AutoplayContextTrackInput[] = [];
+  if (body.context !== undefined) {
+    if (!Array.isArray(body.context)) {
+      res.status(400).json({error: 'context must be an array'});
+      return;
+    }
+    if (body.context.length > 20) {
+      res.status(400).json({error: 'context exceeds maximum allowed size'});
+      return;
+    }
+    for (const rawEntry of body.context.slice(-5)) {
+      const parsed = parseAutoplayTrackInput(rawEntry);
+      if (!parsed.ok) {
+        res.status(400).json({error: parsed.error});
+        return;
+      }
+      context.push(parsed.value);
+    }
+  }
+
+  // Validate exclude (array of strings, capped at 200)
+  const exclude: string[] = [];
+  if (body.exclude !== undefined) {
+    if (!Array.isArray(body.exclude)) {
+      res.status(400).json({error: 'exclude must be an array'});
+      return;
+    }
+    if (body.exclude.length > 200) {
+      res.status(400).json({error: 'exclude exceeds maximum allowed size (200)'});
+      return;
+    }
+    for (const rawVal of body.exclude) {
+      if (typeof rawVal !== 'string') continue;
+      const trimmed = rawVal.trim().slice(0, 160);
+      if (trimmed) exclude.push(trimmed);
+    }
+  }
+
+  // Validate limit (default 8, clamp 1..24)
+  const rawLimit = body.limit === undefined ? 8 : Number(body.limit);
+  if (!Number.isFinite(rawLimit) || rawLimit < 1) {
+    res.status(400).json({error: 'limit must be a positive number'});
+    return;
+  }
+  const limit = Math.max(1, Math.min(24, Math.floor(rawLimit)));
+
+  // Optional entropy for Gumbel-top-k randomization
+  const entropy =
+    typeof body.entropy === 'string' && body.entropy.trim()
+      ? body.entropy.trim().slice(0, 128)
+      : null;
+
+  try {
+    const result = await planAutoplayForUser({
+      userId: req.user!.id,
+      seed,
+      context,
+      exclude,
+      intent: rawIntent,
+      limit,
+      entropy,
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to plan autoplay queue';
+    console.error('[autoplay-route]', msg);
+    res.status(502).json({error: msg});
   }
 });
 

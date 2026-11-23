@@ -1,4 +1,12 @@
-import type {LrcLine, PlayHistoryEntry, Track} from '../types';
+import type {
+  AutoplayIntent,
+  AutoplayPlanItem,
+  AutoplayPlanRequest,
+  AutoplayPlanResponse,
+  LrcLine,
+  PlayHistoryEntry,
+  Track,
+} from '../types';
 
 const TOKEN_STORAGE_KEY = 'xlabplayer_token';
 const PLAY_HISTORY_STORAGE_KEY = 'xlabplayer_play_history_v1';
@@ -266,6 +274,78 @@ export function recordPlaybackHistory(entry: PlayHistoryEntry): void {
   }).catch(() => {
     // Best-effort server history sync; localStorage already holds the entry
   });
+}
+
+export async function planAutoplayQueue(
+  payload: AutoplayPlanRequest,
+  signal?: AbortSignal
+): Promise<AutoplayPlanResponse> {
+  return apiFetch<AutoplayPlanResponse>('/api/discover/autoplay/plan', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+export function autoplayPlanItemToTrack(
+  item: AutoplayPlanItem,
+  intent: AutoplayIntent
+): Track {
+  const isLocal = !item.isYouTubeStream && typeof item.trackId === 'number';
+  const videoId = item.videoId && YOUTUBE_VIDEO_ID_RE.test(item.videoId) ? item.videoId : null;
+  const coverUrl =
+    item.coverUrl || (videoId ? getYouTubeThumbProxyUrl(videoId) : undefined);
+
+  if (isLocal) {
+    return {
+      id: item.trackId as number,
+      rel_path: item.rel_path || '',
+      title: item.title,
+      artist: item.artist,
+      album: item.album || 'Library',
+      track_number: item.track_number ?? null,
+      year: item.year ?? null,
+      duration: item.duration || 0,
+      format: item.format || 'M4A',
+      bitrate: item.bitrate || 0,
+      size_bytes: item.size_bytes || 0,
+      cover_file: item.cover_file ?? null,
+      dominant_color: item.dominant_color || '#181818',
+      added_at: item.added_at || new Date().toISOString(),
+      liked: Boolean(item.liked),
+      coverUrl,
+      isYouTubeStream: false,
+      queueSource: intent,
+      sourcePool: item.sourcePool,
+    };
+  }
+
+  return {
+    id: videoId ? `yt-${videoId}` : item.id,
+    rel_path: '',
+    title: item.title,
+    artist: item.artist,
+    album: item.album || (intent === 'radio' ? 'Radio' : 'Autoplay'),
+    track_number: null,
+    year: null,
+    duration: item.duration || 0,
+    format: item.format || 'WEB',
+    bitrate: item.bitrate || 0,
+    size_bytes: 0,
+    cover_file: null,
+    dominant_color: item.dominant_color || '#181818',
+    added_at: item.added_at || new Date().toISOString(),
+    liked: false,
+    coverUrl,
+    streamUrl: item.streamUrl || (videoId ? `/api/yt-stream/${videoId}` : undefined),
+    isYouTubeStream: true,
+    youtubeUrl: item.youtubeUrl || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : undefined),
+    deezerTrackId: item.deezerTrackId,
+    deezerAlbumId: item.deezerAlbumId,
+    deezerArtistId: item.deezerArtistId,
+    queueSource: intent,
+    sourcePool: item.sourcePool,
+  };
 }
 
 export function getSSEUrl(path: string): string {

@@ -2,12 +2,14 @@ import React, {createContext, useCallback, useContext, useEffect, useRef, useSta
 import {
   apiFetch,
   appendLocalPlayHistory,
+  autoplayPlanItemToTrack,
   getLocalPlayHistory,
   getStoredToken,
   getStreamUrl,
   getTrackCoverUrl,
   getTrackStreamUrl,
   getYouTubeVideoId,
+  planAutoplayQueue,
   prefetchVideoIds,
   prefetchYouTubeStreams,
   recordPlaybackHistory,
@@ -19,7 +21,14 @@ import {
   resolveGuaranteedMediaArtwork,
   trackHasRealArtwork,
 } from '../lib/mediaSessionArtwork';
-import type {PlayHistoryEntry, RepeatMode, Track, TrackId} from '../types';
+import type {
+  AutoplayIntent,
+  AutoplaySeedInput,
+  PlayHistoryEntry,
+  RepeatMode,
+  Track,
+  TrackId,
+} from '../types';
 import {
   getCachedTrackIds,
   getOfflineAudioBlob,
@@ -41,6 +50,15 @@ interface PlayerContextValue {
   isMuted: boolean;
   shuffle: boolean;
   repeat: RepeatMode;
+  autoplayEnabled: boolean;
+  setAutoplayEnabled: (enabled: boolean) => void;
+  toggleAutoplay: () => void;
+  autoplayLoading: boolean;
+  radioMode: boolean;
+  radioSeed: Track | null;
+  startRadio: (track: Track) => void;
+  stopRadio: () => void;
+  clearGeneratedQueue: () => void;
   queueOpen: boolean;
   lyricsOpen: boolean;
   playTrack: (track: Track, list?: Track[]) => void;
@@ -137,6 +155,177 @@ function getTrackMetadataKey(track: Track): string {
   return `${track.title || ''}|${track.artist || ''}|${track.album || ''}|${getTrackArtworkCacheKey(track)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Autoplay & Radio Queue Helpers
+// Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
+//   frontend/src/services/playback/generatedQueue.ts, runway.ts
+// ---------------------------------------------------------------------------
+
+const AUTOPLAY_STORAGE_KEY = 'xlabplayer_autoplay';
+const AUTOPLAY_REFILL_THRESHOLD = 5;
+const AUTOPLAY_TARGET_UPCOMING = 8;
+const AUTOPLAY_EMPTY_RETRY_DELAY_MS = 5000;
+const AUTOPLAY_MAX_DURATION_SEC = 30 * 60;
+const GENERIC_ARTIST_KEYS = new Set([
+  '',
+  'unknown',
+  'unknown artist',
+  'various',
+  'various artists',
+  'untitled',
+  'n/a',
+  'none',
+]);
+
+function isPodcastTrack(track: Track | null | undefined): boolean {
+  if (!track) return false;
+  if (typeof track.duration === 'number' && track.duration > AUTOPLAY_MAX_DURATION_SEC) {
+    return true;
+  }
+  if (/\bpodcasts?\b|\bepisodes?\b/i.test(track.album || '')) {
+    return true;
+  }
+  if (/(?:^|\/)podcasts?\//i.test(track.rel_path || '')) {
+    return true;
+  }
+  return false;
+}
+
+function hasAutoplayIdentity(track: Track | null | undefined): boolean {
+  if (!track) return false;
+  if (track.isYouTubeStream || getYouTubeVideoId(track)) return true;
+  if (track.deezerTrackId || track.deezerArtistId || track.deezerAlbumId) return true;
+  // Local files with real catalog metadata (non-generic artist + title) can be resolved
+  // to YouTube / Deezer neighborhood seeds on the server.
+  const artistKey = (track.artist || '').trim().toLowerCase();
+  const title = (track.title || '').trim();
+  return Boolean(title && !GENERIC_ARTIST_KEYS.has(artistKey));
+}
+
+function trackToAutoplaySeed(track: Track): AutoplaySeedInput {
+  const videoId = getYouTubeVideoId(track) || undefined;
+  return {
+    videoId,
+    trackId: !track.isYouTubeStream && typeof track.id === 'number' ? track.id : undefined,
+    title: (track.title || '').trim(),
+    artist: (track.artist || '').trim(),
+    album: (track.album || '').trim(),
+    duration: typeof track.duration === 'number' && Number.isFinite(track.duration) ? track.duration : 0,
+  };
+}
+
+function normalizeQueueIdentityKey(title: string, artist: string): string {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+  return `${norm(title)}::${norm(artist)}`;
+}
+
+function buildAutoplayExcludeList(queue: Track[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (val: string | null | undefined) => {
+    const trimmed = (val || '').trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    out.push(trimmed);
+  };
+  for (const t of queue) {
+    if (out.length >= 180) break;
+    push(String(t.id));
+    const vid = getYouTubeVideoId(t);
+    if (vid) {
+      push(vid);
+      push(`music:youtube:${vid}`);
+    }
+    if (!t.isYouTubeStream && typeof t.id === 'number') {
+      push(`music:track:${t.id}`);
+    }
+    const canon = normalizeQueueIdentityKey(t.title || '', t.artist || '');
+    if (canon !== '::') push(canon);
+  }
+  return out;
+}
+
+function buildAutoplayContextInputs(currentTrack: Track): AutoplaySeedInput[] {
+  // Local history is newest-first; planner expects oldest -> newest (last 5 played)
+  const recent = getLocalPlayHistory().slice(0, 5).reverse();
+  const list: AutoplaySeedInput[] = [];
+  for (const entry of recent) {
+    const title = (entry.title || '').trim();
+    const artist = (entry.artist || '').trim();
+    if (!title && !artist && !entry.videoId) continue;
+    list.push({
+      videoId: entry.videoId || undefined,
+      trackId: entry.trackId ?? undefined,
+      title,
+      artist,
+    });
+  }
+  const currSeed = trackToAutoplaySeed(currentTrack);
+  const last = list[list.length - 1];
+  const isSameAsLast =
+    last &&
+    ((currSeed.videoId && last.videoId === currSeed.videoId) ||
+      (currSeed.trackId !== undefined && last.trackId === currSeed.trackId) ||
+      (normalizeQueueIdentityKey(currSeed.title || '', currSeed.artist || '') ===
+        normalizeQueueIdentityKey(last.title || '', last.artist || '') &&
+        Boolean(currSeed.title)));
+  if (!isSameAsLast) {
+    list.push(currSeed);
+  }
+  return list.slice(-5);
+}
+
+function pickAutoplaySeedTrack(
+  queue: Track[],
+  currentIndex: number,
+  intent: AutoplayIntent
+): Track | null {
+  const upcoming = queue.slice(currentIndex + 1);
+  // Prefer the LAST queued generated track matching the active intent
+  for (let i = upcoming.length - 1; i >= 0; i--) {
+    if (upcoming[i].queueSource === intent && hasAutoplayIdentity(upcoming[i])) {
+      return upcoming[i];
+    }
+  }
+  // Otherwise prefer the LAST upcoming track with a resolvable identity
+  for (let i = upcoming.length - 1; i >= 0; i--) {
+    if (hasAutoplayIdentity(upcoming[i])) {
+      return upcoming[i];
+    }
+  }
+  const curr = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
+  return hasAutoplayIdentity(curr) ? curr : null;
+}
+
+function stripFutureGeneratedTracks(
+  queue: Track[],
+  currentIndex: number,
+  onlySource?: 'autoplay' | 'radio'
+): Track[] {
+  if (currentIndex < 0) return queue;
+  let changed = false;
+  const next = queue.filter((t, idx) => {
+    if (idx <= currentIndex) return true;
+    const isMatch = onlySource ? t.queueSource === onlySource : Boolean(t.queueSource);
+    if (isMatch) {
+      changed = true;
+      return false;
+    }
+    return true;
+  });
+  return changed ? next : queue;
+}
+
+function stripQueueSourceMeta(track: Track): Track {
+  if (!track.queueSource && !track.sourcePool) return track;
+  const {queueSource: _qs, sourcePool: _sp, ...rest} = track;
+  return rest;
+}
+
 export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   if (!audioRef.current) {
@@ -164,6 +353,23 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const [isMuted, setIsMuted] = useState(false);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('off');
+  const [autoplayEnabled, setAutoplayEnabledState] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(AUTOPLAY_STORAGE_KEY);
+      if (saved === 'false' || saved === '0') return false;
+      if (saved === 'true' || saved === '1') return true;
+    } catch {
+      // ignore storage read errors
+    }
+    return true;
+  });
+  const [autoplayLoading, setAutoplayLoading] = useState(false);
+  const [radioMode, setRadioMode] = useState(false);
+  const [radioSeed, setRadioSeed] = useState<Track | null>(null);
+  const [autoplayRetryTick, setAutoplayRetryTick] = useState(0);
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine
+  );
   const [queueOpen, setQueueOpen] = useState(false);
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [libraryRefreshVersion, setLibraryRefreshVersion] = useState(0);
@@ -205,6 +411,35 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const prefetchInFlightIdRef = useRef<number | null>(null);
   const loadRequestIdRef = useRef(0);
   const lastRecordedPlayRef = useRef<{key: string; at: number} | null>(null);
+
+  // Autoplay / radio single-flight & cancellation refs
+  const autoplayAbortRef = useRef<AbortController | null>(null);
+  const autoplayInFlightRef = useRef(false);
+  const autoplayGenRef = useRef(0);
+  const autoplayRetryTimerRef = useRef<number | null>(null);
+  const autoplayEmptyRetryKeyRef = useRef<string | null>(null);
+  const autoplayEmptyExhaustedKeyRef = useRef<string | null>(null);
+  const autoplayClearedForTrackKeyRef = useRef<string | null>(null);
+
+  const cancelAutoplayPlan = useCallback((resetRetry = true) => {
+    autoplayGenRef.current += 1;
+    if (autoplayAbortRef.current) {
+      autoplayAbortRef.current.abort();
+      autoplayAbortRef.current = null;
+    }
+    if (autoplayInFlightRef.current) {
+      autoplayInFlightRef.current = false;
+      setAutoplayLoading(false);
+    }
+    if (autoplayRetryTimerRef.current !== null) {
+      window.clearTimeout(autoplayRetryTimerRef.current);
+      autoplayRetryTimerRef.current = null;
+    }
+    if (resetRetry) {
+      autoplayEmptyRetryKeyRef.current = null;
+      autoplayEmptyExhaustedKeyRef.current = null;
+    }
+  }, []);
 
   const recordTrackPlay = useCallback((track: Track) => {
     const title = (track.title || '').trim();
@@ -1170,7 +1405,16 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
   const playTrack = useCallback(
     (track: Track, list?: Track[]) => {
+      autoplayClearedForTrackKeyRef.current = null;
       if (list && list.length > 0) {
+        const isSameQueueRef = list === stateRef.current.queue;
+        if (!isSameQueueRef) {
+          cancelAutoplayPlan(true);
+          setRadioMode(false);
+          setRadioSeed(null);
+        } else {
+          cancelAutoplayPlan(false);
+        }
         const idx = list.findIndex((t) => t.id === track.id);
         const resolvedIdx = idx >= 0 ? idx : 0;
         const resolvedTrack = list[resolvedIdx] ?? track;
@@ -1183,6 +1427,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         return;
       }
 
+      cancelAutoplayPlan(false);
       const prevQueue = stateRef.current.queue;
       const existingIdx = prevQueue.findIndex((t) => t.id === track.id);
       if (existingIdx >= 0) {
@@ -1194,16 +1439,18 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         return;
       }
 
-      const nextQueue = [...prevQueue, track];
+      setRadioMode(false);
+      setRadioSeed(null);
+      const nextQueue = [...prevQueue, stripQueueSourceMeta(track)];
       const nextIdx = nextQueue.length - 1;
       stateRef.current.queue = nextQueue;
       stateRef.current.currentIndex = nextIdx;
-      stateRef.current.currentTrack = track;
-      loadAndPlayTrackSync(track, {resetIfSame: true});
+      stateRef.current.currentTrack = nextQueue[nextIdx];
+      loadAndPlayTrackSync(nextQueue[nextIdx], {resetIfSame: true});
       setQueue(nextQueue);
       setCurrentIndex(nextIdx);
     },
-    [loadAndPlayTrackSync]
+    [cancelAutoplayPlan, loadAndPlayTrackSync]
   );
 
   const playTrackById = useCallback(
@@ -1227,26 +1474,40 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     [playTrack]
   );
 
-  const addToQueue = useCallback((track: Track) => {
-    setQueue((prev) => {
-      if (prev.length === 0) {
-        setCurrentIndex(0);
-        return [track];
-      }
-      return [...prev, track];
-    });
-  }, []);
+  const addToQueue = useCallback(
+    (track: Track) => {
+      cancelAutoplayPlan(true);
+      autoplayClearedForTrackKeyRef.current = null;
+      const manualTrack = stripQueueSourceMeta(track);
+      setQueue((prev) => {
+        if (prev.length === 0) {
+          setCurrentIndex(0);
+          return [manualTrack];
+        }
+        const cleaned = stripFutureGeneratedTracks(prev, stateRef.current.currentIndex);
+        return [...cleaned, manualTrack];
+      });
+    },
+    [cancelAutoplayPlan]
+  );
 
-  const addManyToQueue = useCallback((tracksToAdd: Track[]) => {
-    if (tracksToAdd.length === 0) return;
-    setQueue((prev) => {
-      if (prev.length === 0) {
-        setCurrentIndex(0);
-        return [...tracksToAdd];
-      }
-      return [...prev, ...tracksToAdd];
-    });
-  }, []);
+  const addManyToQueue = useCallback(
+    (tracksToAdd: Track[]) => {
+      if (tracksToAdd.length === 0) return;
+      cancelAutoplayPlan(true);
+      autoplayClearedForTrackKeyRef.current = null;
+      const manualTracks = tracksToAdd.map(stripQueueSourceMeta);
+      setQueue((prev) => {
+        if (prev.length === 0) {
+          setCurrentIndex(0);
+          return [...manualTracks];
+        }
+        const cleaned = stripFutureGeneratedTracks(prev, stateRef.current.currentIndex);
+        return [...cleaned, ...manualTracks];
+      });
+    },
+    [cancelAutoplayPlan]
+  );
 
   const handleDeletedTracks = useCallback(
     (deletedIds: number[]) => {
@@ -1319,18 +1580,25 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     [clearRecoveryTimer, endTrackTransition, setMediaSessionPlaybackState, syncMediaSessionMetadata]
   );
 
-  const playNextInQueue = useCallback((track: Track) => {
-    setQueue((prev) => {
-      const idx = stateRef.current.currentIndex;
-      if (prev.length === 0 || idx < 0) {
-        setCurrentIndex(0);
-        return [track];
-      }
-      const copy = [...prev];
-      copy.splice(idx + 1, 0, track);
-      return copy;
-    });
-  }, []);
+  const playNextInQueue = useCallback(
+    (track: Track) => {
+      cancelAutoplayPlan(true);
+      autoplayClearedForTrackKeyRef.current = null;
+      const manualTrack = stripQueueSourceMeta(track);
+      setQueue((prev) => {
+        const idx = stateRef.current.currentIndex;
+        if (prev.length === 0 || idx < 0) {
+          setCurrentIndex(0);
+          return [manualTrack];
+        }
+        const cleaned = stripFutureGeneratedTracks(prev, idx);
+        const copy = [...cleaned];
+        copy.splice(idx + 1, 0, manualTrack);
+        return copy;
+      });
+    },
+    [cancelAutoplayPlan]
+  );
 
   const removeFromQueue = useCallback((index: number) => {
     setQueue((prev) => {
@@ -1347,38 +1615,137 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     });
   }, []);
 
-  const reorderQueue = useCallback((fromIndex: number, toIndex: number) => {
-    setQueue((prev) => {
-      if (
-        fromIndex < 0 ||
-        toIndex < 0 ||
-        fromIndex >= prev.length ||
-        toIndex >= prev.length ||
-        fromIndex === toIndex
-      ) {
-        return prev;
-      }
-      const copy = [...prev];
-      const [moved] = copy.splice(fromIndex, 1);
-      copy.splice(toIndex, 0, moved);
+  const reorderQueue = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      cancelAutoplayPlan(true);
+      autoplayClearedForTrackKeyRef.current = null;
+      setQueue((prev) => {
+        if (
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= prev.length ||
+          toIndex >= prev.length ||
+          fromIndex === toIndex
+        ) {
+          return prev;
+        }
+        const copy = [...prev];
+        const [movedRaw] = copy.splice(fromIndex, 1);
+        // Promote the explicitly reordered item to manual, then drop remaining future generated entries
+        // so autoplay re-plans cleanly from the new queue tail.
+        const moved = stripQueueSourceMeta(movedRaw);
+        copy.splice(toIndex, 0, moved);
 
-      setCurrentIndex((curr) => {
-        if (curr === fromIndex) return toIndex;
-        if (fromIndex < curr && toIndex >= curr) return curr - 1;
-        if (fromIndex > curr && toIndex <= curr) return curr + 1;
-        return curr;
+        const curr = stateRef.current.currentIndex;
+        let nextCurr = curr;
+        if (curr === fromIndex) nextCurr = toIndex;
+        else if (fromIndex < curr && toIndex >= curr) nextCurr = curr - 1;
+        else if (fromIndex > curr && toIndex <= curr) nextCurr = curr + 1;
+
+        if (nextCurr !== curr) {
+          setCurrentIndex(nextCurr);
+        }
+        return stripFutureGeneratedTracks(copy, nextCurr);
       });
-      return copy;
-    });
-  }, []);
+    },
+    [cancelAutoplayPlan]
+  );
 
   const clearUpcomingQueue = useCallback(() => {
+    cancelAutoplayPlan(true);
+    const active = stateRef.current.currentTrack;
+    if (active) {
+      autoplayClearedForTrackKeyRef.current = String(active.id);
+    }
+    setRadioMode(false);
+    setRadioSeed(null);
     setQueue((prev) => {
       const idx = stateRef.current.currentIndex;
       if (idx < 0 || idx >= prev.length) return [];
       return prev.slice(0, idx + 1);
     });
-  }, []);
+  }, [cancelAutoplayPlan]);
+
+  const setAutoplayEnabled = useCallback(
+    (enabled: boolean) => {
+      setAutoplayEnabledState(enabled);
+      try {
+        localStorage.setItem(AUTOPLAY_STORAGE_KEY, enabled ? 'true' : 'false');
+      } catch {
+        // ignore storage errors
+      }
+      if (!enabled) {
+        if (!radioMode) {
+          cancelAutoplayPlan(true);
+        }
+        setQueue((prev) =>
+          stripFutureGeneratedTracks(prev, stateRef.current.currentIndex, 'autoplay')
+        );
+      } else {
+        autoplayClearedForTrackKeyRef.current = null;
+        autoplayEmptyRetryKeyRef.current = null;
+        autoplayEmptyExhaustedKeyRef.current = null;
+      }
+    },
+    [cancelAutoplayPlan, radioMode]
+  );
+
+  const toggleAutoplay = useCallback(() => {
+    setAutoplayEnabled(!autoplayEnabled);
+  }, [autoplayEnabled, setAutoplayEnabled]);
+
+  const clearGeneratedQueue = useCallback(() => {
+    cancelAutoplayPlan(true);
+    const active = stateRef.current.currentTrack;
+    if (active) {
+      autoplayClearedForTrackKeyRef.current = String(active.id);
+    }
+    setRadioMode(false);
+    setRadioSeed(null);
+    setQueue((prev) => stripFutureGeneratedTracks(prev, stateRef.current.currentIndex));
+  }, [cancelAutoplayPlan]);
+
+  const startRadio = useCallback(
+    (track: Track) => {
+      if (isPodcastTrack(track) || !hasAutoplayIdentity(track)) return;
+      cancelAutoplayPlan(true);
+      autoplayClearedForTrackKeyRef.current = null;
+
+      // Radio requires sequential queue playback (repeat off, shuffle off)
+      setShuffle(false);
+      stateRef.current.shuffle = false;
+      setRepeat('off');
+      stateRef.current.repeat = 'off';
+
+      const cleanSeed = stripQueueSourceMeta(track);
+      setRadioMode(true);
+      setRadioSeed(cleanSeed);
+
+      const active = stateRef.current.currentTrack;
+      const activeIdx = stateRef.current.currentIndex;
+      if (active && String(active.id) === String(cleanSeed.id) && activeIdx >= 0) {
+        // Seed track is already playing: keep it and clear upcoming so radio fills cleanly
+        setQueue((prev) => prev.slice(0, activeIdx + 1));
+        return;
+      }
+
+      const nextQueue = [cleanSeed];
+      stateRef.current.queue = nextQueue;
+      stateRef.current.currentIndex = 0;
+      stateRef.current.currentTrack = cleanSeed;
+      loadAndPlayTrackSync(cleanSeed, {resetIfSame: true});
+      setQueue(nextQueue);
+      setCurrentIndex(0);
+    },
+    [cancelAutoplayPlan, loadAndPlayTrackSync]
+  );
+
+  const stopRadio = useCallback(() => {
+    cancelAutoplayPlan(true);
+    setRadioMode(false);
+    setRadioSeed(null);
+    setQueue((prev) => stripFutureGeneratedTracks(prev, stateRef.current.currentIndex, 'radio'));
+  }, [cancelAutoplayPlan]);
 
   const syncTrackLikeState = useCallback((trackId: TrackId, liked: boolean) => {
     if (typeof trackId !== 'number') return;
@@ -1507,10 +1874,25 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     [youtubeSaveStates, bumpLibraryRefresh]
   );
 
-  const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
+  const toggleShuffle = useCallback(() => {
+    setShuffle((prev) => {
+      const next = !prev;
+      if (next) {
+        cancelAutoplayPlan(false);
+      }
+      return next;
+    });
+  }, [cancelAutoplayPlan]);
+
   const cycleRepeat = useCallback(() => {
-    setRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'));
-  }, []);
+    setRepeat((r) => {
+      const next: RepeatMode = r === 'off' ? 'all' : r === 'all' ? 'one' : 'off';
+      if (next !== 'off') {
+        cancelAutoplayPlan(false);
+      }
+      return next;
+    });
+  }, [cancelAutoplayPlan]);
 
   // Keep MediaSession action handlers pointed at the latest callbacks without tearing down listeners
   mediaActionsRef.current = {
@@ -1881,6 +2263,13 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       prefetchAbortRef.current?.abort();
       prefetchAbortRef.current = null;
       prefetchInFlightIdRef.current = null;
+      autoplayAbortRef.current?.abort();
+      autoplayAbortRef.current = null;
+      autoplayInFlightRef.current = false;
+      if (autoplayRetryTimerRef.current !== null) {
+        window.clearTimeout(autoplayRetryTimerRef.current);
+        autoplayRetryTimerRef.current = null;
+      }
       for (const blobUrl of prefetchedObjectUrlsRef.current.values()) {
         try {
           URL.revokeObjectURL(blobUrl);
@@ -1913,6 +2302,178 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
     };
   }, []);
+
+  // Track browser online/offline transitions so autoplay resumes when back online
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onOnline = () => setIsBrowserOnline(true);
+    const onOffline = () => {
+      setIsBrowserOnline(false);
+      cancelAutoplayPlan(false);
+    };
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, [cancelAutoplayPlan]);
+
+  // Single-flight autoplay & radio runway refiller
+  // Adapted from Soundsible (MIT, (c) 2026 Arzuparreta) —
+  //   frontend/src/services/playback/runway.ts, generatedQueue.ts
+  useEffect(() => {
+    const intent: AutoplayIntent | null = radioMode
+      ? 'radio'
+      : autoplayEnabled
+        ? 'autoplay'
+        : null;
+
+    if (!intent) return;
+    if (!isBrowserOnline) return;
+    if (repeat !== 'off' || shuffle) return;
+    if (!currentTrack || currentIndex < 0) return;
+    if (isPodcastTrack(currentTrack) || !hasAutoplayIdentity(currentTrack)) return;
+
+    const currentTrackKey = String(currentTrack.id);
+    if (!radioMode && autoplayClearedForTrackKeyRef.current === currentTrackKey) {
+      return;
+    }
+
+    const upcoming = queue.slice(currentIndex + 1);
+    if (upcoming.length > AUTOPLAY_REFILL_THRESHOLD) {
+      return;
+    }
+
+    const seedTrack = pickAutoplaySeedTrack(queue, currentIndex, intent);
+    if (!seedTrack || isPodcastTrack(seedTrack)) {
+      return;
+    }
+
+    const refillSignature = `${intent}|${String(seedTrack.id)}|${upcoming.length}|${currentTrackKey}`;
+    if (autoplayEmptyExhaustedKeyRef.current === refillSignature) {
+      return;
+    }
+
+    // Enforce single-flight: never allow more than 1 plan request at a time
+    if (autoplayInFlightRef.current) {
+      return;
+    }
+
+    const limit = Math.max(1, AUTOPLAY_TARGET_UPCOMING - upcoming.length);
+    const planGen = ++autoplayGenRef.current;
+    const controller = new AbortController();
+    autoplayAbortRef.current = controller;
+    autoplayInFlightRef.current = true;
+    setAutoplayLoading(true);
+
+    const payload = {
+      seed: trackToAutoplaySeed(seedTrack),
+      context: buildAutoplayContextInputs(currentTrack),
+      exclude: buildAutoplayExcludeList(queue),
+      intent,
+      limit,
+    };
+
+    const scheduleSingleRetry = () => {
+      if (autoplayEmptyRetryKeyRef.current !== refillSignature) {
+        autoplayEmptyRetryKeyRef.current = refillSignature;
+        if (autoplayRetryTimerRef.current !== null) {
+          window.clearTimeout(autoplayRetryTimerRef.current);
+        }
+        autoplayRetryTimerRef.current = window.setTimeout(() => {
+          autoplayRetryTimerRef.current = null;
+          setAutoplayRetryTick((t) => t + 1);
+        }, AUTOPLAY_EMPTY_RETRY_DELAY_MS);
+      } else {
+        autoplayEmptyExhaustedKeyRef.current = refillSignature;
+      }
+    };
+
+    void planAutoplayQueue(payload, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted || planGen !== autoplayGenRef.current) {
+          return;
+        }
+        const incoming = (res.items || []).map((item) =>
+          autoplayPlanItemToTrack(item, intent)
+        );
+        if (incoming.length === 0) {
+          scheduleSingleRetry();
+          return;
+        }
+
+        const filterNovel = (baseQueue: Track[], candidates: Track[]): Track[] => {
+          const existingIds = new Set(baseQueue.map((t) => String(t.id)));
+          const existingVideoIds = new Set(
+            baseQueue.map((t) => getYouTubeVideoId(t)).filter((v): v is string => Boolean(v))
+          );
+          const existingCanon = new Set(
+            baseQueue.map((t) => normalizeQueueIdentityKey(t.title || '', t.artist || ''))
+          );
+
+          const out: Track[] = [];
+          for (const candidate of candidates) {
+            const cid = String(candidate.id);
+            const cvid = getYouTubeVideoId(candidate);
+            const ccanon = normalizeQueueIdentityKey(
+              candidate.title || '',
+              candidate.artist || ''
+            );
+            if (existingIds.has(cid)) continue;
+            if (cvid && existingVideoIds.has(cvid)) continue;
+            if (ccanon !== '::' && existingCanon.has(ccanon)) continue;
+            existingIds.add(cid);
+            if (cvid) existingVideoIds.add(cvid);
+            if (ccanon !== '::') existingCanon.add(ccanon);
+            out.push(candidate);
+          }
+          return out;
+        };
+
+        const novelNow = filterNovel(stateRef.current.queue, incoming);
+        if (novelNow.length === 0) {
+          scheduleSingleRetry();
+          return;
+        }
+
+        autoplayEmptyRetryKeyRef.current = null;
+        autoplayEmptyExhaustedKeyRef.current = null;
+        setQueue((prev) => {
+          const toAppend = filterNovel(prev, novelNow);
+          if (toAppend.length === 0) return prev;
+          return [...prev, ...toAppend];
+        });
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted || planGen !== autoplayGenRef.current) {
+          return;
+        }
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return;
+        }
+        scheduleSingleRetry();
+      })
+      .finally(() => {
+        if (autoplayAbortRef.current === controller) {
+          autoplayAbortRef.current = null;
+        }
+        if (planGen === autoplayGenRef.current) {
+          autoplayInFlightRef.current = false;
+          setAutoplayLoading(false);
+        }
+      });
+  }, [
+    autoplayEnabled,
+    autoplayRetryTick,
+    currentIndex,
+    currentTrack,
+    isBrowserOnline,
+    queue,
+    radioMode,
+    repeat,
+    shuffle,
+  ]);
 
   // Keep MediaSession metadata synced whenever track info changes
   useEffect(() => {
@@ -1947,6 +2508,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         isMuted,
         shuffle,
         repeat,
+        autoplayEnabled,
+        setAutoplayEnabled,
+        toggleAutoplay,
+        autoplayLoading,
+        radioMode,
+        radioSeed,
+        startRadio,
+        stopRadio,
+        clearGeneratedQueue,
         queueOpen,
         lyricsOpen,
         playTrack,
