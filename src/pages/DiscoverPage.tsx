@@ -8,10 +8,8 @@ import {
   ChevronUp,
   Disc3,
   Download,
-  FolderOpen,
   Link2,
   Loader2,
-  Music2,
   Pause,
   Play,
   Plus,
@@ -27,7 +25,6 @@ import {AlbumArt} from '../components/AlbumArt';
 import {CatalogDetailView, type CatalogRoute} from '../components/CatalogDetailView';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
-import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {
   apiFetch,
@@ -45,10 +42,8 @@ import type {
   DownloadJob,
   DownloadQuality,
   MetadataPreviewItem,
-  SearchSource,
   Track,
 } from '../types';
-import {getOfflineTracks, subscribeOfflineStore} from '../utils/offlineStore';
 
 interface EditablePreviewItem extends MetadataPreviewItem {
   selected: boolean;
@@ -56,11 +51,9 @@ interface EditablePreviewItem extends MetadataPreviewItem {
   quality: DownloadQuality;
 }
 
-const QUALITY_LABELS: Record<DownloadQuality, string> = {
-  ultra: 'Ultra',
-  high: '320k',
-  standard: '128k',
-};
+const SEARCH_DEBOUNCE_MS = 450;
+const DEFAULT_DOWNLOAD_FORMAT: 'm4a' = 'm4a';
+const DEFAULT_DOWNLOAD_QUALITY: DownloadQuality = 'ultra';
 
 // Client-side session cache so tab switches back to Discover render instantaneously
 let sessionDiscoverCache: {userId: number; feed: DiscoverFeedResponse} | null = null;
@@ -404,19 +397,15 @@ export const DiscoverPage: React.FC = () => {
     playTrackById,
     playTrack,
     bumpLibraryRefresh,
-    libraryRefreshVersion,
     isPlaying,
     isBuffering,
     togglePlay,
   } = usePlayer();
-  const {cachedTrackIds} = useOfflineLibrary();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
   const canDownload = Boolean(user?.can_download || user?.role === 'admin');
 
   const [query, setQuery] = useState('');
-  const [libraryTracks, setLibraryTracks] = useState<Track[]>([]);
-  const [libraryLoading, setLibraryLoading] = useState(true);
 
   // Personalized Discover feed + instant Album/Artist catalog drill-down stack
   const [discoverFeed, setDiscoverFeed] = useState<DiscoverFeedResponse | null>(() =>
@@ -434,20 +423,16 @@ export const DiscoverPage: React.FC = () => {
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
 
-  // YouTube / YouTube Music (yt-dlp) search results state
-  const [searchSource, setSearchSource] = useState<SearchSource>('youtube');
+  // Automatic YouTube (yt-dlp) search results state
   const [searchResults, setSearchResults] = useState<MetadataPreviewItem[]>([]);
   const [lastSearchTerm, setLastSearchTerm] = useState<string | null>(null);
-  const [activeSearchResultId, setActiveSearchResultId] = useState<string | null>(null);
   const [quickQueueingId, setQuickQueueingId] = useState<string | null>(null);
   const [quickQueuedIds, setQuickQueuedIds] = useState<Set<string>>(new Set());
 
-  // Single-track OR Playlist Metadata Editor state
+  // Pasted-URL single-track / playlist metadata preview state
   const [previewItems, setPreviewItems] = useState<EditablePreviewItem[]>([]);
   const [isPlaylistPreview, setIsPlaylistPreview] = useState(false);
   const [playlistTitle, setPlaylistTitle] = useState<string | null>(null);
-  const [defaultFormat, setDefaultFormat] = useState<'m4a' | 'opus'>('m4a');
-  const [downloadQuality, setDownloadQuality] = useState<DownloadQuality>('ultra');
   const [enqueueing, setEnqueueing] = useState(false);
   const [actionToast, setActionToast] = useState<string | null>(null);
 
@@ -462,6 +447,11 @@ export const DiscoverPage: React.FC = () => {
 
   const metadataEditorRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchRequestIdRef = useRef(0);
+  const inFlightTermRef = useRef<string | null>(null);
+  const skipNextDebounceTermRef = useRef<string | null>(null);
 
   const trimmedQuery = query.trim();
   const isUrlInput = /^https?:\/\//i.test(trimmedQuery);
@@ -535,58 +525,30 @@ export const DiscoverPage: React.FC = () => {
     );
   }, [discoverFeed, offline]);
 
-  // Load local /music library (or cached offline tracks when offline) for instant live filtering
-  const loadLibrary = useCallback(async () => {
-    setLibraryLoading(true);
-    if (offline) {
-      try {
-        const cached = await getOfflineTracks();
-        setLibraryTracks(cached);
-      } catch {
-        setLibraryTracks([]);
-      } finally {
-        setLibraryLoading(false);
-      }
-      return;
-    }
-
-    try {
-      const res = await apiFetch<{tracks: Track[]}>('/api/tracks');
-      setLibraryTracks(res.tracks || []);
-    } catch {
-      try {
-        const cached = await getOfflineTracks();
-        setLibraryTracks(cached);
-      } catch {
-        setLibraryTracks([]);
-      }
-    } finally {
-      setLibraryLoading(false);
-    }
-  }, [offline]);
-
+  // Background prefetch the top 3 search results as soon as they render so tapping plays near-instantly
+  const prefetchedSearchKeyRef = useRef<string>('');
   useEffect(() => {
-    void loadLibrary();
-  }, [loadLibrary, libraryRefreshVersion]);
+    if (offline) return;
+    const candidates = searchResults.length > 0 ? searchResults : previewItems;
+    if (candidates.length === 0) return;
 
-  useEffect(() => {
-    if (!offline) return;
-    return subscribeOfflineStore(() => {
-      void loadLibrary();
-    });
-  }, [offline, loadLibrary]);
+    const topThree = candidates.slice(0, 3);
+    const itemsToPrefetch = topThree
+      .map((item) => ({
+        videoId: extractYouTubeVideoIdFromItem(item),
+        artist: item.channel || item.artist,
+        title: item.title,
+        duration: item.duration,
+      }))
+      .filter((item) => Boolean(item.videoId || item.title));
+    if (itemsToPrefetch.length === 0) return;
 
-  // Live filter local /music tracks as the user types (title, artist, or album)
-  const localMatches = useMemo(() => {
-    if (!trimmedQuery || isUrlInput) return [];
-    const tokens = trimmedQuery.toLowerCase().split(/\s+/).filter(Boolean);
-    if (tokens.length === 0) return [];
+    const key = itemsToPrefetch.map((i) => i.videoId || `${i.artist}:${i.title}`).join('|');
+    if (prefetchedSearchKeyRef.current === key) return;
+    prefetchedSearchKeyRef.current = key;
 
-    return libraryTracks.filter((track) => {
-      const haystack = `${track.title || ''} ${track.artist || ''} ${track.album || ''}`.toLowerCase();
-      return tokens.every((token) => haystack.includes(token));
-    });
-  }, [isUrlInput, libraryTracks, trimmedQuery]);
+    prefetchYouTubeStreams(itemsToPrefetch);
+  }, [offline, previewItems, searchResults]);
 
   // Map active/recent download jobs by URL so YouTube result rows display live progress inline
   const jobByUrl = useMemo(() => {
@@ -743,35 +705,47 @@ export const DiscoverPage: React.FC = () => {
     [currentTrack?.id, discoverFeed?.albumsForYou, handleOpenAlbumView, playTrack, togglePlay]
   );
 
-  const handlePlayLocalTrack = useCallback(
-    (track: Track) => {
-      if (currentTrack?.id === track.id) {
-        togglePlay();
-      } else {
-        playTrack(track, localMatches.length > 0 ? localMatches : [track]);
-      }
-    },
-    [currentTrack?.id, localMatches, playTrack, togglePlay]
-  );
+  const cancelInFlightSearch = useCallback(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+      searchAbortRef.current = null;
+    }
+    inFlightTermRef.current = null;
+    searchRequestIdRef.current += 1;
+  }, []);
 
   const executeYouTubeSearch = useCallback(
-    async (rawTerm: string, sourceOverride?: SearchSource) => {
+    async (rawTerm: string) => {
       const term = rawTerm.trim();
       if (!term) return;
+
+      // If an identical search is already in flight, let it finish instead of restarting
+      if (searchAbortRef.current && inFlightTermRef.current === term) {
+        return;
+      }
+
+      cancelInFlightSearch();
+
       if (offline) {
+        setFetchingMeta(false);
         setMetaError('YouTube search requires an internet connection.');
         return;
       }
 
-      const activeSource = sourceOverride ?? searchSource;
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+      inFlightTermRef.current = term;
+      const requestId = searchRequestIdRef.current;
+
       setFetchingMeta(true);
       setMetaError(null);
       setPreviewItems([]);
       setIsPlaylistPreview(false);
       setPlaylistTitle(null);
-      setSearchResults([]);
-      setLastSearchTerm(null);
-      setActiveSearchResultId(null);
       setQuickQueuedIds(new Set());
 
       try {
@@ -784,8 +758,13 @@ export const DiscoverPage: React.FC = () => {
           musicDir: string;
         }>('/api/download/metadata', {
           method: 'POST',
-          body: JSON.stringify({query: term, source: activeSource}),
+          signal: controller.signal,
+          body: JSON.stringify({query: term, source: 'youtube'}),
         });
+
+        if (controller.signal.aborted || searchRequestIdRef.current !== requestId) {
+          return;
+        }
 
         if (res.musicDir) {
           setPublicInfo((prev) => (prev ? {...prev, musicDir: res.musicDir} : prev));
@@ -798,36 +777,95 @@ export const DiscoverPage: React.FC = () => {
           setSearchResults(res.items || []);
           setLastSearchTerm(term);
           if (!res.items || res.items.length === 0) {
-            setMetaError(
-              `No ${activeSource === 'ytmusic' ? 'YouTube Music' : 'YouTube'} results found for "${term}". Try a different query.`
-            );
+            setMetaError(`No YouTube results found for "${term}". Try a different query.`);
           }
         } else {
+          setSearchResults([]);
+          setLastSearchTerm(term);
           setIsPlaylistPreview(Boolean(res.isPlaylist));
           setPlaylistTitle(res.playlistTitle);
-          const effectiveFormat = downloadQuality === 'ultra' ? defaultFormat : 'mp3';
           setPreviewItems(
             (res.items || []).map((item, idx) => ({
               ...item,
               selected: res.isPlaylist ? true : idx === 0,
-              format: effectiveFormat,
-              quality: downloadQuality,
+              format: DEFAULT_DOWNLOAD_FORMAT,
+              quality: DEFAULT_DOWNLOAD_QUALITY,
             }))
           );
         }
       } catch (err) {
+        if (
+          controller.signal.aborted ||
+          searchRequestIdRef.current !== requestId ||
+          (err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        setSearchResults([]);
         setMetaError(err instanceof Error ? err.message : 'Could not fetch YouTube results');
       } finally {
-        setFetchingMeta(false);
+        if (searchAbortRef.current === controller) {
+          searchAbortRef.current = null;
+          inFlightTermRef.current = null;
+        }
+        if (searchRequestIdRef.current === requestId) {
+          setFetchingMeta(false);
+        }
       }
     },
-    [defaultFormat, downloadQuality, offline, searchSource]
+    [cancelInFlightSearch, offline]
   );
 
-  const handleFetchMetadata = async (e: React.FormEvent) => {
+  // Automatic 450ms debounced search as the user types, cancelling stale requests on change
+  useEffect(() => {
+    if (!trimmedQuery) {
+      cancelInFlightSearch();
+      setFetchingMeta(false);
+      return;
+    }
+
+    if (skipNextDebounceTermRef.current === trimmedQuery) {
+      skipNextDebounceTermRef.current = null;
+      return;
+    }
+
+    if (offline) {
+      cancelInFlightSearch();
+      setFetchingMeta(false);
+      return;
+    }
+
+    // Cancel any in-flight previous search immediately when the query changes
+    cancelInFlightSearch();
+    setFetchingMeta(false);
+    setMetaError(null);
+
+    const timer = setTimeout(() => {
+      searchDebounceRef.current = null;
+      void executeYouTubeSearch(trimmedQuery);
+    }, SEARCH_DEBOUNCE_MS);
+    searchDebounceRef.current = timer;
+
+    return () => {
+      clearTimeout(timer);
+      if (searchDebounceRef.current === timer) {
+        searchDebounceRef.current = null;
+      }
+    };
+  }, [cancelInFlightSearch, executeYouTubeSearch, offline, trimmedQuery]);
+
+  // Abort any in-flight search request on unmount
+  useEffect(() => {
+    return () => {
+      cancelInFlightSearch();
+    };
+  }, [cancelInFlightSearch]);
+
+  const handleFetchMetadata = (e: React.FormEvent) => {
     e.preventDefault();
     if (!trimmedQuery) return;
-    await executeYouTubeSearch(trimmedQuery);
+    skipNextDebounceTermRef.current = trimmedQuery;
+    void executeYouTubeSearch(trimmedQuery);
   };
 
   const handleSelectArtistToDiscover = useCallback(
@@ -840,8 +878,10 @@ export const DiscoverPage: React.FC = () => {
         });
         return;
       }
-      setQuery(artist.name);
-      void executeYouTubeSearch(artist.name);
+      const nextTerm = artist.name.trim();
+      skipNextDebounceTermRef.current = nextTerm;
+      setQuery(nextTerm);
+      void executeYouTubeSearch(nextTerm);
     },
     [executeYouTubeSearch, handleOpenArtistView]
   );
@@ -849,9 +889,12 @@ export const DiscoverPage: React.FC = () => {
   const handleSearchAlbumTracks = useCallback(
     (e: React.MouseEvent, album: DiscoverAlbumItem) => {
       e.stopPropagation();
-      const term = album.title.toLowerCase().includes(album.artist.toLowerCase())
-        ? album.title
-        : `${album.artist} ${album.title}`;
+      const term = (
+        album.title.toLowerCase().includes(album.artist.toLowerCase())
+          ? album.title
+          : `${album.artist} ${album.title}`
+      ).trim();
+      skipNextDebounceTermRef.current = term;
       setQuery(term);
       void executeYouTubeSearch(term);
     },
@@ -861,9 +904,12 @@ export const DiscoverPage: React.FC = () => {
   const handleQueryChange = (nextValue: string) => {
     setQuery(nextValue);
     if (nextValue.trim() === '') {
+      cancelInFlightSearch();
+      skipNextDebounceTermRef.current = null;
+      prefetchedSearchKeyRef.current = '';
+      setFetchingMeta(false);
       setSearchResults([]);
       setLastSearchTerm(null);
-      setActiveSearchResultId(null);
       setPreviewItems([]);
       setIsPlaylistPreview(false);
       setPlaylistTitle(null);
@@ -871,41 +917,26 @@ export const DiscoverPage: React.FC = () => {
     }
   };
 
-  const handleSelectSearchResult = (item: MetadataPreviewItem) => {
-    if (!canDownload) {
+  const handleTapSearchResult = useCallback(
+    (item: MetadataPreviewItem) => {
       const clickedTrack = metadataItemToYouTubeTrack(item);
       if (currentTrack?.id === clickedTrack.id) {
         togglePlay();
-      } else {
-        const ytQueue = searchResults.map(metadataItemToYouTubeTrack);
-        const matched = ytQueue.find((t) => t.id === clickedTrack.id) || clickedTrack;
-        playTrack(matched, ytQueue);
+        return;
       }
-      return;
-    }
-    setActiveSearchResultId(item.id);
-    setIsPlaylistPreview(false);
-    setPlaylistTitle(null);
-    setMetaError(null);
-    setPreviewItems([
-      {
-        ...item,
-        selected: true,
-        format: downloadQuality === 'ultra' ? defaultFormat : 'mp3',
-        quality: downloadQuality,
-      },
-    ]);
-    requestAnimationFrame(() => {
-      metadataEditorRef.current?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
-    });
-  };
+      const listToQueue = searchResults.length > 0 ? searchResults : [item];
+      const ytQueue = listToQueue.map(metadataItemToYouTubeTrack);
+      const matched = ytQueue.find((t) => t.id === clickedTrack.id) || clickedTrack;
+      playTrack(matched, ytQueue);
+    },
+    [currentTrack?.id, playTrack, searchResults, togglePlay]
+  );
 
   const handleQuickDownloadResult = async (e: React.MouseEvent, item: MetadataPreviewItem) => {
     e.stopPropagation();
     if (!canDownload || quickQueueingId === item.id) return;
     setQuickQueueingId(item.id);
     setMetaError(null);
-    const effectiveFormat = downloadQuality === 'ultra' ? defaultFormat : 'mp3';
     try {
       await apiFetch('/api/download/start', {
         method: 'POST',
@@ -916,19 +947,15 @@ export const DiscoverPage: React.FC = () => {
               title: item.title,
               artist: item.artist,
               album: item.album || 'Singles',
-              format: effectiveFormat,
-              quality: downloadQuality,
+              format: DEFAULT_DOWNLOAD_FORMAT,
+              quality: DEFAULT_DOWNLOAD_QUALITY,
               thumbnail_url: item.thumbnail_url,
             },
           ],
         }),
       });
       setQuickQueuedIds((prev) => new Set(prev).add(item.id));
-      flashToast(
-        downloadQuality === 'ultra'
-          ? `Queued "${item.title}" (Ultra)`
-          : `Queued "${item.title}" (${QUALITY_LABELS[downloadQuality]} MP3)`
-      );
+      flashToast(`Queued "${item.title}" for download`);
     } catch (err) {
       setMetaError(err instanceof Error ? err.message : 'Failed to enqueue download');
     } finally {
@@ -962,10 +989,6 @@ export const DiscoverPage: React.FC = () => {
         }),
       });
 
-      if (activeSearchResultId) {
-        setQuickQueuedIds((prev) => new Set(prev).add(activeSearchResultId));
-        setActiveSearchResultId(null);
-      }
       setPreviewItems([]);
       setIsPlaylistPreview(false);
       setPlaylistTitle(null);
@@ -999,7 +1022,6 @@ export const DiscoverPage: React.FC = () => {
 
   const selectedCount = previewItems.filter((i) => i.selected).length;
   const isSingleEditor = !isPlaylistPreview && previewItems.length === 1;
-  const destinationLabel = publicInfo?.musicDir || '/music';
 
   const hasAnyDiscoverShelf = Boolean(
     discoverFeed &&
@@ -1026,7 +1048,7 @@ export const DiscoverPage: React.FC = () => {
         </div>
       )}
 
-      {/* Compact Single-Row Header (hidden when inspecting an Album/Artist detail view) */}
+      {/* Minimalist Single-Row Header (hidden when inspecting an Album/Artist detail view) */}
       {!isCatalogDetailOpen && (
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
@@ -1042,8 +1064,8 @@ export const DiscoverPage: React.FC = () => {
           )}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {isDiscoverView && !offline && (
+        {isDiscoverView && !offline && (
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => void loadDiscoverFeed(true)}
@@ -1057,29 +1079,20 @@ export const DiscoverPage: React.FC = () => {
               />
               <span className="hidden sm:inline">Refresh</span>
             </button>
-          )}
-          {!isDiscoverView && canDownload && (
-            <div
-              className="inline-flex items-center gap-1.5 rounded-md bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-2.5 py-1 text-xs text-[var(--text-secondary)] max-w-[52vw]"
-              title={`Download destination: ${destinationLabel}`}
-            >
-              <FolderOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-              <code className="font-mono text-[var(--text-primary)] truncate">
-                {destinationLabel}
-              </code>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
       )}
 
-      {/* Pinned Wide Top Search Bar */}
+      {/* Pinned Wide Minimalist Search Input Bar (auto-searches as you type) */}
       {!isCatalogDetailOpen && (
       <div className="sticky top-0 z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2.5 bg-[var(--bg-glass)] backdrop-blur-md">
-        <form onSubmit={handleFetchMetadata} className="space-y-2.5">
+        <form onSubmit={handleFetchMetadata}>
           <div className="relative">
             {isUrlInput ? (
               <Link2 className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--accent)]" />
+            ) : fetchingMeta ? (
+              <Loader2 className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-[var(--accent)]" />
             ) : (
               <Search className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-secondary)]" />
             )}
@@ -1090,145 +1103,19 @@ export const DiscoverPage: React.FC = () => {
               onChange={(e) => handleQueryChange(e.target.value)}
               placeholder="What do you want to play?"
               aria-label="What do you want to play?"
-              className="w-full rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] pl-11 pr-11 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none transition-colors shadow-sm"
+              className="w-full rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] pl-11 pr-12 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none transition-colors shadow-sm"
             />
             {query && (
               <button
                 type="button"
                 onClick={handleClearInput}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] transition-colors"
+                className="absolute right-2 top-1/2 -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] transition-colors"
                 aria-label="Clear search"
               >
                 <X className="w-4 h-4" />
               </button>
             )}
           </div>
-
-          {!isDiscoverView && (
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                {!isUrlInput && (
-                  <div
-                    className="inline-flex items-center rounded-md bg-[var(--bg-secondary)] p-0.5 border border-[var(--border-subtle)]"
-                    role="group"
-                    aria-label="Search source"
-                  >
-                    {(
-                      [
-                        {id: 'youtube', label: 'YouTube'},
-                        {id: 'ytmusic', label: 'YT Music'},
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => {
-                          if (searchSource === opt.id) return;
-                          setSearchSource(opt.id);
-                          if (lastSearchTerm && !offline) {
-                            void executeYouTubeSearch(lastSearchTerm, opt.id);
-                          }
-                        }}
-                        className={`px-2.5 py-1.5 rounded text-xs font-medium transition-colors whitespace-nowrap ${
-                          searchSource === opt.id
-                            ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
-                            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {canDownload && (
-                  <div
-                    className="inline-flex items-center rounded-md bg-[var(--bg-secondary)] p-0.5 border border-[var(--border-subtle)]"
-                    role="group"
-                    aria-label="Download quality"
-                  >
-                    {(['ultra', 'high', 'standard'] as const).map((q) => (
-                      <button
-                        key={q}
-                        type="button"
-                        onClick={() => {
-                          setDownloadQuality(q);
-                          const nextFmt = q === 'ultra' ? defaultFormat : 'mp3';
-                          setPreviewItems((prev) =>
-                            prev.map((p) => ({...p, quality: q, format: nextFmt}))
-                          );
-                        }}
-                        title={
-                          q === 'ultra'
-                            ? 'Best native audio stream (no transcoding)'
-                            : q === 'high'
-                              ? '320 kbps MP3'
-                              : '128 kbps MP3'
-                        }
-                        className={`px-2.5 py-1.5 rounded text-xs font-mono font-medium transition-colors whitespace-nowrap ${
-                          downloadQuality === q
-                            ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
-                            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                        }`}
-                      >
-                        {QUALITY_LABELS[q]}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {canDownload && downloadQuality === 'ultra' && (
-                  <div className="hidden sm:inline-flex items-center rounded-md bg-[var(--bg-secondary)] p-0.5 border border-[var(--border-subtle)]">
-                    {(['m4a', 'opus'] as const).map((fmt) => (
-                      <button
-                        key={fmt}
-                        type="button"
-                        onClick={() => {
-                          setDefaultFormat(fmt);
-                          setPreviewItems((prev) =>
-                            prev.map((p) =>
-                              p.quality === 'ultra' ? {...p, format: fmt} : p
-                            )
-                          );
-                        }}
-                        className={`px-2.5 py-1.5 rounded text-xs font-mono font-medium transition-colors ${
-                          defaultFormat === fmt
-                            ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
-                            : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                        }`}
-                      >
-                        .{fmt}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <button
-                type="submit"
-                disabled={fetchingMeta || !trimmedQuery || offline}
-                className="inline-flex items-center justify-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0 ml-auto"
-              >
-                {fetchingMeta ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>{isUrlInput ? 'Fetching...' : 'Searching...'}</span>
-                  </>
-                ) : (
-                  <>
-                    {isUrlInput ? <Link2 className="w-4 h-4" /> : <Search className="w-4 h-4" />}
-                    <span>
-                      {isUrlInput
-                        ? 'Fetch YouTube URL'
-                        : searchSource === 'ytmusic'
-                          ? 'Search YT Music'
-                          : 'Search YouTube'}
-                    </span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
         </form>
       </div>
       )}
@@ -1270,8 +1157,8 @@ export const DiscoverPage: React.FC = () => {
               <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
               <p className="text-sm font-medium text-[var(--text-primary)]">Offline Mode</p>
               <p className="text-xs text-[var(--text-secondary)]">
-                Type above to search your offline cached tracks. Reconnect to browse personalized
-                Discover recommendations.
+                Reconnect to search YouTube and browse Discover recommendations. Use Home or Library
+                for offline cached tracks.
               </p>
             </div>
           ) : discoverLoading && !hasAnyDiscoverShelf ? (
@@ -1581,232 +1468,61 @@ export const DiscoverPage: React.FC = () => {
         )
       ) : (
         /* =====================================================================
-           MODE B: ACTIVE LIVE SEARCH (Local Library + YouTube Results)
+           MODE B: AUTOMATIC ONLINE YOUTUBE SEARCH & INSTANT PLAY
            ===================================================================== */
-        <div className="space-y-6">
+        <div className="space-y-5">
           {metaError && (
             <div className="rounded-lg bg-[var(--danger-bg)] border border-[var(--danger-border)] px-4 py-3 text-sm text-[var(--danger-text)]">
               {metaError}
             </div>
           )}
 
-          {/* SECTION 1: In Your Library (live-filtered as user types) */}
-          {!isUrlInput && (
-            <section className="space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="font-display text-sm font-bold tracking-tight text-[var(--text-secondary)]">
-                  In Your Library
-                </h2>
-                <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
-                  {libraryLoading
-                    ? 'Loading...'
-                    : `${localMatches.length} ${localMatches.length === 1 ? 'track' : 'tracks'}`}
-                </span>
-              </div>
-
-              {localMatches.length === 0 ? (
-                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-4 py-5 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <Music2 className="w-5 h-5 text-[var(--text-muted)] shrink-0" />
-                    <p className="text-sm text-[var(--text-secondary)] truncate">
-                      No local tracks matching &ldquo;{trimmedQuery}&rdquo;
-                    </p>
-                  </div>
-                  {!offline && (
-                    <button
-                      type="button"
-                      disabled={fetchingMeta}
-                      onClick={() => void executeYouTubeSearch(trimmedQuery)}
-                      className="text-xs font-semibold text-[var(--accent)] hover:text-[var(--accent-hover)] whitespace-nowrap shrink-0"
-                    >
-                      Search YouTube →
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-1.5">
-                  {localMatches.slice(0, 25).map((track) => {
-                    const isCurrent = currentTrack?.id === track.id;
-                    const isCachedOffline =
-                      typeof track.id === 'number' && cachedTrackIds.has(track.id);
-
-                    return (
-                      <button
-                        key={track.id}
-                        type="button"
-                        onClick={() => handlePlayLocalTrack(track)}
-                        className={`group w-full flex items-center gap-3 rounded-lg p-2.5 border text-left transition-colors ${
-                          isCurrent
-                            ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/50'
-                            : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
-                        }`}
-                      >
-                        <div className="relative shrink-0">
-                          <AlbumArt
-                            coverFile={track.cover_file}
-                            alt={track.title}
-                            color={track.dominant_color}
-                            className="w-12 h-12 rounded object-cover"
-                            iconSize={18}
-                          />
-                          <span
-                            className={`absolute inset-0 flex items-center justify-center rounded bg-black/45 transition-opacity ${
-                              isCurrent ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-                            }`}
-                          >
-                            {isCurrent && isPlaying ? (
-                              <Pause className="w-4 h-4 text-[var(--accent)] fill-current" />
-                            ) : (
-                              <Play className="w-4 h-4 text-white fill-current ml-0.5" />
-                            )}
-                          </span>
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <p
-                            className={`text-sm font-semibold truncate ${
-                              isCurrent ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
-                            }`}
-                          >
-                            {track.title}
-                          </p>
-                          <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-                            {track.artist}
-                            {track.album ? ` · ${track.album}` : ''}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center gap-2.5 shrink-0">
-                          {isCachedOffline && (
-                            <span
-                              className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--accent)]"
-                              title="Available offline"
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Offline</span>
-                            </span>
-                          )}
-                          <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
-                            {track.duration > 0 ? formatDuration(track.duration) : '--:--'}
-                          </span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                  {localMatches.length > 25 && (
-                    <p className="text-center text-xs text-[var(--text-muted)] pt-1">
-                      Showing top 25 of {localMatches.length} matches in your library.
-                    </p>
-                  )}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* SECTION 2: YouTube (yt-dlp) Results, Metadata Preview & Live Download Progress */}
-          <section className="space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="font-display text-sm font-bold tracking-tight text-[var(--text-secondary)]">
-                YouTube Results
-              </h2>
-              {searchResults.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearchResults([]);
-                    setLastSearchTerm(null);
-                    setActiveSearchResultId(null);
-                  }}
-                  className="text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] shrink-0"
-                >
-                  Clear results
-                </button>
-              )}
-            </div>
-
+          <section className="space-y-3">
             {offline ? (
               <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-2">
                 <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
                 <p className="text-sm font-medium text-[var(--text-primary)]">Offline Mode</p>
                 <p className="text-xs text-[var(--text-secondary)]">
-                  You can search and play your cached tracks above. Reconnect to search or stream
-                  from YouTube.
+                  Reconnect to search and stream from YouTube. Use Home or Library for offline
+                  tracks.
                 </p>
               </div>
             ) : (
               <>
-                {searchResults.length === 0 && previewItems.length === 0 && !fetchingMeta && (
-                  <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-5 py-7 text-center space-y-1.5">
-                    <p className="text-sm font-medium text-[var(--text-primary)]">
-                      Press Enter or tap &ldquo;
-                      {isUrlInput
-                        ? 'Fetch YouTube URL'
-                        : searchSource === 'ytmusic'
-                          ? 'Search YT Music'
-                          : 'Search YouTube'}
-                      &rdquo;
-                    </p>
-                    <p className="text-xs text-[var(--text-muted)]">
-                      Stream full tracks right in the player
-                      {canDownload ? (
-                        <>
-                          {' '}
-                          or save directly into{' '}
-                          <code className="font-mono text-[var(--text-secondary)]">
-                            {destinationLabel}/tracks
-                          </code>{' '}
-                          ({downloadQuality === 'ultra' ? 'best native audio' : `${QUALITY_LABELS[downloadQuality]} MP3`})
-                        </>
-                      ) : null}
-                      .
-                    </p>
-                  </div>
-                )}
-
-                {fetchingMeta && (
+                {fetchingMeta && searchResults.length === 0 && previewItems.length === 0 && (
                   <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 flex items-center justify-center gap-3 text-sm text-[var(--text-secondary)]">
                     <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />
                     <span>
                       {isUrlInput
-                        ? 'Reading YouTube metadata...'
-                        : `Searching ${searchSource === 'ytmusic' ? 'YouTube Music' : 'YouTube'} for "${trimmedQuery}"...`}
+                        ? 'Reading YouTube link...'
+                        : `Searching YouTube for "${trimmedQuery}"...`}
                     </span>
                   </div>
                 )}
 
                 {searchResults.length > 0 && (
-                  <div className="space-y-2">
+                  <div className="space-y-2.5">
                     {lastSearchTerm && (
-                      <p className="text-xs text-[var(--text-muted)]">
-                        {searchSource === 'ytmusic' ? 'YouTube Music' : 'YouTube'} results for &ldquo;
-                        {lastSearchTerm}&rdquo;
-                        {canDownload ? (
-                          <>
-                            {' '}
-                            · Tap a track to edit tags, or{' '}
-                            <span className="text-[var(--text-secondary)] font-semibold">+</span>{' '}
-                            for one-tap{' '}
-                            <code className="font-mono text-[var(--text-secondary)]">
-                              {downloadQuality === 'ultra'
-                                ? 'Ultra'
-                                : `${QUALITY_LABELS[downloadQuality]} mp3`}
-                            </code>{' '}
-                            download.
-                          </>
-                        ) : (
-                          ' · Tap any track to stream.'
+                      <div className="flex items-center justify-between gap-2 px-0.5">
+                        <p className="text-xs text-[var(--text-muted)] truncate">
+                          Results for &ldquo;{lastSearchTerm}&rdquo;
+                        </p>
+                        {fetchingMeta && (
+                          <span className="inline-flex items-center gap-1.5 text-xs text-[var(--text-secondary)] shrink-0">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                            <span>Updating...</span>
+                          </span>
                         )}
-                      </p>
+                      </div>
                     )}
 
-                    <div className="space-y-2">
+                    <div className={`space-y-2 transition-opacity duration-150 ${fetchingMeta ? 'opacity-65' : 'opacity-100'}`}>
                       {searchResults.map((item) => {
                         const videoId = extractYouTubeVideoIdFromItem(item);
                         const ytTrackId = `yt-${videoId}`;
                         const isCurrentStream = currentTrack?.id === ytTrackId;
                         const isStreamPlaying = isCurrentStream && isPlaying && !isBuffering;
                         const isStreamBuffering = isCurrentStream && isBuffering;
-                        const isSelected = activeSearchResultId === item.id;
                         const isQuickQueueing = quickQueueingId === item.id;
                         const matchingJob = jobByUrl.get(item.url);
                         const isJobActive =
@@ -1828,15 +1544,15 @@ export const DiscoverPage: React.FC = () => {
                             key={item.id}
                             role="button"
                             tabIndex={0}
-                            onClick={() => handleSelectSearchResult(item)}
+                            onClick={() => handleTapSearchResult(item)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' || e.key === ' ') {
                                 e.preventDefault();
-                                handleSelectSearchResult(item);
+                                handleTapSearchResult(item);
                               }
                             }}
-                            className={`group rounded-lg p-2.5 border transition-colors cursor-pointer space-y-2 ${
-                              isCurrentStream || isSelected
+                            className={`group rounded-lg p-2.5 border transition-colors cursor-pointer space-y-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
+                              isCurrentStream
                                 ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
                                 : 'bg-[var(--bg-secondary)] border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:border-[var(--border-strong)]'
                             }`}
@@ -1853,22 +1569,15 @@ export const DiscoverPage: React.FC = () => {
                               </div>
 
                               <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2">
-                                  <p
-                                    className={`text-sm font-semibold truncate ${
-                                      isCurrentStream || isSelected
-                                        ? 'text-[var(--accent)]'
-                                        : 'text-[var(--text-primary)]'
-                                    }`}
-                                  >
-                                    {item.title}
-                                  </p>
-                                  {item.duplicateTrack && (
-                                    <span className="text-[11px] font-medium text-[var(--warn-text)] shrink-0">
-                                      · In Library
-                                    </span>
-                                  )}
-                                </div>
+                                <p
+                                  className={`text-sm font-semibold truncate ${
+                                    isCurrentStream
+                                      ? 'text-[var(--accent)]'
+                                      : 'text-[var(--text-primary)]'
+                                  }`}
+                                >
+                                  {item.title}
+                                </p>
                                 <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
                                   {subLine}
                                 </p>
@@ -1888,7 +1597,7 @@ export const DiscoverPage: React.FC = () => {
                                       ? `Pause ${item.title}`
                                       : `Play ${item.title}`
                                   }
-                                  className={`flex h-9 w-9 items-center justify-center rounded-full border transition-all ${
+                                  className={`flex h-10 w-10 items-center justify-center rounded-full border transition-all ${
                                     isCurrentStream
                                       ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-contrast)]'
                                       : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
@@ -1913,7 +1622,7 @@ export const DiscoverPage: React.FC = () => {
                                       }}
                                       title="Play downloaded track"
                                       aria-label={`Play ${item.title}`}
-                                      className="flex h-9 px-3 items-center justify-center gap-1 rounded-full bg-[var(--accent)] text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                                      className="flex h-10 px-3 items-center justify-center gap-1 rounded-full bg-[var(--accent)] text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                                     >
                                       <Check className="w-3.5 h-3.5 stroke-[2.5]" />
                                       <span className="hidden sm:inline">Play</span>
@@ -1923,9 +1632,9 @@ export const DiscoverPage: React.FC = () => {
                                       type="button"
                                       disabled={isQuickQueueing || isJobActive}
                                       onClick={(e) => void handleQuickDownloadResult(e, item)}
-                                      title={`Download as .${defaultFormat}`}
+                                      title="Download track"
                                       aria-label={`Download ${item.title}`}
-                                      className={`flex h-9 w-9 items-center justify-center rounded-full border transition-all ${
+                                      className={`flex h-10 w-10 items-center justify-center rounded-full border transition-all ${
                                         isQuickQueued
                                           ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
                                           : 'bg-[var(--bg-primary)] border-[var(--border-strong)] text-[var(--text-primary)] hover:bg-[var(--accent)] hover:border-[var(--accent)] hover:text-[var(--accent-contrast)]'
@@ -1964,41 +1673,21 @@ export const DiscoverPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Metadata Preview Editor (Pasted URL, Playlist, or Clicked Result) */}
-                {canDownload && previewItems.length > 0 && (
+                {/* Pasted-URL Metadata Preview (single track or playlist link) */}
+                {previewItems.length > 0 && (
                   <div
                     ref={metadataEditorRef}
                     className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-4 sm:p-5 space-y-4"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <h3 className="text-sm font-bold text-[var(--text-primary)]">
-                          {playlistTitle
-                            ? `Playlist: ${playlistTitle}`
-                            : activeSearchResultId
-                              ? 'Edit Metadata Before Download'
-                              : 'YouTube Metadata Preview'}
-                        </h3>
-                        <p className="text-xs text-[var(--text-muted)]">
-                          Deduplicated storage:{' '}
-                          <code className="font-mono text-[var(--text-secondary)]">
-                            {destinationLabel}/tracks/&lt;sha256&gt;.
-                            {isSingleEditor
-                              ? previewItems[0].quality === 'ultra'
-                                ? previewItems[0].format
-                                : 'mp3'
-                              : downloadQuality === 'ultra'
-                                ? defaultFormat
-                                : 'mp3'}
-                          </code>
-                        </p>
-                      </div>
+                      <h3 className="text-sm font-bold text-[var(--text-primary)]">
+                        {playlistTitle ? `Playlist: ${playlistTitle}` : 'YouTube Link Preview'}
+                      </h3>
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
                           onClick={() => {
                             setPreviewItems([]);
-                            setActiveSearchResultId(null);
                             setIsPlaylistPreview(false);
                             setPlaylistTitle(null);
                           }}
@@ -2006,23 +1695,25 @@ export const DiscoverPage: React.FC = () => {
                         >
                           Dismiss
                         </button>
-                        <button
-                          type="button"
-                          disabled={enqueueing || selectedCount === 0}
-                          onClick={handleStartDownloads}
-                          className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors whitespace-nowrap"
-                        >
-                          {enqueueing ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Download className="w-4 h-4" />
-                          )}
-                          <span>
-                            {isSingleEditor
-                              ? 'Download Track'
-                              : `Download Selected (${selectedCount})`}
-                          </span>
-                        </button>
+                        {canDownload && (
+                          <button
+                            type="button"
+                            disabled={enqueueing || selectedCount === 0}
+                            onClick={handleStartDownloads}
+                            className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors whitespace-nowrap"
+                          >
+                            {enqueueing ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Download className="w-4 h-4" />
+                            )}
+                            <span>
+                              {isSingleEditor
+                                ? 'Download Track'
+                                : `Download Selected (${selectedCount})`}
+                            </span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -2156,7 +1847,7 @@ export const DiscoverPage: React.FC = () => {
                                         const nextQ = e.target.value as DownloadQuality;
                                         updatePreviewItem(item.id, {
                                           quality: nextQ,
-                                          format: nextQ === 'ultra' ? defaultFormat : 'mp3',
+                                          format: nextQ === 'ultra' ? DEFAULT_DOWNLOAD_FORMAT : 'mp3',
                                         });
                                       }}
                                       className="flex-1 rounded bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2.5 py-1.5 text-sm font-mono text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
