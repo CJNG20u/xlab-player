@@ -3,35 +3,39 @@ export const THEME_BASE_COLORS = {
   'spotify-dark': '#121212',
   'apple-dark': '#000000',
   'apple-light': '#FFFFFF',
+  'tidal-dark': '#000000',
 } as const;
 
-// Unified topmost hex at y=0 for Playlists, Discover, and Settings headers so
+// Unified topmost hex at y=0 for Playlist Detail, Discover, and Settings headers so
 // `<meta name="theme-color">`, `html/body` background, and the CSS top gradient
 // match pixel-for-pixel behind `env(safe-area-inset-top)` with zero seam.
 export const THEME_HEADER_TOP_COLORS = {
   'spotify-dark': '#1c2520',
   'apple-dark': '#141214',
   'apple-light': '#f3f3f7',
+  'tidal-dark': '#000000',
 } as const;
 
 export function getThemeBaseColor(
-  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark' | string | null | undefined
 ): string {
   if (theme === 'apple-dark') return THEME_BASE_COLORS['apple-dark'];
   if (theme === 'apple-light') return THEME_BASE_COLORS['apple-light'];
+  if (theme === 'tidal-dark') return THEME_BASE_COLORS['tidal-dark'];
   return THEME_BASE_COLORS['spotify-dark'];
 }
 
 export function getUnifiedPageHeaderTopHex(
-  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark' | string | null | undefined
 ): string {
   if (theme === 'apple-dark') return THEME_HEADER_TOP_COLORS['apple-dark'];
   if (theme === 'apple-light') return THEME_HEADER_TOP_COLORS['apple-light'];
+  if (theme === 'tidal-dark') return THEME_HEADER_TOP_COLORS['tidal-dark'];
   return THEME_HEADER_TOP_COLORS['spotify-dark'];
 }
 
 export function getUnifiedPageHeaderGradient(
-  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | string | null | undefined
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark' | string | null | undefined
 ): string {
   const topHex = getUnifiedPageHeaderTopHex(theme);
   const baseHex = getThemeBaseColor(theme);

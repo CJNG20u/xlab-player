@@ -15,6 +15,7 @@ import {
 import React, {useEffect, useRef, useState} from 'react';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useTheme} from '../context/ThemeContext';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {apiFetch, formatDuration} from '../lib/api';
@@ -50,6 +51,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
   onLikeToggled,
 }) => {
   const {user, isOfflineMode} = useAuth();
+  const {isTidal} = useTheme();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
   const {
@@ -411,6 +413,11 @@ export const TrackTable: React.FC<TrackTableProps> = ({
                     {track.title}
                   </button>
                   <div className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)] truncate">
+                    {isTidal && track.format && (
+                      <span className="shrink-0 rounded border border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-[#00FFFF] leading-none">
+                        {track.format.toUpperCase()}
+                      </span>
+                    )}
                     {onArtistClick && !selectionMode ? (
                       <button
                         type="button"

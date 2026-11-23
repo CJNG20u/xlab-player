@@ -473,7 +473,7 @@ export const SettingsPage: React.FC = () => {
               Appearance
             </h2>
             <p className="text-xs text-[var(--text-secondary)]">
-              Switch between Spotify Dark, Apple Music Dark, and Apple Music Light.
+              Switch between Spotify Dark, Apple Music Dark, Apple Music Light, and Tidal Dark.
             </p>
           </div>
         </div>
@@ -481,7 +481,7 @@ export const SettingsPage: React.FC = () => {
         <div
           role="radiogroup"
           aria-label="App visual theme"
-          className="grid grid-cols-1 sm:grid-cols-3 gap-3.5"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5"
         >
           {THEME_OPTIONS.map((option) => {
             const isSelected = theme === option.id;
@@ -526,7 +526,10 @@ export const SettingsPage: React.FC = () => {
                       <div
                         className="ml-0.5 w-0 h-0 border-y-[4px] border-y-transparent border-l-[6px]"
                         style={{
-                          borderLeftColor: option.id === 'spotify-dark' ? '#000000' : '#FFFFFF',
+                          borderLeftColor:
+                            option.id === 'spotify-dark' || option.id === 'tidal-dark'
+                              ? '#000000'
+                              : '#FFFFFF',
                         }}
                       />
                     </div>

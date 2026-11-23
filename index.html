@@ -25,7 +25,12 @@
       (function () {
         try {
           var t = localStorage.getItem('xlabplayer-theme');
-          if (t !== 'spotify-dark' && t !== 'apple-dark' && t !== 'apple-light') {
+          if (
+            t !== 'spotify-dark' &&
+            t !== 'apple-dark' &&
+            t !== 'apple-light' &&
+            t !== 'tidal-dark'
+          ) {
             t = 'spotify-dark';
           }
           var root = document.documentElement;
@@ -33,23 +38,25 @@
           root.classList.toggle('dark', t !== 'apple-light');
           var p = (window.location && window.location.pathname) || '/';
           var isUnified =
-            p === '/playlists' ||
             p.indexOf('/playlists/') === 0 ||
             p === '/discover' ||
             p === '/search' ||
             p === '/download' ||
             p === '/settings';
-          var color = isUnified
-            ? t === 'apple-light'
-              ? '#f3f3f7'
-              : t === 'apple-dark'
-                ? '#141214'
-                : '#1c2520'
-            : t === 'apple-light'
-              ? '#FFFFFF'
-              : t === 'apple-dark'
-                ? '#000000'
-                : '#121212';
+          var color =
+            t === 'tidal-dark'
+              ? '#000000'
+              : isUnified
+                ? t === 'apple-light'
+                  ? '#f3f3f7'
+                  : t === 'apple-dark'
+                    ? '#141214'
+                    : '#1c2520'
+                : t === 'apple-light'
+                  ? '#FFFFFF'
+                  : t === 'apple-dark'
+                    ? '#000000'
+                    : '#121212';
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute('content', color);
           var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');

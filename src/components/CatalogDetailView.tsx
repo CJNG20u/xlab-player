@@ -246,7 +246,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   onOpenArtist,
   onFlashToast,
 }) => {
-  const {theme, isLight} = useTheme();
+  const {theme, isLight, isTidal} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -526,13 +526,14 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   }, [heroColorCacheKey, heroFallbackColor, heroImageUrl]);
 
   const detailTopHexColor = useMemo(() => {
+    if (isTidal) return '#000000';
     if (error) {
       return getUnifiedPageHeaderTopHex(theme);
     }
     return isLight
       ? computeLightTintedTopHex(sampledHeroColor, 0.22)
       : computeNowPlayingTopHex(sampledHeroColor);
-  }, [error, isLight, sampledHeroColor, theme]);
+  }, [error, isLight, isTidal, sampledHeroColor, theme]);
 
   // Synchronously match mobile status bar (`meta[name="theme-color"]` & root/body bg)
   // to the top edge of the Artist/Album hero backdrop and restore on Back/unmount.

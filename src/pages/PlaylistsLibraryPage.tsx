@@ -134,7 +134,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     libraryRefreshVersion,
     bumpLibraryRefresh,
   } = usePlayer();
-  const {isLight, baseThemeColor} = useTheme();
+  const {isLight, isTidal, baseThemeColor} = useTheme();
 
   const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
   const isPlaylistsRoot = location.pathname === '/playlists';
@@ -751,6 +751,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
   const heroTopHexColor = useMemo(() => {
     if (!isHomeView) return baseThemeColor;
+    if (isTidal) return '#000000';
     const cached = heroTrack
       ? getCachedDominantColor(heroAlbumColorKey, heroTrack.id)
       : null;
@@ -766,6 +767,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     heroTrack,
     isHomeView,
     isLight,
+    isTidal,
     viewFallbackColor,
   ]);
 
@@ -1130,7 +1132,9 @@ export const PlaylistsLibraryPage: React.FC = () => {
             <div
               className="relative pt-safe transition-colors duration-500"
               style={{
-                background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
+                background: isTidal
+                  ? 'radial-gradient(ellipse 80% 55% at 50% 42%, rgba(0, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0) 70%), #000000'
+                  : `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
               }}
             >
               <div className="px-4 sm:px-6 lg:px-8 pt-4 pb-4 max-w-7xl mx-auto space-y-4">

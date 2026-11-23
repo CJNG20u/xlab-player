@@ -13,7 +13,7 @@ import {
   setDocumentThemeColor,
 } from '../lib/themeColor';
 
-export type AppTheme = 'spotify-dark' | 'apple-dark' | 'apple-light';
+export type AppTheme = 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark';
 
 export interface ThemeOption {
   id: AppTheme;
@@ -87,10 +87,32 @@ export const THEME_OPTIONS: ThemeOption[] = [
       border: 'rgba(0, 0, 0, 0.08)',
     },
   },
+  {
+    id: 'tidal-dark',
+    name: 'Tidal Dark',
+    description: 'Pure black OLED canvas with electric cyan accents & hi-fi badges',
+    themeColor: '#000000',
+    isLight: false,
+    preview: {
+      bg: '#000000',
+      card: '#111111',
+      elevated: '#161618',
+      text: '#FFFFFF',
+      muted: '#9A9AA0',
+      accent: '#00FFFF',
+      navBg: 'rgba(10, 10, 12, 0.94)',
+      border: 'rgba(255, 255, 255, 0.08)',
+    },
+  },
 ];
 
 function isValidTheme(value: string | null): value is AppTheme {
-  return value === 'spotify-dark' || value === 'apple-dark' || value === 'apple-light';
+  return (
+    value === 'spotify-dark' ||
+    value === 'apple-dark' ||
+    value === 'apple-light' ||
+    value === 'tidal-dark'
+  );
 }
 
 function readStoredTheme(): AppTheme {
@@ -130,6 +152,7 @@ interface ThemeContextValue {
   setTheme: (next: AppTheme) => void;
   isLight: boolean;
   isAppleStyle: boolean;
+  isTidal: boolean;
   baseThemeColor: string;
 }
 
@@ -160,6 +183,7 @@ export const ThemeProvider: React.FC<{children: React.ReactNode}> = ({children})
       setTheme,
       isLight: theme === 'apple-light',
       isAppleStyle: theme === 'apple-dark' || theme === 'apple-light',
+      isTidal: theme === 'tidal-dark',
       baseThemeColor: getThemeBaseColor(theme),
     }),
     [theme, setTheme]

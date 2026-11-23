@@ -67,7 +67,7 @@ export const NowPlayingPage: React.FC = () => {
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
   const canDownload = Boolean(user?.can_download || user?.role === 'admin');
-  const {isLight, baseThemeColor} = useTheme();
+  const {isLight, isTidal, baseThemeColor} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -175,12 +175,13 @@ export const NowPlayingPage: React.FC = () => {
   }, [albumColorKey, currentTrack, sampledDominantColor]);
 
   const dominantTopHexColor = useMemo(() => {
+    if (isTidal) return '#000000';
     if (!currentTrack) return baseThemeColor;
     if (isLight) {
       return computeLightTintedTopHex(effectiveDominantColor, 0.24);
     }
     return computeNowPlayingTopHex(effectiveDominantColor);
-  }, [baseThemeColor, currentTrack, effectiveDominantColor, isLight]);
+  }, [baseThemeColor, currentTrack, effectiveDominantColor, isLight, isTidal]);
 
   // Synchronously sync mobile status bar (`meta[name="theme-color"]`) with the Now Playing top gradient color
   useLayoutEffect(() => {
@@ -392,9 +393,11 @@ export const NowPlayingPage: React.FC = () => {
     <div
       className="relative min-h-full w-full overflow-hidden flex flex-col pt-safe"
       style={{
-        background: isLight
-          ? `linear-gradient(180deg, ${dominantTopHexColor} 0%, #FFFFFF 76%)`
-          : `linear-gradient(180deg, ${dominantTopHexColor} 0%, var(--bg-primary) 72%)`,
+        background: isTidal
+          ? '#000000'
+          : isLight
+            ? `linear-gradient(180deg, ${dominantTopHexColor} 0%, #FFFFFF 76%)`
+            : `linear-gradient(180deg, ${dominantTopHexColor} 0%, var(--bg-primary) 72%)`,
       }}
     >
       {actionToast && (
@@ -403,11 +406,23 @@ export const NowPlayingPage: React.FC = () => {
         </div>
       )}
 
+      {/* Subtle Tidal Cyan Ambient Glow on Pure OLED Black */}
+      {isTidal && (
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              'radial-gradient(ellipse 72% 42% at 50% 34%, rgba(0, 255, 255, 0.11) 0%, rgba(0, 255, 255, 0.03) 44%, transparent 74%)',
+          }}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Blurred album cover backdrop */}
       {coverUrl && (
         <div
           className={`pointer-events-none absolute inset-0 blur-3xl scale-110 bg-cover bg-center ${
-            isLight ? 'opacity-15' : 'opacity-20'
+            isTidal ? 'opacity-10' : isLight ? 'opacity-15' : 'opacity-20'
           }`}
           style={{backgroundImage: `url("${coverUrl}")`}}
           aria-hidden="true"
@@ -416,9 +431,11 @@ export const NowPlayingPage: React.FC = () => {
       <div
         className="pointer-events-none absolute inset-0"
         style={{
-          background: isLight
-            ? 'linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.68) 60%, #FFFFFF 100%)'
-            : 'linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg-primary) 62%, transparent) 60%, var(--bg-primary) 100%)',
+          background: isTidal
+            ? 'linear-gradient(180deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.35) 38%, #000000 100%)'
+            : isLight
+              ? 'linear-gradient(180deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.68) 60%, #FFFFFF 100%)'
+              : 'linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg-primary) 62%, transparent) 60%, var(--bg-primary) 100%)',
         }}
         aria-hidden="true"
       />
@@ -584,9 +601,11 @@ export const NowPlayingPage: React.FC = () => {
                           }}
                           className={`block w-full text-left font-display leading-snug transition-all duration-200 cursor-pointer focus:outline-none ${
                             isCurrent
-                              ? isLight
-                                ? 'text-[19px] sm:text-[21px] font-extrabold text-[#1C1C1E]'
-                                : 'text-[19px] sm:text-[21px] font-extrabold text-white'
+                              ? isTidal
+                                ? 'text-[19px] sm:text-[21px] font-extrabold text-[#00FFFF] drop-shadow-[0_0_16px_rgba(0,255,255,0.35)]'
+                                : isLight
+                                  ? 'text-[19px] sm:text-[21px] font-extrabold text-[#1C1C1E]'
+                                  : 'text-[19px] sm:text-[21px] font-extrabold text-white'
                               : isPast
                                 ? isLight
                                   ? 'text-base sm:text-[17px] font-semibold text-black/30 hover:text-black/70'
@@ -664,13 +683,32 @@ export const NowPlayingPage: React.FC = () => {
                 <span aria-hidden="true">·</span>
                 <span className="truncate">{currentTrack.album}</span>
               </div>
-              <div className="mt-1.5 flex items-center gap-2">
-                <p className="font-mono text-xs text-[var(--text-muted)] tabular-nums">
-                  {currentTrack.format.toUpperCase()}
-                  {currentTrack.bitrate ? ` · ${currentTrack.bitrate} kbps` : ''}
-                </p>
+              <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                {isTidal ? (
+                  <>
+                    <span className="inline-flex items-center rounded border border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wider text-[#00FFFF] leading-none">
+                      {currentTrack.format.toUpperCase()}
+                    </span>
+                    {currentTrack.bitrate ? (
+                      <span className="font-mono text-xs text-[var(--text-secondary)] tabular-nums">
+                        {currentTrack.bitrate} kbps
+                      </span>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="font-mono text-xs text-[var(--text-muted)] tabular-nums">
+                    {currentTrack.format.toUpperCase()}
+                    {currentTrack.bitrate ? ` · ${currentTrack.bitrate} kbps` : ''}
+                  </p>
+                )}
                 {isYouTubeTrack && (
-                  <span className="inline-flex items-center rounded border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-[var(--text-secondary)] leading-none">
+                  <span
+                    className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold tracking-wide leading-none ${
+                      isTidal
+                        ? 'border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
+                        : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                    }`}
+                  >
                     Online
                   </span>
                 )}

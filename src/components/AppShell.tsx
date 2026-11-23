@@ -45,7 +45,7 @@ import {QueueDrawer} from './QueueDrawer';
 
 export const AppShell: React.FC = () => {
   const {user, isOfflineMode, logout} = useAuth();
-  const {theme, isLight, isAppleStyle} = useTheme();
+  const {theme, isLight, isAppleStyle, isTidal} = useTheme();
   const {
     currentTrack,
     isPlaying,
@@ -178,14 +178,18 @@ export const AppShell: React.FC = () => {
       ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-2xl bg-white/85 backdrop-blur-xl border border-black/[0.08] shadow-[0_8px_28px_rgba(0,0,0,0.12)] overflow-hidden select-none'
       : theme === 'apple-dark'
         ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-2xl bg-[#1C1C1E]/80 backdrop-blur-xl border border-white/[0.12] shadow-2xl overflow-hidden select-none'
-        : 'md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden select-none';
+        : theme === 'tidal-dark'
+          ? 'md:hidden fixed left-2.5 right-2.5 bottom-above-nav z-30 h-[64px] rounded-xl bg-[#111111]/95 backdrop-blur-xl border border-white/[0.08] shadow-2xl overflow-hidden select-none'
+          : 'md:hidden fixed left-2 right-2 bottom-above-nav z-30 h-[64px] rounded-lg border border-white/10 shadow-2xl overflow-hidden select-none';
 
   const bottomNavClassName =
     theme === 'apple-light'
       ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-white/85 backdrop-blur-xl border-t border-black/[0.08]'
       : theme === 'apple-dark'
         ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[#1C1C1E]/80 backdrop-blur-xl border-t border-white/[0.10]'
-        : 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--bg-glass)] backdrop-blur-md border-t border-[var(--border-subtle)]';
+        : theme === 'tidal-dark'
+          ? 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[#060608]/95 backdrop-blur-xl border-t border-white/[0.08]'
+          : 'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--bg-glass)] backdrop-blur-md border-t border-[var(--border-subtle)]';
 
   return (
     <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
@@ -378,7 +382,13 @@ export const AppShell: React.FC = () => {
                     </button>
                   )}
                   {isCurrentYouTube && (
-                    <span className="shrink-0 rounded border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--text-secondary)] leading-none">
+                    <span
+                      className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
+                        isTidal
+                          ? 'border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
+                          : 'border-[var(--border-strong)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                      }`}
+                    >
                       Web
                     </span>
                   )}
@@ -646,9 +656,11 @@ export const AppShell: React.FC = () => {
                   {isCurrentYouTube && (
                     <span
                       className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none ${
-                        theme === 'apple-light'
-                          ? 'bg-black/[0.07] text-[#6E6E73]'
-                          : 'bg-white/15 text-white/85'
+                        isTidal
+                          ? 'border border-[rgba(0,255,255,0.35)] bg-[rgba(0,255,255,0.1)] text-[#00FFFF]'
+                          : theme === 'apple-light'
+                            ? 'bg-black/[0.07] text-[#6E6E73]'
+                            : 'bg-white/15 text-white/85'
                       }`}
                     >
                       Web

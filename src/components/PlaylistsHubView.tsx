@@ -213,7 +213,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   onDeletePlaylist,
   onNavigateHomeTab,
 }) => {
-  const {theme, isLight} = useTheme();
+  const {theme, isLight, isTidal} = useTheme();
   const [recentIds, setRecentIds] = useState<number[]>(() => readRecentPlaylistIds());
   const [heroSampledColor, setHeroSampledColor] = useState<string | null>(null);
   const [heroOfflineCoverUrl, setHeroOfflineCoverUrl] = useState<string | null>(null);
@@ -392,7 +392,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
             : trackLabel,
         coverFile: recentPlayable.covers?.[0] || soundtrackCovers[0] || null,
         externalCoverUrl: null as string | null,
-        fallbackColor: theme === 'spotify-dark' ? '#1c4230' : '#4a1722',
+        fallbackColor:
+          theme === 'tidal-dark' ? '#092226' : theme === 'spotify-dark' ? '#1c4230' : '#4a1722',
       };
     }
 
@@ -416,7 +417,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         coverFile: primaryTrack?.cover_file || null,
         externalCoverUrl: !primaryTrack?.cover_file ? primaryTrack?.coverUrl || null : null,
         fallbackColor:
-          primaryTrack?.dominant_color || (theme === 'spotify-dark' ? '#1c4230' : '#4a1722'),
+          primaryTrack?.dominant_color ||
+          (theme === 'tidal-dark' ? '#092226' : theme === 'spotify-dark' ? '#1c4230' : '#4a1722'),
       };
     }
 
@@ -431,7 +433,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         subtitle: pl.description ? `${pl.description} · ${trackLabel}` : trackLabel,
         coverFile: pl.covers?.[0] || null,
         externalCoverUrl: null as string | null,
-        fallbackColor: theme === 'spotify-dark' ? '#1c4230' : '#4a1722',
+        fallbackColor:
+          theme === 'tidal-dark' ? '#092226' : theme === 'spotify-dark' ? '#1c4230' : '#4a1722',
       };
     }
 
@@ -445,7 +448,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         : 'Create your first playlist or import .m3u collections from your music library.',
       coverFile: null as string | null,
       externalCoverUrl: null as string | null,
-      fallbackColor: theme === 'spotify-dark' ? '#1b3a2b' : '#4a1722',
+      fallbackColor:
+        theme === 'tidal-dark' ? '#092226' : theme === 'spotify-dark' ? '#1b3a2b' : '#4a1722',
     };
   }, [
     currentTrack,
@@ -518,12 +522,13 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   }, [featuredHero.fallbackColor, heroColorCacheKey, heroImageSrc]);
 
   const heroTopHex = useMemo(() => {
+    if (isTidal) return '#000000';
     const raw =
       (heroColorCacheKey ? getCachedDominantColor(heroColorCacheKey) : null) ||
       heroSampledColor ||
       featuredHero.fallbackColor;
     return isLight ? computeLightTintedTopHex(raw, 0.24) : computeNowPlayingTopHex(raw);
-  }, [featuredHero.fallbackColor, heroColorCacheKey, heroSampledColor, isLight]);
+  }, [featuredHero.fallbackColor, heroColorCacheKey, heroSampledColor, isLight, isTidal]);
 
   useLayoutEffect(() => {
     setDocumentThemeColor(heroTopHex);
@@ -669,8 +674,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   // Smooth bottom fade scrim from transparent artwork into the exact active theme canvas
   const bottomFadeGradient = isLight
     ? 'linear-gradient(to bottom, transparent 26%, rgba(255, 255, 255, 0.72) 60%, var(--bg-primary) 100%)'
-    : theme === 'apple-dark'
-      ? 'linear-gradient(to bottom, transparent 28%, rgba(0, 0, 0, 0.62) 62%, var(--bg-primary) 100%)'
+    : theme === 'apple-dark' || theme === 'tidal-dark'
+      ? 'linear-gradient(to bottom, transparent 28%, rgba(0, 0, 0, 0.65) 62%, var(--bg-primary) 100%)'
       : 'linear-gradient(to bottom, transparent 28%, rgba(18, 18, 18, 0.62) 62%, var(--bg-primary) 100%)';
 
   const topSafeScrim = isLight
