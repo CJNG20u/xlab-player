@@ -63,7 +63,8 @@ async function handleCoverRequest(req: AuthRequest, res: Response, isHead: boole
   res.setHeader('Cache-Control', `public, max-age=${COVER_MAX_AGE_SECONDS}, immutable`);
   res.setHeader('ETag', etag);
   res.setHeader('Last-Modified', stat.mtime.toUTCString());
-  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
 
   if (req.headers['if-none-match'] === etag) {
     res.status(304).end();
@@ -89,6 +90,31 @@ libraryRouter.get('/covers/:filename', (req, res) => {
 
 libraryRouter.head('/covers/:filename', (req, res) => {
   void handleCoverRequest(req, res, true);
+});
+
+function handleTrackCoverById(req: AuthRequest, res: Response, isHead: boolean): void {
+  const trackId = Number(req.params.trackId);
+  if (!Number.isFinite(trackId)) {
+    res.status(400).end();
+    return;
+  }
+  const row = db
+    .prepare('SELECT cover_file FROM tracks WHERE id = ?')
+    .get(trackId) as {cover_file: string | null} | undefined;
+  if (!row?.cover_file) {
+    res.status(404).end();
+    return;
+  }
+  req.params.filename = row.cover_file;
+  void handleCoverRequest(req, res, isHead);
+}
+
+libraryRouter.get('/tracks/:trackId/cover', (req, res) => {
+  handleTrackCoverById(req, res, false);
+});
+
+libraryRouter.head('/tracks/:trackId/cover', (req, res) => {
+  handleTrackCoverById(req, res, true);
 });
 
 // HTTP 206 Partial Content byte-range streaming resolved dynamically against active music_dir

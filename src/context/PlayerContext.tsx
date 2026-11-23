@@ -11,6 +11,13 @@ import {
   prefetchYouTubeStreams,
   recordPlaybackHistory,
 } from '../lib/api';
+import {
+  getCachedCanvasArtwork,
+  getImmediateTrackMediaArtwork,
+  getTrackArtworkCacheKey,
+  resolveGuaranteedMediaArtwork,
+  trackHasRealArtwork,
+} from '../lib/mediaSessionArtwork';
 import type {PlayHistoryEntry, RepeatMode, Track, TrackId} from '../types';
 import {
   getCachedTrackIds,
@@ -124,48 +131,8 @@ function unlockPersistentAudioElement(
   }
 }
 
-function buildTrackArtwork(track: Track): MediaImage[] {
-  const origin = window.location.origin;
-  const coverUrl = getTrackCoverUrl(track);
-
-  // Always supply absolute URLs with explicit 96x96, 192x192 & 512x512 sizes
-  // (iOS Safari, Android Chrome, and CarPlay ignore SVG or relative artwork URLs)
-  if (coverUrl) {
-    try {
-      const absCover = new URL(coverUrl, origin).href;
-      const cleanPath = absCover.split(/[?#]/)[0].toLowerCase();
-      const mimeType = cleanPath.endsWith('.png')
-        ? 'image/png'
-        : cleanPath.endsWith('.webp')
-          ? 'image/webp'
-          : 'image/jpeg';
-      if (
-        track.isYouTubeStream ||
-        cleanPath.endsWith('.png') ||
-        cleanPath.endsWith('.jpg') ||
-        cleanPath.endsWith('.jpeg') ||
-        cleanPath.endsWith('.webp')
-      ) {
-        return [
-          {src: absCover, sizes: '96x96', type: mimeType},
-          {src: absCover, sizes: '192x192', type: mimeType},
-          {src: absCover, sizes: '512x512', type: mimeType},
-        ];
-      }
-    } catch {
-      // Fall through to app icons
-    }
-  }
-
-  return [
-    {src: new URL('/icon-96.png', origin).href, sizes: '96x96', type: 'image/png'},
-    {src: new URL('/icon-192.png', origin).href, sizes: '192x192', type: 'image/png'},
-    {src: new URL('/icon-512.png', origin).href, sizes: '512x512', type: 'image/png'},
-  ];
-}
-
 function getTrackMetadataKey(track: Track): string {
-  return `${track.id}|${track.title}|${track.artist}|${track.album}|${track.cover_file || ''}|${track.coverUrl || ''}`;
+  return `${track.title || ''}|${track.artist || ''}|${track.album || ''}|${getTrackArtworkCacheKey(track)}`;
 }
 
 export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
@@ -224,6 +191,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryAttemptsRef = useRef(0);
   const lastMetadataKeyRef = useRef<string | null>(null);
+  const lastMetadataArtworkModeRef = useRef<'none' | 'url' | 'canvas'>('none');
+  const artworkResolutionAttemptedKeyRef = useRef<string | null>(null);
+  const metadataArtworkReqIdRef = useRef(0);
   const cachedTrackIdsRef = useRef<Set<number>>(new Set());
   const prewarmedObjectUrlsRef = useRef<Map<number, string>>(new Map());
   const prefetchedObjectUrlsRef = useRef<Map<number, string>>(new Map());
@@ -427,12 +397,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     if (!nextItem) return;
 
-    // Warm the next track's cover image in the browser HTTP cache for instant swipe visuals
+    // Warm the next track's cover image & 512x512 MediaSession canvas artwork for instant lock-screen transitions
     const nextCoverUrl = getTrackCoverUrl(nextItem);
     if (nextCoverUrl && typeof Image !== 'undefined') {
       const preloadImg = new Image();
       preloadImg.decoding = 'async';
       preloadImg.src = nextCoverUrl;
+    }
+    if (trackHasRealArtwork(nextItem) && !getCachedCanvasArtwork(nextItem)) {
+      void resolveGuaranteedMediaArtwork(nextItem);
     }
 
     // Skip full-blob audio prefetching for streamed YouTube tracks (handled by server URL cache)
@@ -565,6 +538,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
 
     if (!track) {
       lastMetadataKeyRef.current = null;
+      lastMetadataArtworkModeRef.current = 'none';
+      artworkResolutionAttemptedKeyRef.current = null;
+      metadataArtworkReqIdRef.current += 1;
       try {
         navigator.mediaSession.metadata = null;
       } catch {
@@ -574,20 +550,58 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     }
 
     const key = getTrackMetadataKey(track);
-    if (!force && lastMetadataKeyRef.current === key && navigator.mediaSession.metadata) {
+    const cachedCanvasArtwork = getCachedCanvasArtwork(track);
+    const hasRealArt = trackHasRealArtwork(track);
+    const sameTrackAlreadyApplied =
+      lastMetadataKeyRef.current === key && Boolean(navigator.mediaSession.metadata);
+
+    if (
+      !force &&
+      sameTrackAlreadyApplied &&
+      (lastMetadataArtworkModeRef.current === 'canvas' || !cachedCanvasArtwork)
+    ) {
       return;
     }
+
+    const immediateArtwork = cachedCanvasArtwork ?? getImmediateTrackMediaArtwork(track);
 
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: track.title || 'Unknown Title',
         artist: track.artist || 'Unknown Artist',
         album: track.album || '',
-        artwork: buildTrackArtwork(track),
+        artwork: immediateArtwork,
       });
       lastMetadataKeyRef.current = key;
+      lastMetadataArtworkModeRef.current = cachedCanvasArtwork ? 'canvas' : 'url';
     } catch {
       // Ignore MediaMetadata errors on unsupported environments
+    }
+
+    // Asynchronously bake a guaranteed 512x512 & 256x256 JPEG canvas data URI (covering local
+    // library tracks behind mTLS/auth, offline IndexedDB covers, and Discover/YouTube streams)
+    // once per track and upgrade MediaMetadata without ever reverting to the default app logo.
+    if (hasRealArt && !cachedCanvasArtwork && artworkResolutionAttemptedKeyRef.current !== key) {
+      artworkResolutionAttemptedKeyRef.current = key;
+      const reqId = ++metadataArtworkReqIdRef.current;
+      void resolveGuaranteedMediaArtwork(track).then((canvasArtwork) => {
+        if (!canvasArtwork || canvasArtwork.length === 0) return;
+        if (metadataArtworkReqIdRef.current !== reqId) return;
+        const activeTrack = stateRef.current.currentTrack;
+        if (!activeTrack || getTrackMetadataKey(activeTrack) !== key) return;
+        try {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: activeTrack.title || 'Unknown Title',
+            artist: activeTrack.artist || 'Unknown Artist',
+            album: activeTrack.album || '',
+            artwork: canvasArtwork,
+          });
+          lastMetadataKeyRef.current = key;
+          lastMetadataArtworkModeRef.current = 'canvas';
+        } catch {
+          // Ignore MediaMetadata errors on unsupported environments
+        }
+      });
     }
   }, []);
 
@@ -599,19 +613,27 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     ) {
       return;
     }
-    const audioDuration = audio.duration;
-    if (!Number.isFinite(audioDuration) || audioDuration <= 0) return;
+    const rawAudioDuration = audio.duration;
+    const fallbackDuration =
+      stateRef.current.currentTrack?.duration || stateRef.current.duration || 0;
+    const resolvedDuration =
+      Number.isFinite(rawAudioDuration) && rawAudioDuration > 0
+        ? rawAudioDuration
+        : Number.isFinite(fallbackDuration) && fallbackDuration > 0
+          ? fallbackDuration
+          : 0;
+    if (resolvedDuration <= 0) return;
 
     const rawRate = audio.playbackRate;
     const playbackRate = Number.isFinite(rawRate) && rawRate > 0 ? rawRate : 1;
     const rawPos = audio.currentTime;
     const position = Number.isFinite(rawPos)
-      ? Math.max(0, Math.min(rawPos, audioDuration))
+      ? Math.max(0, Math.min(rawPos, resolvedDuration))
       : 0;
 
     try {
       navigator.mediaSession.setPositionState({
-        duration: audioDuration,
+        duration: resolvedDuration,
         playbackRate,
         position,
       });
@@ -1515,7 +1537,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       wantPlayingRef.current = true;
       stateRef.current.isPlaying = true;
       setIsPlaying(true);
-      lifecycleRef.current.activateMediaSessionForPlayback(stateRef.current.currentTrack, false);
+      lifecycleRef.current.activateMediaSessionForPlayback(stateRef.current.currentTrack, true);
       lifecycleRef.current.syncMediaSessionPositionState(audio);
     };
 
