@@ -146,6 +146,19 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_track_video_map_updated ON track_video_map(updated_at);
+
+  CREATE TABLE IF NOT EXISTS play_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    track_id INTEGER,
+    video_id TEXT NOT NULL DEFAULT '',
+    played_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_play_history_user_time ON play_history(user_id, played_at DESC);
 `);
 
 // Safe incremental migrations for existing databases
@@ -254,3 +267,78 @@ export function getJwtSecret(): string {
   }
   return getSetting('jwt_secret');
 }
+
+export interface PlayHistoryRow {
+  id: number;
+  user_id: number;
+  title: string;
+  artist: string;
+  track_id: number | null;
+  video_id: string;
+  played_at: number;
+}
+
+const insertPlayHistoryStmt = db.prepare(
+  `INSERT INTO play_history (user_id, title, artist, track_id, video_id, played_at)
+   VALUES (?, ?, ?, ?, ?, ?)`
+);
+const getRecentPlayHistoryStmt = db.prepare(
+  `SELECT id, user_id, title, artist, track_id, video_id, played_at
+   FROM play_history
+   WHERE user_id = ?
+   ORDER BY played_at DESC, id DESC
+   LIMIT ?`
+);
+const prunePlayHistoryStmt = db.prepare(
+  `DELETE FROM play_history
+   WHERE user_id = ?
+     AND id NOT IN (
+       SELECT id FROM play_history
+       WHERE user_id = ?
+       ORDER BY played_at DESC, id DESC
+       LIMIT 200
+     )`
+);
+
+export function recordPlayHistory(entry: {
+  userId: number;
+  title: string;
+  artist: string;
+  trackId?: number | null;
+  videoId?: string;
+  playedAt?: number;
+}): void {
+  const title = entry.title.trim().slice(0, 200);
+  const artist = entry.artist.trim().slice(0, 200);
+  if (!title && !artist) return;
+
+  const playedAt =
+    typeof entry.playedAt === 'number' && Number.isFinite(entry.playedAt) && entry.playedAt > 0
+      ? Math.floor(entry.playedAt)
+      : Date.now();
+  const trackId =
+    typeof entry.trackId === 'number' && Number.isInteger(entry.trackId) && entry.trackId > 0
+      ? entry.trackId
+      : null;
+  const videoId = (entry.videoId || '').trim().slice(0, 32);
+
+  insertPlayHistoryStmt.run(
+    entry.userId,
+    title || 'Unknown Title',
+    artist || 'Unknown Artist',
+    trackId,
+    videoId,
+    playedAt
+  );
+
+  // Periodically cap history to the latest 200 plays per user
+  if (Math.random() < 0.1) {
+    prunePlayHistoryStmt.run(entry.userId, entry.userId);
+  }
+}
+
+export function getRecentPlayHistory(userId: number, limit = 30): PlayHistoryRow[] {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  return getRecentPlayHistoryStmt.all(userId, safeLimit) as PlayHistoryRow[];
+}
+

@@ -55,8 +55,58 @@ const SEARCH_DEBOUNCE_MS = 450;
 const DEFAULT_DOWNLOAD_FORMAT: 'm4a' = 'm4a';
 const DEFAULT_DOWNLOAD_QUALITY: DownloadQuality = 'ultra';
 
-// Client-side session cache so tab switches back to Discover render instantaneously
-let sessionDiscoverCache: {userId: number; feed: DiscoverFeedResponse} | null = null;
+// Client-side session cache keyed by user + last-played artist so tab switches render
+// instantaneously while playing a new artist immediately invalidates & refreshes Discover.
+let sessionDiscoverCache: {
+  userId: number;
+  seedArtistKey: string;
+  feed: DiscoverFeedResponse;
+} | null = null;
+
+const GENERIC_ARTIST_LABELS = new Set([
+  '',
+  'unknown',
+  'unknown artist',
+  'youtube',
+  'various artists',
+  'various',
+  'va',
+  'none',
+  'untitled',
+]);
+
+function stripArtistLabelNoise(raw: string): string {
+  return raw
+    .trim()
+    .replace(/\s*[-–—]\s*topic$/i, '')
+    .replace(/\s+official\s*(music\s*)?(channel|video|audio)?$/i, '')
+    .replace(/vevo$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractDisplayArtist(artist: string | null | undefined, title?: string | null): string {
+  const cleaned = stripArtistLabelNoise(artist || '');
+  const norm = cleaned.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (norm && !GENERIC_ARTIST_LABELS.has(norm)) {
+    return cleaned;
+  }
+  const rawTitle = (title || '').trim();
+  const sepMatch = /^(.{2,60}?)\s+[-–—]\s+(.+)$/.exec(rawTitle);
+  if (sepMatch) {
+    const extracted = stripArtistLabelNoise(sepMatch[1]);
+    const extractedNorm = extracted.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (extractedNorm && !GENERIC_ARTIST_LABELS.has(extractedNorm)) {
+      return extracted;
+    }
+  }
+  return '';
+}
+
+function normalizeArtistSeedKey(artist: string | null | undefined, title?: string | null): string {
+  const display = extractDisplayArtist(artist, title);
+  return display.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
 
 function extractYouTubeVideoIdFromItem(item: MetadataPreviewItem): string {
   const candidate = (item.id || '').trim();
@@ -394,6 +444,7 @@ export const DiscoverPage: React.FC = () => {
   const {user, isOfflineMode} = useAuth();
   const {
     currentTrack,
+    lastPlayed,
     playTrackById,
     playTrack,
     bumpLibraryRefresh,
@@ -407,12 +458,28 @@ export const DiscoverPage: React.FC = () => {
 
   const [query, setQuery] = useState('');
 
+  const lastPlayedArtistKey = useMemo(
+    () => normalizeArtistSeedKey(lastPlayed?.artist, lastPlayed?.title),
+    [lastPlayed?.artist, lastPlayed?.title]
+  );
+
   // Personalized Discover feed + instant Album/Artist catalog drill-down stack
   const [discoverFeed, setDiscoverFeed] = useState<DiscoverFeedResponse | null>(() =>
-    user && sessionDiscoverCache?.userId === user.id ? sessionDiscoverCache.feed : null
+    user &&
+    sessionDiscoverCache?.userId === user.id &&
+    sessionDiscoverCache.seedArtistKey ===
+      normalizeArtistSeedKey(lastPlayed?.artist, lastPlayed?.title)
+      ? sessionDiscoverCache.feed
+      : null
   );
   const [discoverLoading, setDiscoverLoading] = useState<boolean>(
-    () => !(user && sessionDiscoverCache?.userId === user.id)
+    () =>
+      !(
+        user &&
+        sessionDiscoverCache?.userId === user.id &&
+        sessionDiscoverCache.seedArtistKey ===
+          normalizeArtistSeedKey(lastPlayed?.artist, lastPlayed?.title)
+      )
   );
   const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
@@ -462,20 +529,30 @@ export const DiscoverPage: React.FC = () => {
     setTimeout(() => setActionToast(null), 2800);
   }, []);
 
-  // Load personalized Discover shelves from GET /api/discover
+  const discoverRequestIdRef = useRef(0);
+  const hasLoadedDiscoverFeedRef = useRef(Boolean(discoverFeed));
+  hasLoadedDiscoverFeedRef.current = Boolean(discoverFeed);
+
+  // Load personalized Discover shelves from GET /api/discover (auto-invalidates when last-played artist changes)
   const loadDiscoverFeed = useCallback(
     async (forceRefresh = false) => {
       if (offline || !user) {
         setDiscoverLoading(false);
         return;
       }
-      if (!forceRefresh && sessionDiscoverCache?.userId === user.id) {
+      if (
+        !forceRefresh &&
+        sessionDiscoverCache?.userId === user.id &&
+        sessionDiscoverCache.seedArtistKey === lastPlayedArtistKey
+      ) {
         setDiscoverFeed(sessionDiscoverCache.feed);
         setDiscoverLoading(false);
         return;
       }
 
-      if (forceRefresh) {
+      const reqId = ++discoverRequestIdRef.current;
+
+      if (forceRefresh || hasLoadedDiscoverFeedRef.current) {
         setDiscoverRefreshing(true);
       } else {
         setDiscoverLoading(true);
@@ -483,28 +560,47 @@ export const DiscoverPage: React.FC = () => {
       setDiscoverError(null);
 
       try {
-        const endpoint = forceRefresh ? '/api/discover?refresh=1' : '/api/discover';
+        const qs = new URLSearchParams();
+        if (forceRefresh) qs.set('refresh', '1');
+        if (lastPlayed?.artist?.trim()) qs.set('seedArtist', lastPlayed.artist.trim());
+        if (lastPlayed?.title?.trim()) qs.set('seedTitle', lastPlayed.title.trim());
+        const queryString = qs.toString();
+        const endpoint = queryString ? `/api/discover?${queryString}` : '/api/discover';
+
         const data = await apiFetch<DiscoverFeedResponse>(endpoint);
-        sessionDiscoverCache = {userId: user.id, feed: data};
+        if (discoverRequestIdRef.current !== reqId) return;
+
+        sessionDiscoverCache = {
+          userId: user.id,
+          seedArtistKey: lastPlayedArtistKey,
+          feed: data,
+        };
         setDiscoverFeed(data);
         if (forceRefresh) {
           flashToast('Recommendations refreshed');
         }
       } catch (err) {
+        if (discoverRequestIdRef.current !== reqId) return;
         setDiscoverError(
           err instanceof Error ? err.message : 'Could not load Discover recommendations'
         );
       } finally {
-        setDiscoverLoading(false);
-        setDiscoverRefreshing(false);
+        if (discoverRequestIdRef.current === reqId) {
+          setDiscoverLoading(false);
+          setDiscoverRefreshing(false);
+        }
       }
     },
-    [flashToast, offline, user]
+    [flashToast, lastPlayed?.artist, lastPlayed?.title, lastPlayedArtistKey, offline, user]
   );
 
+  const loadDiscoverFeedRef = useRef(loadDiscoverFeed);
+  loadDiscoverFeedRef.current = loadDiscoverFeed;
+
+  // Trigger initial load and automatically refresh whenever the last-played artist changes
   useEffect(() => {
-    void loadDiscoverFeed(false);
-  }, [loadDiscoverFeed]);
+    void loadDiscoverFeedRef.current(false);
+  }, [lastPlayedArtistKey, offline, user?.id]);
 
   // Background prefetch the top 3 visible Discover tracks once the Discover feed loads
   const prefetchedDiscoverKeyRef = useRef<string>('');
@@ -1032,6 +1128,30 @@ export const DiscoverPage: React.FC = () => {
 
   const isCatalogDetailOpen = Boolean(isDiscoverView && activeCatalogRoute && !offline);
 
+  const discoverSubtitle = useMemo(() => {
+    const feedArtist = extractDisplayArtist(
+      discoverFeed?.lastPlayed?.artist,
+      discoverFeed?.lastPlayed?.title
+    );
+    const feedTitle = (discoverFeed?.lastPlayed?.title || '').trim();
+    const localArtist = extractDisplayArtist(lastPlayed?.artist, lastPlayed?.title);
+    const localTitle = (lastPlayed?.title || '').trim();
+
+    const activeArtist = lastPlayedArtistKey ? localArtist || feedArtist : feedArtist;
+    const activeTitle = lastPlayedArtistKey ? localTitle || feedTitle : feedTitle;
+
+    if (activeArtist && activeTitle) {
+      return `Picked from ${activeArtist} • ${activeTitle}`;
+    }
+    if (activeArtist) {
+      return `Picked from ${activeArtist}`;
+    }
+    if (discoverFeed?.basedOnLibrary && discoverFeed.seeds.length > 0) {
+      return `Picked from ${discoverFeed.seeds.join(', ')}`;
+    }
+    return 'Trending music picks';
+  }, [discoverFeed, lastPlayed?.artist, lastPlayed?.title, lastPlayedArtistKey]);
+
   return (
     <div
       className="px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto space-y-5 pb-36 md:pb-12"
@@ -1055,11 +1175,9 @@ export const DiscoverPage: React.FC = () => {
           <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
             Discover
           </h1>
-          {isDiscoverView && discoverFeed && (
+          {isDiscoverView && (discoverFeed || lastPlayedArtistKey) && (
             <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
-              {discoverFeed.basedOnLibrary && discoverFeed.seeds.length > 0
-                ? `Picked from ${discoverFeed.seeds.join(', ')}`
-                : 'Trending music picks'}
+              {discoverSubtitle}
             </p>
           )}
         </div>

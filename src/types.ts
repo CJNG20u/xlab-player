@@ -192,9 +192,23 @@ export interface DiscoverAlbumItem {
   seedArtist: string | null;
 }
 
+export interface PlayHistoryEntry {
+  title: string;
+  artist: string;
+  trackId?: number | null;
+  videoId?: string;
+  playedAt: number;
+}
+
 export interface DiscoverFeedResponse {
   seeds: string[];
   basedOnLibrary: boolean;
+  basedOnHistory?: boolean;
+  lastPlayed?: {
+    artist: string;
+    title: string;
+    playedAt?: number;
+  } | null;
   cached: boolean;
   source?: 'deezer' | 'youtube';
   generatedAt: string;

@@ -1,14 +1,17 @@
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
 import {
   apiFetch,
+  appendLocalPlayHistory,
+  getLocalPlayHistory,
   getStoredToken,
   getStreamUrl,
   getTrackCoverUrl,
   getTrackStreamUrl,
   getYouTubeVideoId,
   prefetchYouTubeStreams,
+  recordPlaybackHistory,
 } from '../lib/api';
-import type {RepeatMode, Track, TrackId} from '../types';
+import type {PlayHistoryEntry, RepeatMode, Track, TrackId} from '../types';
 import {
   getCachedTrackIds,
   getOfflineAudioBlob,
@@ -19,6 +22,7 @@ import {
 
 interface PlayerContextValue {
   currentTrack: Track | null;
+  lastPlayed: PlayHistoryEntry | null;
   queue: Track[];
   currentIndex: number;
   isPlaying: boolean;
@@ -198,6 +202,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const [youtubeSaveStates, setYoutubeSaveStates] = useState<
     Record<string, 'saving' | 'saved'>
   >({});
+  const [lastPlayed, setLastPlayed] = useState<PlayHistoryEntry | null>(
+    () => getLocalPlayHistory()[0] ?? null
+  );
 
   const currentTrack =
     currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
@@ -224,6 +231,33 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const prefetchAbortRef = useRef<AbortController | null>(null);
   const prefetchInFlightIdRef = useRef<number | null>(null);
   const loadRequestIdRef = useRef(0);
+  const lastRecordedPlayRef = useRef<{key: string; at: number} | null>(null);
+
+  const recordTrackPlay = useCallback((track: Track) => {
+    const title = (track.title || '').trim();
+    const artist = (track.artist || '').trim();
+    if (!title && !artist) return;
+
+    const now = Date.now();
+    const playKey = `${String(track.id)}::${artist.toLowerCase()}::${title.toLowerCase()}`;
+    const prev = lastRecordedPlayRef.current;
+    if (prev && prev.key === playKey && now - prev.at < 4000) {
+      return;
+    }
+    lastRecordedPlayRef.current = {key: playKey, at: now};
+
+    const entry: PlayHistoryEntry = {
+      title,
+      artist,
+      trackId: !track.isYouTubeStream && typeof track.id === 'number' ? track.id : null,
+      videoId: getYouTubeVideoId(track) || undefined,
+      playedAt: now,
+    };
+
+    appendLocalPlayHistory(entry);
+    setLastPlayed(entry);
+    recordPlaybackHistory(entry);
+  }, []);
 
   const clearVisibilityResumeTimers = useCallback(() => {
     if (visibilityResumeTimersRef.current.length > 0) {
@@ -767,6 +801,10 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         }
       }
 
+      if (!isSameLoadedTrack || options.resetIfSame) {
+        recordTrackPlay(track);
+      }
+
       setIsPlaying(true);
       setCurrentTime(0);
       setDuration(track.duration || 0);
@@ -777,6 +815,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       clearRecoveryTimer,
       clearVisibilityResumeTimers,
       endTrackTransition,
+      recordTrackPlay,
       setMediaSessionPlaybackState,
     ]
   );
@@ -1811,6 +1850,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     <PlayerContext.Provider
       value={{
         currentTrack,
+        lastPlayed,
         queue,
         currentIndex,
         isPlaying,

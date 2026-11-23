@@ -3,7 +3,7 @@ import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
 import {type AuthRequest, requireAuth, requireDownloadPermission} from '../auth.ts';
-import {db, getMusicDir} from '../db.ts';
+import {db, getMusicDir, recordPlayHistory} from '../db.ts';
 import {
   getCatalogAlbumDetail,
   getCatalogArtistDetail,
@@ -27,12 +27,64 @@ import {AUDIO_EXTENSIONS, indexSingleFile} from '../scanner.ts';
 export const downloadRouter = Router();
 export const discoverRouter = Router();
 
+discoverRouter.post('/discover/history', requireAuth, (req: AuthRequest, res) => {
+  const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const rawArtist = typeof req.body?.artist === 'string' ? req.body.artist.trim() : '';
+  if (!rawTitle && !rawArtist) {
+    res.status(400).json({error: 'Track title or artist is required'});
+    return;
+  }
+
+  const rawTrackId = req.body?.trackId;
+  const trackId =
+    typeof rawTrackId === 'number' && Number.isInteger(rawTrackId) && rawTrackId > 0
+      ? rawTrackId
+      : null;
+
+  const rawVideoId = typeof req.body?.videoId === 'string' ? req.body.videoId.trim() : '';
+  const videoId = /^[A-Za-z0-9_-]{6,20}$/.test(rawVideoId) ? rawVideoId : '';
+
+  const now = Date.now();
+  const rawPlayedAt = req.body?.playedAt;
+  const playedAt =
+    typeof rawPlayedAt === 'number' &&
+    Number.isFinite(rawPlayedAt) &&
+    rawPlayedAt > 0 &&
+    rawPlayedAt <= now + 60_000
+      ? Math.floor(rawPlayedAt)
+      : now;
+
+  try {
+    recordPlayHistory({
+      userId: req.user!.id,
+      title: rawTitle.slice(0, 200),
+      artist: rawArtist.slice(0, 200),
+      trackId,
+      videoId,
+      playedAt,
+    });
+    res.status(201).json({ok: true});
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to record playback history';
+    console.error('[discover-history]', msg);
+    res.status(500).json({error: 'Failed to record playback history'});
+  }
+});
+
 discoverRouter.get('/discover', requireAuth, async (req: AuthRequest, res) => {
   try {
     const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
     const forceRefresh = refreshParam === '1' || refreshParam === 'true';
-    const feed = await getCatalogDiscoverFeed(req.user!.id, {forceRefresh});
-    res.setHeader('Cache-Control', 'private, max-age=300');
+    const seedArtist =
+      typeof req.query.seedArtist === 'string' ? req.query.seedArtist.trim().slice(0, 150) : '';
+    const seedTitle =
+      typeof req.query.seedTitle === 'string' ? req.query.seedTitle.trim().slice(0, 200) : '';
+    const feed = await getCatalogDiscoverFeed(req.user!.id, {
+      forceRefresh,
+      seedArtist: seedArtist || undefined,
+      seedTitle: seedTitle || undefined,
+    });
+    res.setHeader('Cache-Control', 'private, no-cache');
     res.json(feed);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to load Discover recommendations';

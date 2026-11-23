@@ -1,6 +1,8 @@
-import type {LrcLine, Track} from '../types';
+import type {LrcLine, PlayHistoryEntry, Track} from '../types';
 
 const TOKEN_STORAGE_KEY = 'xlabplayer_token';
+const PLAY_HISTORY_STORAGE_KEY = 'xlabplayer_play_history_v1';
+const MAX_LOCAL_PLAY_HISTORY = 50;
 
 export function getStoredToken(): string | null {
   try {
@@ -172,6 +174,62 @@ export function prefetchYouTubeStreams(items: StreamPrefetchTarget[]): void {
     priority: 'low',
   } as RequestInit).catch(() => {
     // Best-effort background warmup
+  });
+}
+
+export function getLocalPlayHistory(): PlayHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(PLAY_HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is PlayHistoryEntry =>
+        Boolean(item) &&
+        typeof item === 'object' &&
+        (typeof item.title === 'string' || typeof item.artist === 'string') &&
+        typeof item.playedAt === 'number'
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function appendLocalPlayHistory(entry: PlayHistoryEntry): PlayHistoryEntry[] {
+  const existing = getLocalPlayHistory();
+  const next = [entry, ...existing].slice(0, MAX_LOCAL_PLAY_HISTORY);
+  try {
+    localStorage.setItem(PLAY_HISTORY_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota / private browsing errors
+  }
+  return next;
+}
+
+export function recordPlaybackHistory(entry: PlayHistoryEntry): void {
+  if (!entry.title.trim() && !entry.artist.trim()) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+  const token = getStoredToken();
+  const headers: Record<string, string> = {'Content-Type': 'application/json'};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  void fetch('/api/discover/history', {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({
+      title: entry.title,
+      artist: entry.artist,
+      trackId: entry.trackId ?? null,
+      videoId: entry.videoId || '',
+      playedAt: entry.playedAt,
+    }),
+    keepalive: true,
+  }).catch(() => {
+    // Best-effort server history sync; localStorage already holds the entry
   });
 }
 
