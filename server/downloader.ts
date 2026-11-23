@@ -110,25 +110,9 @@ function resolveYtdlpInvocation(forcePythonModule = false): YtdlpInvocation {
     return {cmd: 'python3', prefixArgs: ['-u', '-m', 'yt_dlp'], env};
   }
   const ytdlpPath = getYtdlpPath();
-  // If the configured yt-dlp path is a Python zipapp/script (e.g. /usr/local/bin/yt-dlp),
-  // invoke via `python3 -u <path>` for unbuffered isolated execution matching `python -u -m yt_dlp`.
-  try {
-    if (path.isAbsolute(ytdlpPath) && fs.existsSync(ytdlpPath)) {
-      const fd = fs.openSync(ytdlpPath, 'r');
-      try {
-        const header = Buffer.alloc(64);
-        const bytesRead = fs.readSync(fd, header, 0, 64, 0);
-        const shebang = header.subarray(0, bytesRead).toString('utf-8');
-        if (shebang.startsWith('#!') && /python/i.test(shebang.split('\n')[0] || '')) {
-          return {cmd: 'python3', prefixArgs: ['-u', ytdlpPath], env};
-        }
-      } finally {
-        fs.closeSync(fd);
-      }
-    }
-  } catch {
-    // Fall back to direct execution below
-  }
+  // Execute the configured yt-dlp binary/script directly with PYTHONUNBUFFERED=1 so
+  // virtualenv shebangs, zipapps, and standalone binaries all use their intended runtime
+  // while keeping stdout/stderr completely unbuffered.
   return {cmd: ytdlpPath, prefixArgs: [], env};
 }
 
@@ -1616,7 +1600,6 @@ const YT_STREAM_CACHE_TTL_MS = 30 * 60 * 1000;
 const YT_STREAM_CACHE_MAX_ENTRIES = 500;
 const YT_THUMB_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
-const YT_VISITOR_DATA_TTL_MS = 6 * 60 * 60 * 1000;
 
 const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
   '.googlevideo.com',
@@ -1628,8 +1611,9 @@ const ALLOWED_YT_MEDIA_HOST_SUFFIXES = [
 export interface ResolvedYouTubeAudioStream {
   url: string;
   headers: Record<string, string>;
-  strategy: 'fast-path' | 'fallback' | 'fallback-cookies';
+  strategy: 'fast-path' | 'tv-fallback' | 'fallback' | 'fallback-cookies';
   thumbnailUrl: string;
+  contentType: string;
 }
 
 const HOP_BY_HOP_AND_EXCLUDED_HEADERS = new Set([
@@ -1671,8 +1655,6 @@ const ytStreamUrlCache = new Map<
 >();
 const ytStreamInFlight = new Map<string, Promise<ResolvedYouTubeAudioStream>>();
 const ytThumbnailCache = new Map<string, {url: string; expiresAt: number}>();
-let ytVisitorDataCache: {value: string; expiresAt: number} | null = null;
-let ytVisitorDataInFlight: Promise<string | null> | null = null;
 
 export function isValidYouTubeVideoId(videoId: string): boolean {
   return YOUTUBE_VIDEO_ID_RE.test(videoId);
@@ -1727,55 +1709,6 @@ export function getCachedYouTubeThumbnailUrl(videoId: string): string | null {
   return entry.url;
 }
 
-async function getYouTubeVisitorData(): Promise<string | null> {
-  const now = Date.now();
-  if (ytVisitorDataCache && ytVisitorDataCache.expiresAt > now) {
-    return ytVisitorDataCache.value;
-  }
-  if (ytVisitorDataInFlight) {
-    return ytVisitorDataInFlight;
-  }
-
-  ytVisitorDataInFlight = (async (): Promise<string | null> => {
-    try {
-      const resp = await fetch('https://www.youtube.com/sw.js_data', {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          Accept: 'application/json, text/plain, */*',
-        },
-        signal: AbortSignal.timeout(4000),
-      });
-      if (!resp.ok) return null;
-      const text = (await resp.text()).replace(/^\)\]\}'\s*/, '');
-      const parsed = JSON.parse(text) as unknown;
-      const candidate =
-        Array.isArray(parsed) &&
-        Array.isArray(parsed[0]) &&
-        Array.isArray(parsed[0][2]) &&
-        Array.isArray(parsed[0][2][0]) &&
-        Array.isArray(parsed[0][2][0][0]) &&
-        typeof parsed[0][2][0][0][13] === 'string'
-          ? parsed[0][2][0][0][13].trim()
-          : '';
-      if (candidate && /^[A-Za-z0-9_%-]{10,120}$/.test(candidate)) {
-        ytVisitorDataCache = {
-          value: candidate,
-          expiresAt: Date.now() + YT_VISITOR_DATA_TTL_MS,
-        };
-        return candidate;
-      }
-      return null;
-    } catch {
-      return null;
-    } finally {
-      ytVisitorDataInFlight = null;
-    }
-  })();
-
-  return ytVisitorDataInFlight;
-}
-
 function pruneExpiredYtStreamCache(now: number): void {
   for (const [key, entry] of ytStreamUrlCache.entries()) {
     if (entry.expiresAt <= now) {
@@ -1803,6 +1736,134 @@ function isMuxedVideoFormat(vcodec: unknown): boolean {
   return norm.length > 0 && norm !== 'none';
 }
 
+function isManifestFormat(protocol: unknown, url: string): boolean {
+  const proto = typeof protocol === 'string' ? protocol.trim().toLowerCase() : '';
+  if (proto.includes('m3u8') || proto.includes('dash') || proto.includes('ism')) {
+    return true;
+  }
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    if (pathname.endsWith('.m3u8') || pathname.endsWith('.mpd')) return true;
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+function guessAudioContentType(ext: unknown): string {
+  const normalized = typeof ext === 'string' ? ext.trim().toLowerCase() : '';
+  if (normalized === 'webm') return 'audio/webm';
+  if (normalized === 'opus' || normalized === 'ogg') return 'audio/ogg';
+  if (normalized === 'mp3') return 'audio/mpeg';
+  if (normalized === 'aac') return 'audio/aac';
+  return 'audio/mp4';
+}
+
+interface RawYtdlpFormat {
+  url?: unknown;
+  vcodec?: unknown;
+  acodec?: unknown;
+  protocol?: unknown;
+  ext?: unknown;
+  abr?: unknown;
+  tbr?: unknown;
+  http_headers?: unknown;
+}
+
+function pickDirectAudioFormat(
+  data: Record<string, unknown> & {
+    url?: unknown;
+    vcodec?: unknown;
+    acodec?: unknown;
+    protocol?: unknown;
+    ext?: unknown;
+    http_headers?: unknown;
+    requested_formats?: RawYtdlpFormat[];
+    formats?: RawYtdlpFormat[];
+  }
+): RawYtdlpFormat | null {
+  const isUsableDirectAudio = (fmt: RawYtdlpFormat | null | undefined): boolean => {
+    if (!fmt || typeof fmt.url !== 'string') return false;
+    const u = fmt.url.trim();
+    if (!u || !isAllowedYouTubeMediaUrl(u)) return false;
+    if (isMuxedVideoFormat(fmt.vcodec)) return false;
+    if (isManifestFormat(fmt.protocol, u)) return false;
+    if (typeof fmt.acodec === 'string' && fmt.acodec.trim().toLowerCase() === 'none') return false;
+    return true;
+  };
+
+  if (isUsableDirectAudio(data)) {
+    return data;
+  }
+
+  if (Array.isArray(data.requested_formats)) {
+    const match = data.requested_formats.find((f) => isUsableDirectAudio(f));
+    if (match) return match;
+  }
+
+  if (Array.isArray(data.formats)) {
+    const candidates = data.formats.filter((f) => isUsableDirectAudio(f));
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => {
+        const aM4a = String(a.ext || '').toLowerCase() === 'm4a' ? 1 : 0;
+        const bM4a = String(b.ext || '').toLowerCase() === 'm4a' ? 1 : 0;
+        if (aM4a !== bM4a) return bM4a - aM4a;
+        const aBitrate = Number(a.abr || a.tbr || 0);
+        const bBitrate = Number(b.abr || b.tbr || 0);
+        return bBitrate - aBitrate;
+      });
+      return candidates[0];
+    }
+  }
+
+  return null;
+}
+
+async function probeAudioStreamUrl(
+  streamUrl: string,
+  streamHeaders: Record<string, string>
+): Promise<{ok: boolean; status: number; contentType: string}> {
+  try {
+    const headers: Record<string, string> = {
+      ...streamHeaders,
+      Range: 'bytes=0-1',
+    };
+    if (!Object.keys(headers).some((k) => k.toLowerCase() === 'accept')) {
+      headers.Accept = '*/*';
+    }
+    const resp = await fetch(streamUrl, {
+      method: 'GET',
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(6000),
+    });
+    const finalUrl = resp.url || streamUrl;
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    try {
+      await resp.body?.cancel();
+    } catch {
+      // ignore
+    }
+    if (!isAllowedYouTubeMediaUrl(finalUrl)) {
+      return {ok: false, status: resp.status, contentType: ct};
+    }
+    if (resp.status !== 200 && resp.status !== 206) {
+      return {ok: false, status: resp.status, contentType: ct};
+    }
+    if (
+      ct.includes('text/html') ||
+      ct.includes('mpegurl') ||
+      ct.includes('dash+xml') ||
+      ct.includes('application/json')
+    ) {
+      return {ok: false, status: 415, contentType: ct};
+    }
+    return {ok: true, status: resp.status, contentType: ct};
+  } catch {
+    return {ok: false, status: 0, contentType: ''};
+  }
+}
+
 export async function resolveYouTubeAudioStreamUrl(
   videoId: string,
   options: {forceRefresh?: boolean; skipFastPath?: boolean} = {}
@@ -1820,6 +1881,7 @@ export async function resolveYouTubeAudioStreamUrl(
         headers: {...cached.headers},
         strategy: cached.strategy,
         thumbnailUrl: cached.thumbnailUrl,
+        contentType: cached.contentType,
         fromCache: true,
       };
     }
@@ -1834,9 +1896,11 @@ export async function resolveYouTubeAudioStreamUrl(
     }
   }
 
+  const DIRECT_AUDIO_FORMAT_EXPR =
+    'bestaudio[ext=m4a][vcodec=none][protocol=https]/bestaudio[acodec!=none][vcodec=none][protocol=https]/bestaudio[ext=m4a][vcodec=none]/bestaudio[acodec!=none][vcodec=none]';
+
   const runExtractionAttempt = async (
-    extractorArgs: string,
-    formatExpr: string,
+    extractorArgs: string | null,
     cookiePath: string | null,
     strategy: ResolvedYouTubeAudioStream['strategy'],
     timeoutMs: number
@@ -1850,11 +1914,12 @@ export async function resolveYouTubeAudioStreamUrl(
       '--js-runtimes',
       'node',
       '--force-ipv4',
-      '--extractor-args',
-      extractorArgs,
       '-f',
-      formatExpr,
+      DIRECT_AUDIO_FORMAT_EXPR,
     ];
+    if (extractorArgs) {
+      args.push('--extractor-args', extractorArgs);
+    }
     if (getSetting('ytdlp_remote_components', 'true') === 'true') {
       args.push('--remote-components', 'ejs:github');
     }
@@ -1865,7 +1930,7 @@ export async function resolveYouTubeAudioStreamUrl(
 
     const {stdout} = await execYtdlp(args, {
       timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: 12 * 1024 * 1024,
     });
 
     const trimmed = stdout.trim();
@@ -1876,8 +1941,12 @@ export async function resolveYouTubeAudioStreamUrl(
     const data = JSON.parse(trimmed.slice(jsonStart)) as Record<string, unknown> & {
       url?: unknown;
       vcodec?: unknown;
+      acodec?: unknown;
+      protocol?: unknown;
+      ext?: unknown;
       http_headers?: unknown;
-      requested_formats?: Array<{url?: unknown; vcodec?: unknown; http_headers?: unknown}>;
+      requested_formats?: RawYtdlpFormat[];
+      formats?: RawYtdlpFormat[];
     };
 
     // Capture & cache thumbnail URL during stream extraction so cover art survives stream expiry
@@ -1886,87 +1955,102 @@ export async function resolveYouTubeAudioStreamUrl(
       cacheYouTubeThumbnailUrl(videoId, extractedThumb);
     }
 
-    const primaryFormat =
-      typeof data.url === 'string' && data.url.trim()
-        ? data
-        : Array.isArray(data.requested_formats) && data.requested_formats.length > 0
-          ? data.requested_formats.find((f) => !isMuxedVideoFormat(f.vcodec)) ||
-            data.requested_formats[0]
-          : null;
-
-    if (!primaryFormat) {
-      throw new Error('No audio format returned by yt-dlp');
+    const primaryFormat = pickDirectAudioFormat(data);
+    if (!primaryFormat || typeof primaryFormat.url !== 'string') {
+      throw new Error('No direct HTTPS audio-only format returned by yt-dlp');
     }
 
-    // Explicitly reject muxed video formats (vcodec != "none")
-    if (isMuxedVideoFormat(primaryFormat.vcodec)) {
-      throw new Error(`Rejected muxed video format (vcodec=${String(primaryFormat.vcodec)})`);
-    }
-
-    const directUrl = typeof primaryFormat.url === 'string' ? primaryFormat.url.trim() : '';
-    if (!directUrl || !isAllowedYouTubeMediaUrl(directUrl)) {
-      throw new Error('Could not resolve a valid YouTube audio stream URL');
-    }
-
+    const directUrl = primaryFormat.url.trim();
     const headers = sanitizeStreamHeaders(primaryFormat.http_headers ?? data.http_headers);
+
+    // Live Range probe guarantees Node's fetch() can stream this URL without a 403/502
+    const probe = await probeAudioStreamUrl(directUrl, headers);
+    if (!probe.ok) {
+      throw new Error(`Upstream probe rejected (${probe.status || 'network-error'})`);
+    }
+
     return {
       url: directUrl,
       headers,
       strategy,
       thumbnailUrl: extractedThumb || getCachedYouTubeThumbnailUrl(videoId) || '',
+      contentType: probe.contentType || guessAudioContentType(primaryFormat.ext),
     };
   };
 
   const resolvePromise = (async (): Promise<ResolvedYouTubeAudioStream> => {
     let tempCookiePath: string | null = null;
     try {
+      const configuredClient = getSetting('ytdlp_player_client', '').trim();
+      const strategies: Array<{
+        strategy: ResolvedYouTubeAudioStream['strategy'];
+        extractorArgs: string | null;
+        useCookies: boolean;
+        timeoutMs: number;
+      }> = [];
+
+      if (!options.skipFastPath) {
+        // Attempt 1 (Fast Path): android_vr anonymous (fast, direct audio, no PO token required)
+        strategies.push({
+          strategy: 'fast-path',
+          extractorArgs: 'youtube:player_client=android_vr',
+          useCookies: false,
+          timeoutMs: 14000,
+        });
+      }
+
+      // Attempt 2: tv + android_vr (tv client bypasses web PO-token 403s reliably)
+      const tvClients =
+        configuredClient && configuredClient !== 'android_vr'
+          ? `${configuredClient},tv,android_vr`
+          : 'tv,android_vr';
+      strategies.push({
+        strategy: 'tv-fallback',
+        extractorArgs: `youtube:player_client=${tvClients}`,
+        useCookies: false,
+        timeoutMs: 16000,
+      });
+
+      // Attempt 3: mobile/default multi-client anonymous fallback
+      strategies.push({
+        strategy: 'fallback',
+        extractorArgs: 'youtube:player_client=ios,mweb,default',
+        useCookies: false,
+        timeoutMs: 18000,
+      });
+
+      // Attempt 4: cookies.txt fallback when configured
+      if (hasConfiguredCookies()) {
+        strategies.push({
+          strategy: 'fallback-cookies',
+          extractorArgs: 'youtube:player_client=tv,default,mweb',
+          useCookies: true,
+          timeoutMs: 20000,
+        });
+      }
+
       let resolved: ResolvedYouTubeAudioStream | null = null;
       let lastError: unknown = null;
 
-      // Attempt 1 (Fast Path): player_client=android_vr + cached visitor_data, rejecting muxed formats
-      if (!options.skipFastPath) {
+      for (const step of strategies) {
         try {
-          const visitorData = await getYouTubeVisitorData();
-          const fastExtractorArgs = visitorData
-            ? `youtube:player_client=android_vr;visitor_data=${visitorData}`
-            : 'youtube:player_client=android_vr';
+          let cookieArg: string | null = null;
+          if (step.useCookies) {
+            tempCookiePath = tempCookiePath || createTempCookiesCopy();
+            cookieArg = tempCookiePath;
+          }
           resolved = await runExtractionAttempt(
-            fastExtractorArgs,
-            'bestaudio[acodec!=none][vcodec=none]/bestaudio[vcodec=none]',
-            null,
-            'fast-path',
-            18000
+            step.extractorArgs,
+            cookieArg,
+            step.strategy,
+            step.timeoutMs
           );
+          break;
         } catch (err) {
           lastError = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[yt-stream-resolve] ${videoId} ${step.strategy} failed:`, msg.slice(0, 220));
         }
-      }
-
-      // Attempt 2 (Fallback): player_client=default,android,ios anonymously
-      if (!resolved) {
-        try {
-          resolved = await runExtractionAttempt(
-            'youtube:player_client=default,android,ios',
-            'bestaudio[acodec!=none][vcodec=none]/bestaudio[vcodec=none]',
-            null,
-            'fallback',
-            28000
-          );
-        } catch (err) {
-          lastError = err;
-        }
-      }
-
-      // Attempt 3 (Cookie Fallback): player_client=default,android,ios with cookies.txt if configured
-      if (!resolved && hasConfiguredCookies()) {
-        tempCookiePath = createTempCookiesCopy();
-        resolved = await runExtractionAttempt(
-          'youtube:player_client=default,android,ios',
-          'bestaudio[acodec!=none][vcodec=none]/bestaudio[vcodec=none]',
-          tempCookiePath,
-          'fallback-cookies',
-          30000
-        );
       }
 
       if (!resolved) {
@@ -2005,6 +2089,79 @@ export async function resolveYouTubeAudioStreamUrl(
       ytStreamInFlight.delete(videoId);
     }
   }
+}
+
+/**
+ * Live audio pipe fallback using yt-dlp directly when all direct googlevideo URLs
+ * are rejected (e.g. SABR/HLS-only or strict IP-bound streams).
+ */
+export function spawnDirectYouTubeAudioStream(videoId: string): {
+  stream: NodeJS.ReadableStream;
+  cleanup: () => void;
+  getStderr: () => string;
+} {
+  if (!isValidYouTubeVideoId(videoId)) {
+    throw new Error('Invalid YouTube video ID');
+  }
+  const invocation = resolveYtdlpInvocation(false);
+  const tempCookiePath = createTempCookiesCopy();
+  const args = [
+    ...invocation.prefixArgs,
+    '-f',
+    'bestaudio[ext=m4a]/bestaudio[vcodec=none]/bestaudio',
+    '--no-playlist',
+    '--no-warnings',
+    '--quiet',
+    '--js-runtimes',
+    'node',
+    '--force-ipv4',
+    '--extractor-args',
+    'youtube:player_client=tv,android_vr,default',
+  ];
+  if (getSetting('ytdlp_remote_components', 'true') === 'true') {
+    args.push('--remote-components', 'ejs:github');
+  }
+  if (tempCookiePath) {
+    args.push('--cookies', tempCookiePath);
+  }
+  args.push('-o', '-', '--', `https://www.youtube.com/watch?v=${videoId}`);
+
+  const proc = spawn(invocation.cmd, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: invocation.env,
+  });
+
+  let stderrBuf = '';
+  proc.stderr.on('data', (chunk: Buffer) => {
+    stderrBuf = (stderrBuf + chunk.toString('utf-8')).slice(-1200);
+  });
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      if (!proc.killed) proc.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+    if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+      try {
+        fs.unlinkSync(tempCookiePath);
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  proc.on('exit', cleanup);
+  proc.on('error', cleanup);
+
+  return {
+    stream: proc.stdout,
+    cleanup,
+    getStderr: () => stderrBuf.trim(),
+  };
 }
 
 // ---------------------------------------------------------------------------

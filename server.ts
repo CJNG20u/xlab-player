@@ -14,6 +14,7 @@ import {
   isAllowedYouTubeMediaUrl,
   isValidYouTubeVideoId,
   resolveYouTubeAudioStreamUrl,
+  spawnDirectYouTubeAudioStream,
 } from './server/downloader.ts';
 import {adminRouter} from './server/routes/adminRoutes.ts';
 import {authRouter} from './server/routes/authRoutes.ts';
@@ -158,38 +159,116 @@ async function startServer() {
       if (!hasAccept) {
         headers.Accept = '*/*';
       }
-      if (safeRange) {
+      if (isHead) {
+        // googlevideo.com frequently rejects HEAD with 403; probe total size via 1-byte GET Range instead.
+        headers.Range = 'bytes=0-0';
+      } else if (safeRange) {
         headers.Range = safeRange;
       }
       return fetch(streamUrl, {
-        method: isHead ? 'HEAD' : 'GET',
+        method: 'GET',
         headers,
         signal: abortController.signal,
         redirect: 'follow',
       });
     };
 
+    const pipeDirectFallback = (fallbackReason: string): boolean => {
+      if (isHead || res.headersSent || abortController.signal.aborted) {
+        return false;
+      }
+      console.warn(`[yt-stream] ${videoId} using direct yt-dlp audio pipe fallback (${fallbackReason})`);
+      const {stream, cleanup, getStderr} = spawnDirectYouTubeAudioStream(videoId);
+      let started = false;
+
+      res.on('close', cleanup);
+
+      stream.on('data', (chunk: Buffer) => {
+        if (!started) {
+          started = true;
+          res.status(200);
+          res.setHeader('Content-Type', 'audio/mp4');
+          res.setHeader('Cache-Control', 'no-store');
+        }
+        if (!res.writableEnded && !res.destroyed) {
+          if (!res.write(chunk)) {
+            stream.pause();
+            res.once('drain', () => {
+              if (!res.destroyed && !res.writableEnded) {
+                stream.resume();
+              }
+            });
+          }
+        }
+      });
+
+      stream.on('end', () => {
+        cleanup();
+        if (!started) {
+          const detail = getStderr() || fallbackReason;
+          console.error('[yt-stream]', videoId, 'direct-pipe-empty:', detail);
+          if (!res.headersSent) {
+            res.status(502).json({error: `Could not stream YouTube audio: ${detail.slice(0, 220)}`});
+          }
+          return;
+        }
+        if (!res.writableEnded) {
+          res.end();
+        }
+      });
+
+      stream.on('error', (pipeErr) => {
+        cleanup();
+        console.error('[yt-stream]', videoId, 'direct-pipe-error:', pipeErr.message);
+        if (!res.headersSent) {
+          res.status(502).json({error: 'Failed to stream YouTube audio'});
+        } else if (!res.destroyed) {
+          res.destroy();
+        }
+      });
+
+      return true;
+    };
+
     try {
-      let resolved = await resolveYouTubeAudioStreamUrl(videoId);
+      let resolved: Awaited<ReturnType<typeof resolveYouTubeAudioStreamUrl>>;
+      try {
+        resolved = await resolveYouTubeAudioStreamUrl(videoId);
+      } catch (resolveErr) {
+        if (abortController.signal.aborted) {
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        const reason = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+        if (pipeDirectFallback(reason)) {
+          return;
+        }
+        throw resolveErr;
+      }
+
       let upstream = await fetchUpstream(resolved.url, resolved.headers);
 
-      // If a cached signed URL expired OR the android_vr fast-path was rejected with 403/410,
-      // transparently fall back to player_client=default,android,ios (+ optional cookies).
-      if (
-        (upstream.status === 403 || upstream.status === 410) &&
-        (resolved.fromCache || resolved.strategy === 'fast-path')
-      ) {
+      // If a cached signed URL expired OR was rejected with 403/410, force a fresh probed resolution
+      if (upstream.status === 403 || upstream.status === 410) {
         try {
           await upstream.body?.cancel();
         } catch {
           // ignore
         }
         invalidateYouTubeAudioStreamCache(videoId);
-        resolved = await resolveYouTubeAudioStreamUrl(videoId, {
-          forceRefresh: true,
-          skipFastPath: true,
-        });
-        upstream = await fetchUpstream(resolved.url, resolved.headers);
+        try {
+          resolved = await resolveYouTubeAudioStreamUrl(videoId, {
+            forceRefresh: true,
+            skipFastPath: resolved.strategy === 'fast-path',
+          });
+          upstream = await fetchUpstream(resolved.url, resolved.headers);
+        } catch (retryErr) {
+          const reason = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          if (pipeDirectFallback(reason)) {
+            return;
+          }
+          throw retryErr;
+        }
       }
 
       // Re-verify final upstream host after any redirects
@@ -205,22 +284,47 @@ async function startServer() {
       }
 
       if (!upstream.ok && upstream.status !== 206 && upstream.status !== 416) {
+        const failedStatus = upstream.status;
         try {
           await upstream.body?.cancel();
         } catch {
           // ignore
         }
-        console.error('[yt-stream]', videoId, upstream.status);
-        res.status(upstream.status === 404 ? 404 : 502).json({
-          error: `Upstream YouTube stream returned HTTP ${upstream.status}`,
+        if (failedStatus !== 404 && pipeDirectFallback(`upstream HTTP ${failedStatus}`)) {
+          return;
+        }
+        console.error('[yt-stream]', videoId, failedStatus);
+        res.status(failedStatus === 404 ? 404 : 502).json({
+          error: `Upstream YouTube stream returned HTTP ${failedStatus}`,
         });
         return;
       }
 
-      const contentType = upstream.headers.get('content-type') || 'audio/mp4';
+      const contentType = upstream.headers.get('content-type') || resolved.contentType || 'audio/mp4';
       const contentRange = upstream.headers.get('content-range');
       const contentLength = upstream.headers.get('content-length');
       const acceptRanges = upstream.headers.get('accept-ranges') || 'bytes';
+
+      if (isHead) {
+        try {
+          await upstream.body?.cancel();
+        } catch {
+          // ignore
+        }
+        const totalMatch = contentRange?.match(/\/(\d+)$/);
+        res.status(200);
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Accept-Ranges', acceptRanges);
+        res.setHeader('Vary', 'Range');
+        res.setHeader('Cache-Control', 'private, max-age=1800');
+        if (totalMatch?.[1]) {
+          res.setHeader('Content-Length', totalMatch[1]);
+        } else if (contentLength) {
+          res.setHeader('Content-Length', contentLength);
+        }
+        res.end();
+        return;
+      }
 
       res.status(upstream.status);
       res.setHeader('Content-Type', contentType);
@@ -234,7 +338,7 @@ async function startServer() {
         res.setHeader('Content-Length', contentLength);
       }
 
-      if (isHead || !upstream.body) {
+      if (!upstream.body) {
         res.end();
         return;
       }
