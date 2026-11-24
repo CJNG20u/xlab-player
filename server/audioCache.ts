@@ -1117,7 +1117,6 @@ async function streamGrowingPartFile(
     fd: null,
     openedPath: null,
   };
-  const buf = Buffer.allocUnsafe(STREAM_READ_CHUNK_BYTES);
   let cursor = start;
 
   const ensureOpenHandle = async (): Promise<fs.promises.FileHandle | null> => {
@@ -1159,10 +1158,11 @@ async function streamGrowingPartFile(
             const handle = await ensureOpenHandle();
             if (!handle) break;
             const remaining = end - cursor + 1;
-            const toRead = Math.min(buf.length, remaining);
-            const {bytesRead} = await handle.read(buf, 0, toRead, cursor);
+            const toRead = Math.min(STREAM_READ_CHUNK_BYTES, remaining);
+            const chunk = Buffer.allocUnsafe(toRead);
+            const {bytesRead} = await handle.read(chunk, 0, toRead, cursor);
             if (bytesRead <= 0) break;
-            const ok = await writeChunkWithBackpressure(res, buf.subarray(0, bytesRead), signal);
+            const ok = await writeChunkWithBackpressure(res, chunk.subarray(0, bytesRead), signal);
             if (!ok) break;
             cursor += bytesRead;
             continue;
@@ -1181,20 +1181,21 @@ async function streamGrowingPartFile(
         continue;
       }
 
-      const readableBytes = Math.min(buf.length, end - cursor + 1, availableEnd - cursor);
+      const readableBytes = Math.min(STREAM_READ_CHUNK_BYTES, end - cursor + 1, availableEnd - cursor);
       if (readableBytes <= 0) {
         await waitForMoreBytes(fill, cursor + 1, signal);
         continue;
       }
 
-      const {bytesRead} = await handle.read(buf, 0, readableBytes, cursor);
+      const chunk = Buffer.allocUnsafe(readableBytes);
+      const {bytesRead} = await handle.read(chunk, 0, readableBytes, cursor);
       if (bytesRead <= 0) {
         if (fill.done) break;
         await waitForMoreBytes(fill, cursor + 1, signal);
         continue;
       }
 
-      const ok = await writeChunkWithBackpressure(res, buf.subarray(0, bytesRead), signal);
+      const ok = await writeChunkWithBackpressure(res, chunk.subarray(0, bytesRead), signal);
       if (!ok) break;
       cursor += bytesRead;
     }
