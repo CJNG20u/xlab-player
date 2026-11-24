@@ -2069,6 +2069,12 @@ export const SettingsPage: React.FC = () => {
                 if (item.type === 'tap') {
                   return `${item.timestamp}  [tap] track=${item.track ?? '-'}  warmth=${item.warmth}  ms=${item.msToPlaying ?? '-'}  plat=${item.platform}${item.error ? `  err=${item.error}` : ''}`;
                 }
+                if (item.type === 'media-error') {
+                  return `${item.timestamp}  [media-error] track=${item.track ?? '-'}  code=${item.code ?? '-'}  t=${item.currentTime}s  rs=${item.readyState} ns=${item.networkState}  recovery=${item.recovery}  plat=${item.platform}${item.message ? `  msg=${item.message}` : ''}`;
+                }
+                if (item.type === 'media-recovered') {
+                  return `${item.timestamp}  [media-recovered] track=${item.track ?? '-'}  attempt=${item.attempt}  t=${item.currentTime}s  ms=${item.msToRecover}  plat=${item.platform}`;
+                }
                 const hiddenFor =
                   item.type === 'visible' ? `  hiddenFor=${item.secondsSinceHidden ?? '-'}s` : '';
                 return `${item.timestamp}  [${item.type}] track=${item.track ?? '-'}  paused=${item.paused}  t=${item.currentTime}s  remQ=${item.remainingQueue}${hiddenFor}  lock=${item.hasWebLock}  as=${item.audioSessionState ?? '-'}  plat=${item.platform}`;

@@ -42,10 +42,35 @@ export interface TapDiagnosticEntry {
   platform: PlaybackPlatform;
 }
 
+export interface MediaErrorDiagnosticEntry {
+  type: 'media-error';
+  timestamp: string;
+  track: string | null;
+  code: number | null;
+  message: string | null;
+  currentTime: number;
+  readyState: number;
+  networkState: number;
+  recovery: string;
+  platform: PlaybackPlatform;
+}
+
+export interface MediaRecoveredDiagnosticEntry {
+  type: 'media-recovered';
+  timestamp: string;
+  track: string | null;
+  attempt: number;
+  currentTime: number;
+  msToRecover: number;
+  platform: PlaybackPlatform;
+}
+
 export type PlaybackDiagnosticEntry =
   | TransitionDiagnosticEntry
   | LifecycleDiagnosticEntry
-  | TapDiagnosticEntry;
+  | TapDiagnosticEntry
+  | MediaErrorDiagnosticEntry
+  | MediaRecoveredDiagnosticEntry;
 
 export type TransitionDiagnosticInput = Omit<
   TransitionDiagnosticEntry,
@@ -61,6 +86,15 @@ export type LifecycleDiagnosticInput = Omit<
 
 export type TapDiagnosticInput = Omit<TapDiagnosticEntry, 'type' | 'platform'> &
   Partial<Pick<TapDiagnosticEntry, 'type' | 'platform'>>;
+
+export type MediaErrorDiagnosticInput = Omit<MediaErrorDiagnosticEntry, 'type' | 'platform'> &
+  Partial<Pick<MediaErrorDiagnosticEntry, 'type' | 'platform'>>;
+
+export type MediaRecoveredDiagnosticInput = Omit<
+  MediaRecoveredDiagnosticEntry,
+  'type' | 'platform'
+> &
+  Partial<Pick<MediaRecoveredDiagnosticEntry, 'type' | 'platform'>>;
 
 export const TRANSITION_LOG_STORAGE_KEY = 'xlab_transition_log';
 const MAX_TRANSITION_ENTRIES = 30;
@@ -128,6 +162,57 @@ function loadInitialRecords(): StoredDiagnosticRecord[] {
       if (!item || typeof item !== 'object') continue;
       const obj = item as Record<string, unknown>;
       if (typeof obj.timestamp !== 'string') continue;
+
+      if (obj.type === 'media-error') {
+        valid.push({
+          id: nextRecordId++,
+          entry: {
+            type: 'media-error',
+            timestamp: obj.timestamp,
+            track: typeof obj.track === 'string' ? obj.track : null,
+            code: typeof obj.code === 'number' && Number.isFinite(obj.code) ? obj.code : null,
+            message: typeof obj.message === 'string' ? obj.message : null,
+            currentTime:
+              typeof obj.currentTime === 'number' && Number.isFinite(obj.currentTime)
+                ? obj.currentTime
+                : 0,
+            readyState:
+              typeof obj.readyState === 'number' && Number.isFinite(obj.readyState)
+                ? obj.readyState
+                : 0,
+            networkState:
+              typeof obj.networkState === 'number' && Number.isFinite(obj.networkState)
+                ? obj.networkState
+                : 0,
+            recovery: typeof obj.recovery === 'string' ? obj.recovery : 'none',
+            platform: isValidPlatform(obj.platform) ? obj.platform : 'other',
+          },
+        });
+        continue;
+      }
+
+      if (obj.type === 'media-recovered') {
+        valid.push({
+          id: nextRecordId++,
+          entry: {
+            type: 'media-recovered',
+            timestamp: obj.timestamp,
+            track: typeof obj.track === 'string' ? obj.track : null,
+            attempt:
+              typeof obj.attempt === 'number' && Number.isFinite(obj.attempt) ? obj.attempt : 1,
+            currentTime:
+              typeof obj.currentTime === 'number' && Number.isFinite(obj.currentTime)
+                ? obj.currentTime
+                : 0,
+            msToRecover:
+              typeof obj.msToRecover === 'number' && Number.isFinite(obj.msToRecover)
+                ? obj.msToRecover
+                : 0,
+            platform: isValidPlatform(obj.platform) ? obj.platform : 'other',
+          },
+        });
+        continue;
+      }
 
       if (obj.type === 'tap') {
         valid.push({
@@ -269,6 +354,32 @@ export function recordTapDiagnostic(input: TapDiagnosticInput): number {
   const entry: TapDiagnosticEntry = {
     ...input,
     type: 'tap',
+    platform: input.platform ?? detectPlaybackPlatform(),
+  };
+  records = [...records, {id, entry}].slice(-MAX_TRANSITION_ENTRIES);
+  mirrorToStorage();
+  notifyListeners();
+  return id;
+}
+
+export function recordMediaErrorDiagnostic(input: MediaErrorDiagnosticInput): number {
+  const id = nextRecordId++;
+  const entry: MediaErrorDiagnosticEntry = {
+    ...input,
+    type: 'media-error',
+    platform: input.platform ?? detectPlaybackPlatform(),
+  };
+  records = [...records, {id, entry}].slice(-MAX_TRANSITION_ENTRIES);
+  mirrorToStorage();
+  notifyListeners();
+  return id;
+}
+
+export function recordMediaRecoveredDiagnostic(input: MediaRecoveredDiagnosticInput): number {
+  const id = nextRecordId++;
+  const entry: MediaRecoveredDiagnosticEntry = {
+    ...input,
+    type: 'media-recovered',
     platform: input.platform ?? detectPlaybackPlatform(),
   };
   records = [...records, {id, entry}].slice(-MAX_TRANSITION_ENTRIES);

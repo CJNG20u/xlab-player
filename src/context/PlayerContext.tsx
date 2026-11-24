@@ -30,6 +30,8 @@ import {
 import {playbackClock} from '../lib/playbackClock';
 import {
   recordLifecycleDiagnostic,
+  recordMediaErrorDiagnostic,
+  recordMediaRecoveredDiagnostic,
   recordTapDiagnostic,
   recordTransitionDiagnostic,
   updateTapDiagnostic,
@@ -509,6 +511,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const transitionTimerRef = useRef<number | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryAttemptsRef = useRef(0);
+  const hardRecoveryAttemptsRef = useRef(0);
+  const hardRecoveryTrackIdRef = useRef<TrackId | null>(null);
+  const pendingMediaRecoveryRef = useRef<{
+    trackId: TrackId;
+    trackKey: string | null;
+    attempt: number;
+    startedAt: number;
+    firstObservedPos: number | null;
+  } | null>(null);
   const lastMetadataKeyRef = useRef<string | null>(null);
   const lastMetadataArtworkModeRef = useRef<'none' | 'url' | 'canvas'>('none');
   const artworkResolutionAttemptedKeyRef = useRef<string | null>(null);
@@ -1354,8 +1365,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       audioRef.current = audio;
 
       const reqId = ++loadRequestIdRef.current;
+      const hadAudioError = Boolean(audio.error);
+      const isSameTrackId = audio.dataset.trackId === String(track.id);
       const isSameLoadedTrack =
-        audio.dataset.trackId === String(track.id) &&
+        isSameTrackId &&
+        !hadAudioError &&
         Boolean(audio.getAttribute('src')) &&
         audio.getAttribute('src') !== SILENT_WAV_DATA_URI;
 
@@ -1363,8 +1377,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       wantPlayingRef.current = true;
       lockAutoResumeAttemptsRef.current = 0;
       resumePlayAttemptsRef.current = 0;
-      if (!isSameLoadedTrack) {
+      if (!isSameTrackId) {
         prematureEndRetriesRef.current = 0;
+        hardRecoveryAttemptsRef.current = 0;
+        hardRecoveryTrackIdRef.current = track.id;
+        pendingMediaRecoveryRef.current = null;
+      } else if (hadAudioError) {
+        hardRecoveryAttemptsRef.current = 0;
+        hardRecoveryTrackIdRef.current = track.id;
+        pendingMediaRecoveryRef.current = null;
       }
       stateRef.current.isPlaying = true;
       stateRef.current.currentTrack = track;
@@ -1414,20 +1435,28 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         const localTrackId =
           !track.isYouTubeStream && typeof track.id === 'number' ? track.id : null;
         const streamTrackKey = track.isYouTubeStream ? getStreamedTrackCacheKey(track) : null;
-        const prewarmedBlobUrl =
+        const rawPrewarmedBlobUrl =
           localTrackId !== null
             ? (prewarmedObjectUrlsRef.current.get(localTrackId) ??
               prefetchedObjectUrlsRef.current.get(localTrackId))
             : streamTrackKey !== null
               ? prewarmedObjectUrlsRef.current.get(streamTrackKey)
               : undefined;
+        // If resetting after a media error on the same track, skip blob: and use the normal stream URL
+        const prewarmedBlobUrl = hadAudioError && isSameTrackId ? undefined : rawPrewarmedBlobUrl;
         lastLoadUsedPrewarmedRef.current = Boolean(prewarmedBlobUrl);
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
         const shouldUseOfflineCache =
+          !(hadAudioError && isSameTrackId) &&
           localTrackId !== null &&
           (Boolean(prewarmedBlobUrl) || cachedTrackIdsRef.current.has(localTrackId) || isOffline);
 
         beginTrackTransition();
+        if (hadAudioError) {
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+        }
         audio.dataset.trackId = String(track.id);
 
         if (prewarmedBlobUrl) {
@@ -1508,6 +1537,11 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       if (recoveryTimerRef.current !== null) return;
       if (recoveryAttemptsRef.current >= 5) return;
 
+      const audioAtSchedule = audioRef.current;
+      const posAtSchedule =
+        audioAtSchedule && Number.isFinite(audioAtSchedule.currentTime)
+          ? audioAtSchedule.currentTime
+          : 0;
       const attempt = recoveryAttemptsRef.current + 1;
       const delayMs = reason === 'stalled' ? 1000 * attempt : 1500 * attempt;
 
@@ -1516,12 +1550,23 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         const audio = audioRef.current;
         if (!audio || !wantPlayingRef.current || audio.ended) return;
 
-        // Already recovered and playing smoothly
-        if (!audio.paused && audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        const currentPos = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        const timeAdvanced = currentPos > posAtSchedule;
+
+        // Already recovered and playing smoothly: require no media error and advancing currentTime
+        if (
+          !audio.error &&
+          !audio.paused &&
+          audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
+          timeAdvanced
+        ) {
           recoveryAttemptsRef.current = 0;
           setIsBuffering(false);
           return;
         }
+
+        // Do not run soft buffer recovery on an errored media element (hard recovery owns it)
+        if (audio.error) return;
 
         recoveryAttemptsRef.current = attempt;
         setMediaSessionPlaybackState('playing');
@@ -1568,6 +1613,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       clearVisibilityResumeTimers();
       slowTransitionRetriesRef.current = 0;
       prematureEndRetriesRef.current = 0;
+      hardRecoveryAttemptsRef.current = 0;
+      hardRecoveryTrackIdRef.current = null;
+      pendingMediaRecoveryRef.current = null;
       resumePlayAttemptsRef.current = 0;
       pendingTransitionRef.current = null;
       userPausedRef.current = true;
@@ -1650,6 +1698,67 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     if (!audio || !activeTrack) return;
     audioRef.current = audio;
 
+    // If the audio element is stuck in an error state (even if paused=false after MEDIA_ERR_DECODE),
+    // hard-reset it before reassigning src and resuming from the saved position.
+    if (audio.error) {
+      const savedPos =
+        Number.isFinite(audio.currentTime) && audio.currentTime > 0
+          ? Math.round(audio.currentTime)
+          : 0;
+      const reqId = ++loadRequestIdRef.current;
+      hardRecoveryAttemptsRef.current = 0;
+      hardRecoveryTrackIdRef.current = activeTrack.id;
+      pendingMediaRecoveryRef.current = null;
+      userPausedRef.current = false;
+      wantPlayingRef.current = true;
+      lockAutoResumeAttemptsRef.current = 0;
+      resumePlayAttemptsRef.current = 0;
+      recoveryAttemptsRef.current = 0;
+      stateRef.current.isPlaying = true;
+      clearRecoveryTimer();
+      clearVisibilityResumeTimers();
+      unlockPersistentAudioElement(audio, false);
+      ensurePlaybackAudioSession();
+      acquirePlaybackWebLock();
+      activateMediaSessionForPlayback(activeTrack, false);
+      beginTrackTransition();
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      audio.dataset.trackId = String(activeTrack.id);
+      if (savedPos > 0) {
+        const restorePosition = () => {
+          if (loadRequestIdRef.current !== reqId) return;
+          if (!Number.isFinite(audio.duration) || savedPos < audio.duration) {
+            try {
+              audio.currentTime = savedPos;
+            } catch {
+              // Ignore seek errors on recovery
+            }
+          }
+          syncMediaSessionPositionState(audio);
+        };
+        audio.addEventListener('loadedmetadata', restorePosition, {once: true});
+      }
+      audio.src = getTrackStreamUrl(activeTrack);
+      audio
+        .play()
+        .then(() => {
+          setIsPlaying(true);
+          syncMediaSessionPositionState(audio);
+        })
+        .catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          endTrackTransition();
+          wantPlayingRef.current = false;
+          stateRef.current.isPlaying = false;
+          releasePlaybackWebLock();
+          setIsPlaying(false);
+          setMediaSessionPlaybackState('paused');
+        });
+      return;
+    }
+
     if (audio.paused) {
       userPausedRef.current = false;
       wantPlayingRef.current = true;
@@ -1691,6 +1800,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   }, [
     acquirePlaybackWebLock,
     activateMediaSessionForPlayback,
+    beginTrackTransition,
     clearRecoveryTimer,
     clearVisibilityResumeTimers,
     endTrackTransition,
@@ -1745,7 +1855,8 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const advanceToNextTrack = useCallback(
     (
       fromEndedEvent: boolean,
-      endedMediaState?: {readyState: number; networkState: number}
+      endedMediaState?: {readyState: number; networkState: number},
+      options?: {skipRepeatOne?: boolean}
     ) => {
       const audio = audioRef.current;
       const {queue: q, currentIndex: idx, shuffle: isShuf, repeat: rep} = stateRef.current;
@@ -1757,7 +1868,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       const readyStateAtEnded = endedMediaState?.readyState ?? audio.readyState;
       const networkStateAtEnded = endedMediaState?.networkState ?? audio.networkState;
 
-      if (rep === 'one') {
+      if (rep === 'one' && !options?.skipRepeatOne) {
         const activeTrack = fromTrack;
         userPausedRef.current = false;
         wantPlayingRef.current = true;
@@ -3031,6 +3142,29 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           ? audio.duration
           : stateRef.current.duration;
       playbackClock.setTime(pos);
+
+      // Log media-recovered once playback genuinely advances after a hard media-error recovery
+      const pendingRecovery = pendingMediaRecoveryRef.current;
+      if (
+        pendingRecovery &&
+        !audio.error &&
+        !audio.paused &&
+        !audio.ended &&
+        Number.isFinite(pos)
+      ) {
+        if (pendingRecovery.firstObservedPos === null) {
+          pendingRecovery.firstObservedPos = pos;
+        } else if (pos > pendingRecovery.firstObservedPos + 0.05) {
+          recordMediaRecoveredDiagnostic({
+            timestamp: new Date().toISOString(),
+            track: pendingRecovery.trackKey,
+            attempt: pendingRecovery.attempt,
+            currentTime: Math.round(pos * 10) / 10,
+            msToRecover: Math.max(0, Date.now() - pendingRecovery.startedAt),
+          });
+          pendingMediaRecoveryRef.current = null;
+        }
+      }
       listeningLearningRef.current?.update(
         stateRef.current.currentTrack,
         pos,
@@ -3189,13 +3323,16 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     };
 
     const handleError = () => {
+      if (audio.getAttribute('src') === SILENT_WAV_DATA_URI) return;
       lifecycleRef.current.endTrackTransition();
       setIsBuffering(false);
+
+      const mediaErr = audio.error;
+      const msg =
+        mediaErr?.message ||
+        (mediaErr ? `MediaError code ${mediaErr.code}` : 'Audio playback error');
+
       if (pendingTransitionRef.current || pendingTapRef.current) {
-        const mediaErr = audio.error;
-        const msg =
-          mediaErr?.message ||
-          (mediaErr ? `MediaError code ${mediaErr.code}` : 'Audio playback error');
         if (pendingTransitionRef.current) {
           updateTransitionDiagnostic(pendingTransitionRef.current.id, {error: msg});
         }
@@ -3204,10 +3341,126 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
           pendingTapRef.current = null;
         }
       }
+
+      const activeTrack = stateRef.current.currentTrack;
+      const savedPos =
+        Number.isFinite(audio.currentTime) && audio.currentTime > 0
+          ? Math.round(audio.currentTime)
+          : 0;
+      const readyState = audio.readyState;
+      const networkState = audio.networkState;
+
+      if (mediaErr) {
+        if (!activeTrack || !wantPlayingRef.current || userPausedRef.current) {
+          recordMediaErrorDiagnostic({
+            timestamp: new Date().toISOString(),
+            track: getTrackDiagnosticKey(activeTrack),
+            code: mediaErr.code,
+            message: mediaErr.message || null,
+            currentTime: savedPos,
+            readyState,
+            networkState,
+            recovery: 'none',
+          });
+          return;
+        }
+
+        if (hardRecoveryTrackIdRef.current !== activeTrack.id) {
+          hardRecoveryAttemptsRef.current = 0;
+          hardRecoveryTrackIdRef.current = activeTrack.id;
+        }
+
+        if (hardRecoveryAttemptsRef.current < 2) {
+          const attempt = hardRecoveryAttemptsRef.current + 1;
+          hardRecoveryAttemptsRef.current = attempt;
+
+          recordMediaErrorDiagnostic({
+            timestamp: new Date().toISOString(),
+            track: getTrackDiagnosticKey(activeTrack),
+            code: mediaErr.code,
+            message: mediaErr.message || null,
+            currentTime: savedPos,
+            readyState,
+            networkState,
+            recovery: `hard-${attempt}`,
+          });
+
+          pendingMediaRecoveryRef.current = {
+            trackId: activeTrack.id,
+            trackKey: getTrackDiagnosticKey(activeTrack),
+            attempt,
+            startedAt: Date.now(),
+            firstObservedPos: null,
+          };
+
+          const retryReqId = ++loadRequestIdRef.current;
+          lifecycleRef.current.clearRecoveryTimer();
+          lifecycleRef.current.beginTrackTransition();
+          setIsBuffering(true);
+
+          // Hard reset the media element so decoders & audio.error are fully cleared
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+          audio.dataset.trackId = String(activeTrack.id);
+
+          // Always use the normal stream URL (never a blob: URL) on hard recovery
+          const streamUrl = getTrackStreamUrl(activeTrack);
+          if (savedPos > 0) {
+            const restorePosition = () => {
+              if (loadRequestIdRef.current !== retryReqId) return;
+              if (!Number.isFinite(audio.duration) || savedPos < audio.duration) {
+                try {
+                  audio.currentTime = savedPos;
+                } catch {
+                  // Ignore seek errors on recovery
+                }
+              }
+              lifecycleRef.current.syncMediaSessionPositionState(audio);
+            };
+            audio.addEventListener('loadedmetadata', restorePosition, {once: true});
+          }
+          audio.src = streamUrl;
+          ensurePlaybackAudioSession();
+          lifecycleRef.current.acquirePlaybackWebLock();
+          lifecycleRef.current.activateMediaSessionForPlayback(activeTrack, false);
+          const p = audio.play();
+          if (p && typeof p.catch === 'function') {
+            p.catch((err: unknown) => {
+              if (err instanceof DOMException && err.name === 'AbortError') return;
+              lifecycleRef.current.endTrackTransition();
+              setIsBuffering(false);
+            });
+          }
+          return;
+        }
+
+        // Second hard recovery also errored: log, clear audio.error, toast, and skip to next track
+        recordMediaErrorDiagnostic({
+          timestamp: new Date().toISOString(),
+          track: getTrackDiagnosticKey(activeTrack),
+          code: mediaErr.code,
+          message: mediaErr.message || null,
+          currentTime: savedPos,
+          readyState,
+          networkState,
+          recovery: 'skip',
+        });
+        hardRecoveryAttemptsRef.current = 0;
+        pendingMediaRecoveryRef.current = null;
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('xlab:toast', {detail: "Couldn't play this track, skipped"})
+          );
+        }
+        lifecycleRef.current.advanceToNextTrack(false, undefined, {skipRepeatOne: true});
+        return;
+      }
+
       if (
         wantPlayingRef.current &&
         !userPausedRef.current &&
-        stateRef.current.currentTrack &&
+        activeTrack &&
         recoveryAttemptsRef.current < 2
       ) {
         lifecycleRef.current.scheduleBufferRecovery('stalled');

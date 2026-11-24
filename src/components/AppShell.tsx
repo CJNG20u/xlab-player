@@ -168,6 +168,17 @@ export const AppShell: React.FC = () => {
     setTimeout(() => setShellToast(null), 3200);
   }, []);
 
+  useEffect(() => {
+    const onAppToast = (ev: Event) => {
+      const msg = (ev as CustomEvent<unknown>).detail;
+      if (typeof msg === 'string' && msg.trim()) {
+        flashShellToast(msg);
+      }
+    };
+    window.addEventListener('xlab:toast', onAppToast);
+    return () => window.removeEventListener('xlab:toast', onAppToast);
+  }, [flashShellToast]);
+
   useYouTubePlaylistJobsSync(!offline && Boolean(user), {
     onProgress: bumpLibraryRefresh,
     onComplete: (job) => {
