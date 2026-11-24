@@ -280,3 +280,15 @@ If YouTube extractor changes break playback or you want to test a newer release:
   sudo chmod a+rx /usr/local/bin/yt-dlp
   ```
   *(You can also run `yt-dlp -U` from the **Settings** page when running bare-metal with write permissions to the binary.)*
+
+---
+
+## Automatic Audio Quality (Always On)
+
+Audio quality optimizations run automatically with no settings or environment flags required:
+
+- **Better YouTube source matching:** Catalog/metadata matches evaluate `ytsearch8:<title> <artist>` flat results using normalized title similarity, channel-only artist comparison, duration proximity, whole-word wrong-version penalties (live, cover, karaoke, remix, slowed/reverb, etc. in both directions), and official/`- Topic`/VEVO source preference. Only matches scoring `>= 0.40` are saved in the 14-day `track_video_map` cache.
+- **Background audio QC & auto-rejection:** After a cached stream finishes filling, a single low-priority background `ffmpeg` EBU R128 pass measures integrated loudness (LUFS), true peak, duration, and momentary loudness once per video (skipping while the resolver queue is busy). Artist+title matches that are nearly silent, have a sustained `>= 12 dB` level drop covering `>= 25%` (`>= 20s`), or diverge from the requested duration by more than `max(15s, 8%)` are automatically evicted and recorded in `track_video_rejects` (capped at 2 rejections per track) so the next best candidate is selected on subsequent plays. Admins can inspect aggregate stats at `GET /api/yt-stream/qc-summary`.
+- **Track-start loudness normalization:** At the start of each track, the player queries `GET /api/yt-stream/loudness` (cached in memory) and attenuates louder-than-`-14 LUFS` tracks via `audio.volume = userVolume * min(1, 10^((-14 - lufs) / 20))` with a smooth 150 ms ramp, without boosting quiet tracks or altering the stored/remote user volume.
+- **Native-codec library downloads:** Songs and YouTube playlists downloaded to the library use `bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/worst[acodec!=none]` with no bitrate cap and no re-encoding; video fallbacks are remuxed to audio-only via stream copy (`-vn -c:a copy`). Streaming format selection is unchanged.
+

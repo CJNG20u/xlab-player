@@ -5,7 +5,8 @@ import express from 'express';
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
-import {type AuthRequest, requireAuth} from './server/auth.ts';
+import {type AuthRequest, requireAdmin, requireAuth} from './server/auth.ts';
+import {getAudioQcSummary, getVideoLufs} from './server/audioFacts.ts';
 import {
   enforceAudioCacheLimit,
   enqueueMetadataPrefetch,
@@ -21,6 +22,7 @@ import {
   getCachedYouTubeAudioStream,
   getCachedYouTubeThumbnailUrl,
   getDirectProxyCircuitCooldownRemainingMs,
+  getInFlightTrackVideoMatch,
   getPipeStartupTimeoutMs,
   getVideoDirectProxyNegativeInfo,
   hasAvailablePrefetchResolveSlot,
@@ -1044,6 +1046,48 @@ async function startServer() {
       }
     }
   };
+
+  app.get('/api/yt-stream/loudness', requireAuth, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const rawVideoId = typeof req.query.videoId === 'string' ? req.query.videoId.trim() : '';
+    if (rawVideoId) {
+      if (!isValidYouTubeVideoId(rawVideoId)) {
+        res.status(400).json({error: 'Invalid YouTube video ID'});
+        return;
+      }
+      res.json({lufs: getVideoLufs(rawVideoId)});
+      return;
+    }
+
+    const artist = typeof req.query.artist === 'string' ? req.query.artist.trim().slice(0, 120) : '';
+    const title = typeof req.query.title === 'string' ? req.query.title.trim().slice(0, 160) : '';
+    if (!title) {
+      res.status(400).json({error: 'videoId or title query parameter is required'});
+      return;
+    }
+
+    let matchedVideoId = getCachedTrackVideoId(artist, title);
+    if (!matchedVideoId) {
+      const inFlight = getInFlightTrackVideoMatch(artist, title);
+      if (inFlight) {
+        try {
+          const resolved = await inFlight;
+          if (isValidYouTubeVideoId(resolved.videoId)) {
+            matchedVideoId = resolved.videoId;
+          }
+        } catch {
+          matchedVideoId = null;
+        }
+      }
+    }
+
+    res.json({lufs: matchedVideoId ? getVideoLufs(matchedVideoId) : null});
+  });
+
+  app.get('/api/yt-stream/qc-summary', requireAdmin, (_req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(getAudioQcSummary());
+  });
 
   app.get('/api/yt-stream/match', requireAuth, (req: AuthRequest, res) => {
     void handleYouTubeMatchStream(req, res, false);

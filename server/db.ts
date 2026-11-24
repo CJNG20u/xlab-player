@@ -263,6 +263,28 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_yt_pl_job_items_job
     ON youtube_playlist_job_items(job_id, position ASC);
+
+  CREATE TABLE IF NOT EXISTS video_audio_facts (
+    videoId TEXT PRIMARY KEY,
+    lufs REAL,
+    truePeakDb REAL,
+    durationSec REAL NOT NULL DEFAULT 0,
+    lowRunPct REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK(status IN ('ok', 'bad')) DEFAULT 'ok',
+    reason TEXT NOT NULL DEFAULT '',
+    measuredAt INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS track_video_rejects (
+    trackKey TEXT NOT NULL,
+    videoId TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    createdAt INTEGER NOT NULL,
+    PRIMARY KEY (trackKey, videoId)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_track_video_rejects_created
+    ON track_video_rejects(createdAt DESC);
 `);
 
 // Safe incremental migrations for existing databases

@@ -1438,6 +1438,104 @@ async function fetchFallbackCoverFile(
   return null;
 }
 
+async function remuxDownloadedAudioLossless(params: {
+  ffmpegPath: string;
+  downloadedPath: string;
+  tmpWorkDir: string;
+  filePrefix: string;
+  title: string;
+  artist: string;
+  album: string;
+  coverPath: string | null;
+}): Promise<{outputPath: string; ext: string}> {
+  const {ffmpegPath, downloadedPath, tmpWorkDir, filePrefix, title, artist, album, coverPath} =
+    params;
+  const rawExt = path.extname(downloadedPath).replace('.', '').toLowerCase();
+
+  let targetExts: string[];
+  if (rawExt === 'm4a' || rawExt === 'mp4') {
+    targetExts = ['m4a'];
+  } else if (rawExt === 'webm') {
+    targetExts = ['webm'];
+  } else if (ALLOWED_FINAL_AUDIO_EXTS.has(rawExt)) {
+    targetExts = [rawExt];
+  } else {
+    // Video fallback container (e.g. mkv, mov, ts, flv): remux audio-only without re-encoding
+    targetExts = ['m4a', 'webm', 'ogg'];
+  }
+
+  for (const ext of targetExts) {
+    const outPath = path.join(tmpWorkDir, `${filePrefix}-final.${ext}`);
+    const supportsAttachedCover = Boolean(coverPath && (ext === 'm4a' || ext === 'mp3'));
+
+    if (supportsAttachedCover && coverPath) {
+      try {
+        const ffArgs: string[] = [
+          '-y',
+          '-i',
+          downloadedPath,
+          '-i',
+          coverPath,
+          '-map',
+          '0:a:0',
+          '-map',
+          '1:v:0',
+          '-c:a',
+          'copy',
+          '-c:v',
+          'mjpeg',
+          ...(ext === 'mp3' ? ['-id3v2_version', '3'] : []),
+          '-disposition:v:0',
+          'attached_pic',
+          '-metadata',
+          `title=${title}`,
+          '-metadata',
+          `artist=${artist}`,
+          '-metadata',
+          `album=${album}`,
+          ...(ext === 'm4a' ? ['-movflags', '+faststart'] : []),
+          outPath,
+        ];
+        await execFileAsync(ffmpegPath, ffArgs, {timeout: 60_000});
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
+          return {outputPath: outPath, ext};
+        }
+      } catch {
+        // Fall through to audio-only stream copy without embedded cover
+      }
+    }
+
+    try {
+      const strippedPath = path.join(tmpWorkDir, `${filePrefix}-audio.${ext}`);
+      const ffArgs: string[] = [
+        '-y',
+        '-i',
+        downloadedPath,
+        '-vn',
+        '-c:a',
+        'copy',
+        '-metadata',
+        `title=${title}`,
+        '-metadata',
+        `artist=${artist}`,
+        '-metadata',
+        `album=${album}`,
+        ...(ext === 'm4a' ? ['-movflags', '+faststart'] : []),
+        strippedPath,
+      ];
+      await execFileAsync(ffmpegPath, ffArgs, {timeout: 60_000});
+      if (fs.existsSync(strippedPath) && fs.statSync(strippedPath).size > 0) {
+        return {outputPath: strippedPath, ext};
+      }
+    } catch {
+      // Try next container if codec is incompatible with this container
+    }
+  }
+
+  const fallbackExt = ALLOWED_FINAL_AUDIO_EXTS.has(rawExt) ? rawExt : 'm4a';
+  return {outputPath: downloadedPath, ext: fallbackExt};
+}
+
 async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
   const ffmpegPath = getFfmpegPath();
   const cropCover = getSetting('ytdlp_crop_cover', 'true') === 'true';
@@ -1481,10 +1579,6 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
     }
 
     const outTemplate = path.join(tmpWorkDir, `${jobUuid}.%(ext)s`);
-    const nativeFormatSelector =
-      job.format === 'opus'
-        ? 'bestaudio[vcodec=none][ext=opus]/bestaudio[vcodec=none][acodec*=opus]/bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none]'
-        : 'bestaudio[vcodec=none][ext=m4a]/bestaudio[vcodec=none][acodec*=opus]/bestaudio[vcodec=none][ext=opus]/bestaudio[vcodec=none]';
 
     const buildNativeArgs = (cookiePath: string | null): string[] => {
       const args = [
@@ -1495,7 +1589,7 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
         'node',
         '--force-ipv4',
         '-f',
-        nativeFormatSelector,
+        YDL_FORMAT_AUDIO_DOWNLOAD,
         '--write-thumbnail',
         '--convert-thumbnails',
         'jpg',
@@ -1513,6 +1607,7 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
     };
 
     const buildStage3ExtractionArgs = (cookiePath: string | null): string[] => {
+      // Fallback: download best audio (or worst with audio) keeping original codec with zero re-encoding
       const args = [
         '--newline',
         '--no-playlist',
@@ -1520,23 +1615,14 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
         '--js-runtimes',
         'node',
         '--force-ipv4',
-        '--extract-audio',
-      ];
-      if (quality === 'standard') {
-        args.push('--audio-format', 'mp3', '--audio-quality', '128K');
-      } else if (quality === 'high') {
-        args.push('--audio-format', 'mp3', '--audio-quality', '320K');
-      } else {
-        // Ultra (default): best native codec with bitrate 0 (zero transcoding loss)
-        args.push('--audio-format', 'best', '--audio-quality', '0');
-      }
-      args.push(
+        '-f',
+        YDL_FORMAT_AUDIO_DOWNLOAD,
         '--write-thumbnail',
         '--convert-thumbnails',
         'jpg',
         '--ffmpeg-location',
-        ffmpegPath
-      );
+        ffmpegPath,
+      ];
       if (getSetting('ytdlp_remote_components', 'true') === 'true') {
         args.push('--remote-components', 'ejs:github');
       }
@@ -1642,139 +1728,21 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
       }
     }
 
-    // FFmpeg audio-only stream sanitization (`-vn -c:a copy` for ultra/native, MP3 128k/320k for standard/high) + tags
+    // FFmpeg audio-only remux preserving original codec (`-vn -c:a copy`, zero re-encoding) + tags
     updateJob(job.id, {status: 'processing', progress: 86, stage: 'Finalizing Audio & Tags'});
 
-    const rawExt = path.extname(downloadedAudioPath).replace('.', '').toLowerCase();
-    let finalExt = ALLOWED_FINAL_AUDIO_EXTS.has(rawExt) ? rawExt : 'm4a';
-    let finalizedTempPath = downloadedAudioPath;
-
-    if (quality === 'standard' || quality === 'high') {
-      const targetBitrate = quality === 'standard' ? '128k' : '320k';
-      const mp3Out = path.join(tmpWorkDir, `${jobUuid}-final.mp3`);
-      const ffArgs: string[] = ['-y', '-i', downloadedAudioPath];
-      if (coverPath) {
-        ffArgs.push(
-          '-i',
-          coverPath,
-          '-map',
-          '0:a:0',
-          '-map',
-          '1:v:0',
-          '-c:a',
-          rawExt === 'mp3' ? 'copy' : 'libmp3lame',
-          ...(rawExt === 'mp3' ? [] : ['-b:a', targetBitrate]),
-          '-c:v',
-          'mjpeg',
-          '-id3v2_version',
-          '3',
-          '-disposition:v:0',
-          'attached_pic'
-        );
-      } else {
-        ffArgs.push(
-          '-vn',
-          '-c:a',
-          rawExt === 'mp3' ? 'copy' : 'libmp3lame',
-          ...(rawExt === 'mp3' ? [] : ['-b:a', targetBitrate])
-        );
-      }
-      ffArgs.push(
-        '-metadata',
-        `title=${resolvedTitle}`,
-        '-metadata',
-        `artist=${resolvedArtist}`,
-        '-metadata',
-        `album=${resolvedAlbum}`,
-        mp3Out
-      );
-      await execFileAsync(ffmpegPath, ffArgs, {timeout: 90000});
-      if (fs.existsSync(mp3Out)) {
-        finalizedTempPath = mp3Out;
-        finalExt = 'mp3';
-      }
-    } else {
-      // Ultra (default): zero transcoding loss — strip accidental video streams via `-vn -c:a copy`
-      // If YouTube delivered native Opus inside .webm, cleanly remux into .opus via stream copy
-      const remuxExt = rawExt === 'webm' ? 'opus' : finalExt;
-      const remuxOut = path.join(tmpWorkDir, `${jobUuid}-final.${remuxExt}`);
-      let remuxed = false;
-
-      try {
-        const ffArgs: string[] = ['-y', '-i', downloadedAudioPath];
-        if (coverPath && (remuxExt === 'm4a' || remuxExt === 'mp3')) {
-          ffArgs.push(
-            '-i',
-            coverPath,
-            '-map',
-            '0:a:0',
-            '-map',
-            '1:v:0',
-            '-c:a',
-            'copy',
-            '-c:v',
-            'mjpeg',
-            ...(remuxExt === 'mp3' ? ['-id3v2_version', '3'] : []),
-            '-disposition:v:0',
-            'attached_pic'
-          );
-        } else {
-          ffArgs.push('-vn', '-c:a', 'copy');
-        }
-        ffArgs.push(
-          '-metadata',
-          `title=${resolvedTitle}`,
-          '-metadata',
-          `artist=${resolvedArtist}`,
-          '-metadata',
-          `album=${resolvedAlbum}`,
-          remuxOut
-        );
-        await execFileAsync(ffmpegPath, ffArgs, {timeout: 45000});
-        if (fs.existsSync(remuxOut) && fs.statSync(remuxOut).size > 0) {
-          finalizedTempPath = remuxOut;
-          finalExt = remuxExt;
-          remuxed = true;
-        }
-      } catch {
-        remuxed = false;
-      }
-
-      // If .webm -> .opus copy failed (e.g. non-Opus codec inside webm), strip video keeping original container
-      if (!remuxed) {
-        const safeOut = path.join(tmpWorkDir, `${jobUuid}-stripped.${finalExt}`);
-        try {
-          await execFileAsync(
-            ffmpegPath,
-            [
-              '-y',
-              '-i',
-              downloadedAudioPath,
-              '-vn',
-              '-c:a',
-              'copy',
-              '-metadata',
-              `title=${resolvedTitle}`,
-              '-metadata',
-              `artist=${resolvedArtist}`,
-              '-metadata',
-              `album=${resolvedAlbum}`,
-              safeOut,
-            ],
-            {timeout: 45000}
-          );
-          if (fs.existsSync(safeOut) && fs.statSync(safeOut).size > 0) {
-            finalizedTempPath = safeOut;
-          }
-        } catch {
-          // Keep original downloaded audio if stream copy fails
-        }
-      }
-    }
-
-    if (!ALLOWED_FINAL_AUDIO_EXTS.has(finalExt)) {
-      finalExt = 'm4a';
-    }
+    const remuxedResult = await remuxDownloadedAudioLossless({
+      ffmpegPath,
+      downloadedPath: downloadedAudioPath,
+      tmpWorkDir,
+      filePrefix: jobUuid,
+      title: resolvedTitle,
+      artist: resolvedArtist,
+      album: resolvedAlbum,
+      coverPath,
+    });
+    const finalizedTempPath = remuxedResult.outputPath;
+    const finalExt = remuxedResult.ext;
 
     // Content-hash deduplication: SHA-256 -> deterministic `tracks/<file_hash>.<ext>`
     updateJob(job.id, {status: 'processing', progress: 93, stage: 'Hashing & Deduplicating'});
@@ -2089,13 +2057,8 @@ export async function downloadTrackToNas(
 
   const safeArtist = sanitizeNasSegment(resolvedArtist, 'Unknown Artist');
   const safeTitle = sanitizeNasSegment(resolvedTitle, 'Untitled');
-  const finalFileName = `${safeArtist} - ${safeTitle}.m4a`;
-  const finalAudioPath = path.resolve(downloadsDir, finalFileName);
-  if (!finalAudioPath.startsWith(downloadsDir + path.sep)) {
-    throw new Error('Destination file path escaped Downloads directory');
-  }
-
-  const dedupeKey = finalAudioPath.toLowerCase();
+  const baseFileName = `${safeArtist} - ${safeTitle}`;
+  const dedupeKey = `vid:${videoId}`;
   const existingFlight = inFlightNasDownloads.get(dedupeKey);
   if (existingFlight) {
     return existingFlight;
@@ -2109,20 +2072,24 @@ export async function downloadTrackToNas(
       return {track, filePath: existingByVideo.absPath, alreadyExists: true};
     }
 
-    // Fast-path 2: already saved on disk in /music/Downloads
-    if (fs.existsSync(finalAudioPath)) {
-      const st = fs.statSync(finalAudioPath);
-      if (st.isFile() && st.size > 0) {
-        const indexed = await indexSingleFile(finalAudioPath, musicDir, {
-          title: resolvedTitle,
-          artist: resolvedArtist,
-          album: resolvedAlbum,
-        });
-        db.prepare(
-          "UPDATE tracks SET youtube_video_id = ? WHERE id = ? AND (youtube_video_id IS NULL OR youtube_video_id = '')"
-        ).run(videoId, indexed.id);
-        const track = loadCanonicalTrackRow(indexed.id, input.userId, finalAudioPath);
-        return {track, filePath: finalAudioPath, alreadyExists: true};
+    // Fast-path 2: already saved on disk in <music_dir>/Downloads under any supported audio extension
+    for (const ext of ALLOWED_FINAL_AUDIO_EXTS) {
+      const candidatePath = path.resolve(downloadsDir, `${baseFileName}.${ext}`);
+      if (!candidatePath.startsWith(downloadsDir + path.sep)) continue;
+      if (fs.existsSync(candidatePath)) {
+        const st = fs.statSync(candidatePath);
+        if (st.isFile() && st.size > 0) {
+          const indexed = await indexSingleFile(candidatePath, musicDir, {
+            title: resolvedTitle,
+            artist: resolvedArtist,
+            album: resolvedAlbum,
+          });
+          db.prepare(
+            "UPDATE tracks SET youtube_video_id = ? WHERE id = ? AND (youtube_video_id IS NULL OR youtube_video_id = '')"
+          ).run(videoId, indexed.id);
+          const track = loadCanonicalTrackRow(indexed.id, input.userId, candidatePath);
+          return {track, filePath: candidatePath, alreadyExists: true};
+        }
       }
     }
 
@@ -2143,11 +2110,7 @@ export async function downloadTrackToNas(
           'node',
           '--force-ipv4',
           '-f',
-          'bestaudio[ext=m4a]/bestaudio',
-          '--extract-audio',
-          '--audio-format',
-          'm4a',
-          '--embed-thumbnail',
+          YDL_FORMAT_AUDIO_DOWNLOAD,
           '--add-metadata',
           '--ffmpeg-location',
           ffmpegPath,
@@ -2174,10 +2137,7 @@ export async function downloadTrackToNas(
         await execYtdlp(buildYtdlpArgs(tempCookiePath), {timeout: 180_000});
       }
 
-      const expectedM4a = path.join(tmpWorkDir, `${dlUuid}.m4a`);
-      const downloadedPath = fs.existsSync(expectedM4a)
-        ? expectedM4a
-        : findUuidDownloadedAudio(tmpWorkDir, dlUuid);
+      const downloadedPath = findUuidDownloadedAudio(tmpWorkDir, dlUuid);
       if (!downloadedPath || !fs.existsSync(downloadedPath)) {
         throw new Error('yt-dlp finished without producing an audio file');
       }
@@ -2209,60 +2169,27 @@ export async function downloadTrackToNas(
         }
       }
 
-      // Embed clean MP4 metadata tags & high-res square artwork with zero audio re-encoding when already M4A
-      const downloadedExt = path.extname(downloadedPath).replace('.', '').toLowerCase();
-      const taggedOutPath = path.join(tmpWorkDir, `${dlUuid}-tagged.m4a`);
-      let readyPath = downloadedPath;
+      // Keep original codec with zero re-encoding; remux video fallbacks to audio-only via `-vn -c:a copy`
+      const remuxed = await remuxDownloadedAudioLossless({
+        ffmpegPath,
+        downloadedPath,
+        tmpWorkDir,
+        filePrefix: dlUuid,
+        title: resolvedTitle,
+        artist: resolvedArtist,
+        album: resolvedAlbum,
+        coverPath,
+      });
 
-      try {
-        const ffArgs: string[] = ['-y', '-i', downloadedPath];
-        const audioCodecArgs =
-          downloadedExt === 'm4a' || downloadedExt === 'mp4'
-            ? ['-c:a', 'copy']
-            : ['-c:a', 'aac', '-b:a', '256k'];
-
-        if (coverPath) {
-          ffArgs.push(
-            '-i',
-            coverPath,
-            '-map',
-            '0:a:0',
-            '-map',
-            '1:v:0',
-            ...audioCodecArgs,
-            '-c:v',
-            'mjpeg',
-            '-disposition:v:0',
-            'attached_pic'
-          );
-        } else {
-          ffArgs.push('-map', '0', ...audioCodecArgs, '-c:v', 'copy');
-        }
-
-        ffArgs.push(
-          '-metadata',
-          `title=${resolvedTitle}`,
-          '-metadata',
-          `artist=${resolvedArtist}`,
-          '-metadata',
-          `album=${resolvedAlbum}`,
-          '-movflags',
-          '+faststart',
-          taggedOutPath
-        );
-
-        await execFileAsync(ffmpegPath, ffArgs, {timeout: 90_000});
-        if (fs.existsSync(taggedOutPath) && fs.statSync(taggedOutPath).size > 0) {
-          readyPath = taggedOutPath;
-        }
-      } catch {
-        // Fall back to yt-dlp's own --embed-thumbnail --add-metadata output if remux fails
+      const finalAudioPath = path.resolve(downloadsDir, `${baseFileName}.${remuxed.ext}`);
+      if (!finalAudioPath.startsWith(downloadsDir + path.sep)) {
+        throw new Error('Destination file path escaped Downloads directory');
       }
 
-      // Atomically save into <music_dir>/Downloads/<Sanitized Artist> - <Sanitized Title>.m4a
+      // Atomically save into <music_dir>/Downloads/<Sanitized Artist> - <Sanitized Title>.<ext>
       const stagedPath = path.join(downloadsDir, `.${dlUuid}.part`);
       try {
-        fs.copyFileSync(readyPath, stagedPath);
+        fs.copyFileSync(remuxed.outputPath, stagedPath);
         fs.renameSync(stagedPath, finalAudioPath);
       } finally {
         if (fs.existsSync(stagedPath)) {
@@ -2486,6 +2413,11 @@ const YT_THUMB_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const YT_THUMB_CACHE_MAX_ENTRIES = 1000;
 const TRACK_VIDEO_MAP_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const TRACK_VIDEO_CACHE_MAX_ENTRIES = 2000;
+
+// Download-tier selector (library & playlist downloads ONLY): uncapped best audio,
+// keeping the original codec and remuxing video fallbacks to audio-only without re-encoding.
+export const YDL_FORMAT_AUDIO_DOWNLOAD =
+  'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/worst[acodec!=none]';
 
 // Preview-tier selector: prefers low-overhead AAC 128k / Opus 160k streams first,
 // with trailing fallbacks so high-bitrate or progressive-only videos still resolve.
@@ -2911,6 +2843,10 @@ function canAcquireResolveSlot(priority: StreamResolvePriority): boolean {
 
 export function hasAvailablePrefetchResolveSlot(): boolean {
   return canAcquireResolveSlot('prefetch');
+}
+
+export function isResolverQueueBusy(): boolean {
+  return activeResolveSlots > 0 || resolveWaitQueue.length > 0;
 }
 
 function drainResolveWaitQueue(): void {
@@ -5799,6 +5735,205 @@ const upsertTrackVideoMapStmt = db.prepare(
      updated_at = excluded.updated_at`
 );
 
+const deleteTrackVideoMapStmt = db.prepare('DELETE FROM track_video_map WHERE match_key = ?');
+const getRejectedVideoIdsStmt = db.prepare(
+  'SELECT videoId FROM track_video_rejects WHERE trackKey = ?'
+);
+const getAudioFactsForVideosStmt = db.prepare(
+  'SELECT videoId, lufs, durationSec, lowRunPct, status, reason FROM video_audio_facts WHERE videoId = ?'
+);
+
+export interface MatchedVideoOrigin {
+  trackKey: string;
+  artist: string;
+  title: string;
+  requestedDuration: number;
+  recordedAt: number;
+}
+
+// Tracks videos chosen by artist+title matching in this process (including score < 0.40 matches
+// that are intentionally not stored in track_video_map). Never populated for explicit videoId opens.
+const recentMatchedVideoOrigins = new Map<string, MatchedVideoOrigin[]>();
+const MAX_RECENT_MATCH_ORIGINS = 1000;
+
+function recordMatchedVideoOrigin(origin: Omit<MatchedVideoOrigin, 'recordedAt'>, videoId: string): void {
+  if (!isValidYouTubeVideoId(videoId)) return;
+  const list = recentMatchedVideoOrigins.get(videoId) || [];
+  const filtered = list.filter((item) => item.trackKey !== origin.trackKey);
+  filtered.push({...origin, recordedAt: Date.now()});
+  recentMatchedVideoOrigins.set(videoId, filtered.slice(-8));
+  if (recentMatchedVideoOrigins.size > MAX_RECENT_MATCH_ORIGINS) {
+    const firstKey = recentMatchedVideoOrigins.keys().next().value;
+    if (firstKey) recentMatchedVideoOrigins.delete(firstKey);
+  }
+}
+
+export function getMatchedVideoOrigins(videoId: string): MatchedVideoOrigin[] {
+  if (!isValidYouTubeVideoId(videoId)) return [];
+  const byKey = new Map<string, MatchedVideoOrigin>();
+  try {
+    const rows = db
+      .prepare('SELECT match_key, artist, title, duration, updated_at FROM track_video_map WHERE video_id = ?')
+      .all(videoId) as Array<{
+      match_key: string;
+      artist: string;
+      title: string;
+      duration: number;
+      updated_at: number;
+    }>;
+    for (const row of rows) {
+      byKey.set(row.match_key, {
+        trackKey: row.match_key,
+        artist: row.artist,
+        title: row.title,
+        requestedDuration: row.duration || 0,
+        recordedAt: row.updated_at || Date.now(),
+      });
+    }
+  } catch {
+    // ignore DB errors
+  }
+  const recent = recentMatchedVideoOrigins.get(videoId) || [];
+  for (const item of recent) {
+    if (!byKey.has(item.trackKey)) {
+      byKey.set(item.trackKey, item);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+export function deleteTrackVideoMapEntry(matchKey: string): void {
+  if (!matchKey) return;
+  trackVideoMapCache.delete(matchKey);
+  try {
+    deleteTrackVideoMapStmt.run(matchKey);
+  } catch {
+    // non-fatal
+  }
+}
+
+export function upsertTrackVideoMapEntry(entry: {
+  matchKey: string;
+  artist: string;
+  title: string;
+  duration: number;
+  videoId: string;
+  matchedTitle: string;
+  matchedDuration: number;
+}): void {
+  if (!entry.matchKey || !isValidYouTubeVideoId(entry.videoId)) return;
+  const updatedAt = Date.now();
+  pruneTrackVideoMapMemory(updatedAt);
+  trackVideoMapCache.set(entry.matchKey, {
+    videoId: entry.videoId,
+    matchedTitle: entry.matchedTitle,
+    matchedDuration: entry.matchedDuration,
+    updatedAt,
+  });
+  try {
+    upsertTrackVideoMapStmt.run(
+      entry.matchKey,
+      entry.artist,
+      entry.title,
+      entry.duration,
+      entry.videoId,
+      entry.matchedTitle,
+      entry.matchedDuration,
+      updatedAt
+    );
+  } catch {
+    // non-fatal
+  }
+}
+
+export function getInFlightTrackVideoMatch(
+  artist: string,
+  title: string
+): Promise<{videoId: string; matchedTitle: string; matchedDuration: number; fromCache: boolean}> | null {
+  const key = buildTrackMatchKey(
+    sanitizeMatchSearchFragment(artist || ''),
+    sanitizeMatchSearchFragment(title || '')
+  );
+  if (!key || key === '::') return null;
+  return trackVideoMatchInFlight.get(key) ?? null;
+}
+
+const SCORE_FILLER_WORDS = new Set([
+  'official',
+  'video',
+  'audio',
+  'lyrics',
+  'hd',
+  'hq',
+  'ft',
+  'feat',
+]);
+
+const WRONG_VERSION_MARKERS = [
+  'live',
+  'cover',
+  'karaoke',
+  'instrumental',
+  'remix',
+  'acoustic',
+  'unplugged',
+  'sped up',
+  'slowed',
+  'nightcore',
+  '8d',
+  'reverb',
+  'tribute',
+  'medley',
+  'mashup',
+  'parody',
+  'backing track',
+] as const;
+
+const LYRIC_REUPLOAD_MARKERS = [
+  'lyrics',
+  'lyric video',
+  'letra',
+  'letras',
+  'sub espanol',
+  'subtitulado',
+  'traducida',
+] as const;
+
+function stripAccentsAndLower(raw: string): string {
+  return String(raw || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function toWordBoundaryText(raw: string): string {
+  return stripAccentsAndLower(raw)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function hasWholeWordMarker(rawText: string, marker: string): boolean {
+  const haystack = toWordBoundaryText(rawText);
+  const needle = toWordBoundaryText(marker);
+  if (!haystack || !needle) return false;
+  return ` ${haystack} `.includes(` ${needle} `);
+}
+
+export function normalizeScoreText(raw: string): string {
+  const stripped = stripAccentsAndLower(raw)
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!stripped) return '';
+  return stripped
+    .split(' ')
+    .filter((tok) => tok.length > 0 && !SCORE_FILLER_WORDS.has(tok))
+    .join(' ');
+}
+
 function normalizeMatchTokenText(raw: string): string {
   return raw
     .toLowerCase()
@@ -5811,7 +5946,7 @@ function normalizeMatchTokenText(raw: string): string {
     .trim();
 }
 
-function buildTrackMatchKey(artist: string, title: string): string {
+export function buildTrackMatchKey(artist: string, title: string): string {
   const a = normalizeMatchTokenText(artist);
   const t = normalizeMatchTokenText(title);
   return `${a}::${t}`;
@@ -5844,13 +5979,38 @@ function pruneTrackVideoMapMemory(now: number): void {
   }
 }
 
+function getRejectedVideoIdSet(trackKey: string): Set<string> {
+  const out = new Set<string>();
+  if (!trackKey || trackKey === '::') return out;
+  try {
+    const rows = getRejectedVideoIdsStmt.all(trackKey) as Array<{videoId: string}>;
+    for (const r of rows) {
+      if (r.videoId && isValidYouTubeVideoId(r.videoId)) {
+        out.add(r.videoId);
+      }
+    }
+  } catch {
+    // ignore DB errors
+  }
+  return out;
+}
+
 export function getCachedTrackVideoId(artist: string, title: string): string | null {
   const key = buildTrackMatchKey(artist, title);
   if (!key || key === '::') return null;
+  const rejected = getRejectedVideoIdSet(key);
   const now = Date.now();
   const mem = trackVideoMapCache.get(key);
-  if (mem && now - mem.updatedAt <= TRACK_VIDEO_MAP_TTL_MS && isValidYouTubeVideoId(mem.videoId)) {
+  if (
+    mem &&
+    now - mem.updatedAt <= TRACK_VIDEO_MAP_TTL_MS &&
+    isValidYouTubeVideoId(mem.videoId) &&
+    !rejected.has(mem.videoId)
+  ) {
     return mem.videoId;
+  }
+  if (mem && rejected.has(mem.videoId)) {
+    trackVideoMapCache.delete(key);
   }
   try {
     const row = getTrackVideoMapStmt.get(key) as
@@ -5859,7 +6019,8 @@ export function getCachedTrackVideoId(artist: string, title: string): string | n
     if (
       row &&
       now - row.updated_at <= TRACK_VIDEO_MAP_TTL_MS &&
-      isValidYouTubeVideoId(row.video_id)
+      isValidYouTubeVideoId(row.video_id) &&
+      !rejected.has(row.video_id)
     ) {
       pruneTrackVideoMapMemory(now);
       trackVideoMapCache.set(key, {
@@ -5876,75 +6037,196 @@ export function getCachedTrackVideoId(artist: string, title: string): string | n
   return null;
 }
 
-function scoreVideoCandidate(
+function computeTokenOverlapRatio(targetNorm: string, candidateNorm: string): number {
+  if (!targetNorm || !candidateNorm) return 0;
+  const targetTokens = Array.from(new Set(targetNorm.split(' ').filter(Boolean)));
+  if (targetTokens.length === 0) return 0;
+  const candSet = new Set(candidateNorm.split(' ').filter(Boolean));
+  let matched = 0;
+  for (const tok of targetTokens) {
+    if (candSet.has(tok)) matched += 1;
+  }
+  return matched / targetTokens.length;
+}
+
+export interface ScoredVideoCandidate {
+  videoId: string;
+  entry: Record<string, unknown>;
+  score: number;
+  roundedScore: number;
+  sourcePreferenceTier: number;
+  titleScore: number;
+  artistScore: number;
+  durationScore: number;
+}
+
+export function scoreVideoCandidateDetailed(
+  entry: Record<string, unknown>,
+  targetArtist: string,
+  targetTitle: string,
+  targetDuration: number
+): Omit<ScoredVideoCandidate, 'videoId' | 'entry'> {
+  const rawTitle = String(entry.title || '').trim();
+  const rawChannel = String(entry.channel || entry.uploader || entry.creator || '').trim();
+  const candDuration = Number(entry.duration) || 0;
+
+  // 1. Title similarity up to 0.45 (exact 0.45, contains 0.35, else token overlap * 0.35)
+  const normTargetTitle = normalizeScoreText(targetTitle);
+  const normCandTitle = normalizeScoreText(rawTitle);
+  let titleScore = 0;
+  if (normTargetTitle && normCandTitle) {
+    if (normCandTitle === normTargetTitle) {
+      titleScore = 0.45;
+    } else if (
+      normCandTitle.includes(normTargetTitle) ||
+      normTargetTitle.includes(normCandTitle)
+    ) {
+      titleScore = 0.35;
+    } else {
+      titleScore = computeTokenOverlapRatio(normTargetTitle, normCandTitle) * 0.35;
+    }
+  }
+
+  // 2. Artist compared to CHANNEL name ONLY (not title), up to 0.30 (exact 0.30, contains 0.22, else overlap * 0.22)
+  const normTargetArtist = normalizeScoreText(targetArtist);
+  const channelWithoutTopic = rawChannel.replace(/\s*-\s*topic$/i, '').trim();
+  const normCandChannel = normalizeScoreText(channelWithoutTopic);
+  let artistScore = 0;
+  if (normTargetArtist && normCandChannel) {
+    const compactTarget = normTargetArtist.replace(/\s+/g, '');
+    const compactChannel = normCandChannel.replace(/\s+/g, '');
+    if (normCandChannel === normTargetArtist) {
+      artistScore = 0.30;
+    } else if (
+      normCandChannel.includes(normTargetArtist) ||
+      normTargetArtist.includes(normCandChannel) ||
+      (compactTarget.length >= 3 &&
+        (compactChannel === `${compactTarget}vevo` || compactChannel.includes(compactTarget)))
+    ) {
+      artistScore = 0.22;
+    } else {
+      artistScore = computeTokenOverlapRatio(normTargetArtist, normCandChannel) * 0.22;
+    }
+  }
+
+  // 3. Duration difference up to 0.25 (<=2s 0.25, <=5s 0.18, <=15s 0.08, >30s -0.10)
+  let durationScore = 0;
+  if (targetDuration > 0 && candDuration > 0) {
+    const diff = Math.abs(candDuration - targetDuration);
+    if (diff <= 2) durationScore = 0.25;
+    else if (diff <= 5) durationScore = 0.18;
+    else if (diff <= 15) durationScore = 0.08;
+    else if (diff > 30) durationScore = -0.10;
+  }
+
+  // 4. Wrong-version penalty 0.20, WHOLE-WORD matching only, both directions
+  let versionPenalty = 0;
+  for (const marker of WRONG_VERSION_MARKERS) {
+    const reqHas = hasWholeWordMarker(targetTitle, marker);
+    const candHas = hasWholeWordMarker(rawTitle, marker);
+    if (reqHas !== candHas) {
+      versionPenalty += 0.20;
+    }
+  }
+
+  // 5. Source preference
+  let sourcePrefBonus = 0;
+  const isTopicChannel = /\s*-\s*topic$/i.test(rawChannel);
+  const isVevoOrOfficialChannel = /vevo|official/i.test(rawChannel);
+  const isPreferredChannel = isTopicChannel || isVevoOrOfficialChannel;
+  if (isPreferredChannel) {
+    sourcePrefBonus += 0.15;
+  }
+
+  const hasOfficialAudio = hasWholeWordMarker(rawTitle, 'official audio');
+  const hasOfficialVideo =
+    !hasOfficialAudio &&
+    (hasWholeWordMarker(rawTitle, 'official video') ||
+      hasWholeWordMarker(rawTitle, 'official music video'));
+
+  if (hasOfficialAudio) {
+    sourcePrefBonus += 0.15;
+  } else if (hasOfficialVideo) {
+    sourcePrefBonus += 0.08;
+  }
+
+  const hasLyricReuploadMarker = LYRIC_REUPLOAD_MARKERS.some(
+    (marker) => hasWholeWordMarker(rawTitle, marker) && !hasWholeWordMarker(targetTitle, marker)
+  );
+  if (hasLyricReuploadMarker) {
+    sourcePrefBonus -= 0.15;
+  }
+
+  const rawScore = titleScore + artistScore + durationScore - versionPenalty + sourcePrefBonus;
+  const score = Math.max(0, Math.min(1, rawScore));
+  const roundedScore = Math.round(score * 10) / 10;
+
+  let sourcePreferenceTier = 0;
+  if (hasLyricReuploadMarker) {
+    sourcePreferenceTier = -1;
+  } else if (isTopicChannel || (isVevoOrOfficialChannel && hasOfficialAudio)) {
+    sourcePreferenceTier = 4;
+  } else if (isVevoOrOfficialChannel) {
+    sourcePreferenceTier = 3;
+  } else if (artistScore >= 0.22 || hasOfficialAudio) {
+    sourcePreferenceTier = 2;
+  } else if (hasOfficialVideo) {
+    sourcePreferenceTier = 1;
+  }
+
+  return {
+    score,
+    roundedScore,
+    sourcePreferenceTier,
+    titleScore,
+    artistScore,
+    durationScore,
+  };
+}
+
+export function scoreVideoCandidate(
   entry: Record<string, unknown>,
   targetArtist: string,
   targetTitle: string,
   targetDuration: number
 ): number {
-  const rawTitle = String(entry.title || '').trim();
-  const rawChannel = String(entry.channel || entry.uploader || entry.creator || '').trim();
-  const candDuration = Number(entry.duration) || 0;
-
-  let score = 0;
-
-  // 1. Duration accuracy (strongest signal against full albums, 1-hour loops, or 15s shorts)
-  if (targetDuration > 0 && candDuration > 0) {
-    const diff = Math.abs(candDuration - targetDuration);
-    if (diff <= 4) score += 50;
-    else if (diff <= 10) score += 38;
-    else if (diff <= 20) score += 22;
-    else if (diff <= 40) score += 5;
-    else if (diff > 90) score -= 55;
-    else score -= 20;
-  } else if (candDuration > 0 && (candDuration < 30 || candDuration > 900)) {
-    score -= 30;
-  }
-
-  // 2. Title & artist token overlap
-  const targetTitleTokens = normalizeMatchTokenText(targetTitle).split(' ').filter(Boolean);
-  const targetArtistTokens = normalizeMatchTokenText(targetArtist).split(' ').filter(Boolean);
-  const candCombined = normalizeMatchTokenText(`${rawTitle} ${rawChannel}`);
-
-  if (targetTitleTokens.length > 0) {
-    const matchedTitleTokens = targetTitleTokens.filter((tok) => candCombined.includes(tok)).length;
-    score += Math.round((matchedTitleTokens / targetTitleTokens.length) * 30);
-  }
-  if (targetArtistTokens.length > 0) {
-    const matchedArtistTokens = targetArtistTokens.filter((tok) => candCombined.includes(tok)).length;
-    score += Math.round((matchedArtistTokens / targetArtistTokens.length) * 20);
-  }
-
-  // 3. Prefer official audio / Topic uploads; penalize covers, karaoke, slowed/reverb, live unless requested
-  const lowerTitle = rawTitle.toLowerCase();
-  const lowerTarget = targetTitle.toLowerCase();
-  if (/-\s*topic$/i.test(rawChannel)) score += 16;
-  if (/\b(?:official\s+audio|audio)\b/i.test(lowerTitle)) score += 10;
-  if (/\b(?:official\s+music\s+video|official\s+video)\b/i.test(lowerTitle)) score += 4;
-
-  const undesiredModifiers = [
-    'karaoke',
-    'instrumental',
-    'slowed',
-    'reverb',
-    'nightcore',
-    '8d audio',
-    'sped up',
-    'cover',
-    'reaction',
-    'tutorial',
-    'piano version',
-    'live',
-    'remix',
-  ];
-  for (const mod of undesiredModifiers) {
-    if (lowerTitle.includes(mod) && !lowerTarget.includes(mod)) {
-      score -= 32;
-    }
-  }
-
-  return score;
+  return scoreVideoCandidateDetailed(entry, targetArtist, targetTitle, targetDuration).score;
 }
+
+export function rankVideoCandidates(
+  entries: Array<Record<string, unknown>>,
+  targetArtist: string,
+  targetTitle: string,
+  targetDuration: number,
+  excludedVideoIds?: Set<string>
+): ScoredVideoCandidate[] {
+  const scored: ScoredVideoCandidate[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const vid = typeof entry.id === 'string' ? entry.id.trim() : '';
+    if (!isValidYouTubeVideoId(vid) || seen.has(vid)) continue;
+    seen.add(vid);
+    if (excludedVideoIds && excludedVideoIds.has(vid)) continue;
+    const detail = scoreVideoCandidateDetailed(entry, targetArtist, targetTitle, targetDuration);
+    scored.push({
+      videoId: vid,
+      entry,
+      ...detail,
+    });
+  }
+
+  scored.sort((a, b) => {
+    const roundDiff = Math.round(b.score * 10) - Math.round(a.score * 10);
+    if (roundDiff !== 0) return roundDiff;
+    const prefDiff = b.sourcePreferenceTier - a.sourcePreferenceTier;
+    if (prefDiff !== 0) return prefDiff;
+    return b.score - a.score;
+  });
+
+  return scored.slice(0, 5);
+}
+
+const TRACK_VIDEO_CACHE_MIN_SCORE = 0.40;
 
 export async function resolveTrackToVideoId(input: {
   artist: string;
@@ -5965,12 +6247,15 @@ export async function resolveTrackToVideoId(input: {
   }
 
   const key = buildTrackMatchKey(artist, title);
-  const now = Date.now();
 
   if (!input.forceRefresh) {
     const cachedVid = getCachedTrackVideoId(artist, title);
     if (cachedVid) {
       const mem = trackVideoMapCache.get(key);
+      recordMatchedVideoOrigin(
+        {trackKey: key, artist, title, requestedDuration: targetDuration},
+        cachedVid
+      );
       return {
         videoId: cachedVid,
         matchedTitle: mem?.matchedTitle || title,
@@ -5990,31 +6275,48 @@ export async function resolveTrackToVideoId(input: {
   }
 
   const searchPromise = (async () => {
-    const searchQuery = artist ? `${artist} - ${title} audio` : `${title} audio`;
+    const searchQuery = artist ? `${title} ${artist}` : title;
     const entries = await withYtdlpResolveSlot(
-      () => runFlatYtSearch(`ytsearch6:${searchQuery}`, null),
+      () => runFlatYtSearch(`ytsearch8:${searchQuery}`, null),
       priority
     );
 
-    let bestEntry: Record<string, unknown> | null = null;
-    let bestVideoId = '';
-    let bestScore = -Infinity;
+    const rejectedIds = getRejectedVideoIdSet(key);
+    let ranked = rankVideoCandidates(entries, artist, title, targetDuration, rejectedIds);
 
-    for (const entry of entries) {
-      const vid = typeof entry.id === 'string' ? entry.id.trim() : '';
-      if (!isValidYouTubeVideoId(vid)) continue;
-      const score = scoreVideoCandidate(entry, artist, title, targetDuration);
-      if (score > bestScore) {
-        bestScore = score;
-        bestVideoId = vid;
-        bestEntry = entry;
+    // If all candidates were rejected (e.g. track already hit 2 BAD rejects and search had no other matches),
+    // fall back to picking the better of the rejected candidates (preferring non-silent / lower lowRunPct / higher score).
+    if (ranked.length === 0 && rejectedIds.size > 0) {
+      const fallbackCandidates = rankVideoCandidates(entries, artist, title, targetDuration);
+      if (fallbackCandidates.length > 0) {
+        fallbackCandidates.sort((a, b) => {
+          const fa = getAudioFactsForVideosStmt.get(a.videoId) as
+            | {lufs: number | null; lowRunPct: number; reason: string}
+            | undefined;
+          const fb = getAudioFactsForVideosStmt.get(b.videoId) as
+            | {lufs: number | null; lowRunPct: number; reason: string}
+            | undefined;
+          const aSilent = fa?.reason === 'silent' ? 1 : 0;
+          const bSilent = fb?.reason === 'silent' ? 1 : 0;
+          if (aSilent !== bSilent) return aSilent - bSilent;
+          const aLow = typeof fa?.lowRunPct === 'number' ? fa.lowRunPct : 0;
+          const bLow = typeof fb?.lowRunPct === 'number' ? fb.lowRunPct : 0;
+          if (Math.abs(aLow - bLow) > 1) return aLow - bLow;
+          return b.score - a.score;
+        });
+        ranked = fallbackCandidates;
       }
     }
 
-    if (!bestVideoId || !bestEntry) {
+    const chosen = ranked[0];
+    const runnerUp = ranked[1] ?? null;
+
+    if (!chosen) {
       throw new Error(`No matching YouTube audio found for "${artist ? `${artist} - ` : ''}${title}"`);
     }
 
+    const bestVideoId = chosen.videoId;
+    const bestEntry = chosen.entry;
     const matchedTitle = String(bestEntry.title || title).trim();
     const matchedDuration = Math.max(0, Math.round(Number(bestEntry.duration) || 0));
     const thumb = extractThumbnailUrl(bestEntry);
@@ -6022,27 +6324,34 @@ export async function resolveTrackToVideoId(input: {
       cacheYouTubeThumbnailUrl(bestVideoId, thumb);
     }
 
-    const updatedAt = Date.now();
-    pruneTrackVideoMapMemory(updatedAt);
-    trackVideoMapCache.set(key, {
-      videoId: bestVideoId,
-      matchedTitle,
-      matchedDuration,
-      updatedAt,
-    });
-    try {
-      upsertTrackVideoMapStmt.run(
-        key,
+    const shouldCache = chosen.score >= TRACK_VIDEO_CACHE_MIN_SCORE;
+    console.info(
+      '[yt-match-resolve]',
+      JSON.stringify({
         artist,
         title,
-        targetDuration,
-        bestVideoId,
+        videoId: bestVideoId,
+        score: Number(chosen.score.toFixed(3)),
+        runnerUpScore: runnerUp ? Number(runnerUp.score.toFixed(3)) : null,
+        cached: shouldCache,
+      })
+    );
+
+    recordMatchedVideoOrigin(
+      {trackKey: key, artist, title, requestedDuration: targetDuration},
+      bestVideoId
+    );
+
+    if (shouldCache) {
+      upsertTrackVideoMapEntry({
+        matchKey: key,
+        artist,
+        title,
+        duration: targetDuration,
+        videoId: bestVideoId,
         matchedTitle,
         matchedDuration,
-        updatedAt
-      );
-    } catch {
-      // non-fatal
+      });
     }
 
     return {

@@ -4,6 +4,7 @@ import type express from 'express';
 import fs from 'fs';
 import path from 'path';
 import {AUDIO_CACHE_DIR} from './db.ts';
+import {enqueueAudioFactsMeasurement} from './audioFacts.ts';
 import {
   getCachedTrackVideoId,
   getCachedYouTubeAudioStream,
@@ -823,6 +824,12 @@ function startOrAttachFill(
           adGateWaitedMs: fill.adGateWaitedMs,
         })
       );
+
+      try {
+        enqueueAudioFactsMeasurement(videoId);
+      } catch {
+        // Best-effort background QC measurement
+      }
 
       return {
         videoId,

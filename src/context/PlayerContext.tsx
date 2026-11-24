@@ -32,6 +32,7 @@ import {
   recordLifecycleDiagnostic,
   recordMediaErrorDiagnostic,
   recordMediaRecoveredDiagnostic,
+  recordNormalizeDiagnostic,
   recordTapDiagnostic,
   recordTransitionDiagnostic,
   updateTapDiagnostic,
@@ -504,6 +505,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   // Playback intent, user-pause tracking, lock-screen recovery & offline ObjectURL pre-warming refs
   const wantPlayingRef = useRef(false);
   const userPausedRef = useRef(false);
+  const userVolumeRef = useRef(volume);
+  userVolumeRef.current = volume;
+  const isMutedRef = useRef(isMuted);
+  isMutedRef.current = isMuted;
+  const trackGainRef = useRef(1);
+  const volumeRampRafRef = useRef<number | null>(null);
+  const normRequestIdRef = useRef(0);
+  const loudnessCacheRef = useRef<Map<string, {lufs: number | null; fetchedAt: number}>>(new Map());
   const lastUnexpectedPauseAtRef = useRef(0);
   const lockAutoResumeAttemptsRef = useRef(0);
   const visibilityResumeTimersRef = useRef<number[]>([]);
@@ -1354,6 +1363,159 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     [registerMediaSessionHandlers, setMediaSessionPlaybackState, syncMediaSessionMetadata]
   );
 
+  const cancelVolumeRamp = useCallback(() => {
+    if (volumeRampRafRef.current !== null) {
+      try {
+        window.cancelAnimationFrame(volumeRampRafRef.current);
+      } catch {
+        // ignore
+      }
+      volumeRampRafRef.current = null;
+    }
+  }, []);
+
+  const rampAudioVolume = useCallback(
+    (audio: HTMLAudioElement, targetVolume: number, durationMs = 150) => {
+      cancelVolumeRamp();
+      const clampedTarget = Math.max(0, Math.min(1, Number.isFinite(targetVolume) ? targetVolume : 1));
+      const startVol = Number.isFinite(audio.volume) ? audio.volume : clampedTarget;
+      const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+
+      if (
+        durationMs <= 0 ||
+        isHidden ||
+        Math.abs(clampedTarget - startVol) < 0.002 ||
+        typeof window === 'undefined' ||
+        typeof window.requestAnimationFrame !== 'function'
+      ) {
+        audio.volume = clampedTarget;
+        return;
+      }
+
+      const startAt = performance.now();
+      const step = (now: number) => {
+        const elapsed = now - startAt;
+        const progress = Math.max(0, Math.min(1, elapsed / durationMs));
+        audio.volume = Math.max(0, Math.min(1, startVol + (clampedTarget - startVol) * progress));
+        if (progress < 1) {
+          volumeRampRafRef.current = window.requestAnimationFrame(step);
+        } else {
+          volumeRampRafRef.current = null;
+        }
+      };
+      volumeRampRafRef.current = window.requestAnimationFrame(step);
+    },
+    [cancelVolumeRamp]
+  );
+
+  const applyTrackStartNormalization = useCallback(
+    (audio: HTMLAudioElement, track: Track) => {
+      const computeGain = (lufs: number | null): number => {
+        if (typeof lufs !== 'number' || !Number.isFinite(lufs)) return 1;
+        const raw = Math.pow(10, (-14 - lufs) / 20);
+        if (!Number.isFinite(raw) || raw <= 0) return 1;
+        return Math.min(1, raw);
+      };
+
+      const applyGainNow = (lufs: number | null, logEvent: boolean) => {
+        const gain = computeGain(lufs);
+        trackGainRef.current = gain;
+        const targetVol = isMutedRef.current ? 0 : userVolumeRef.current * gain;
+        rampAudioVolume(audio, targetVol, 150);
+        if (logEvent) {
+          recordNormalizeDiagnostic({
+            timestamp: new Date().toISOString(),
+            track: getTrackDiagnosticKey(track),
+            lufs: typeof lufs === 'number' && Number.isFinite(lufs) ? Math.round(lufs * 100) / 100 : null,
+            gain: Math.round(gain * 1000) / 1000,
+          });
+        }
+      };
+
+      const normReqId = ++normRequestIdRef.current;
+      const videoId = getYouTubeVideoId(track);
+      const canQueryLoudness =
+        Boolean(videoId) || (Boolean(track.isYouTubeStream) && Boolean(track.title?.trim()));
+
+      if (!canQueryLoudness) {
+        applyGainNow(null, true);
+        return;
+      }
+
+      const cacheKey = videoId
+        ? `yt:${videoId}`
+        : `meta:${(track.artist || '').trim().toLowerCase()}::${(track.title || '').trim().toLowerCase()}`;
+      const cached = loudnessCacheRef.current.get(cacheKey);
+      const now = Date.now();
+      // Cache non-null LUFS for the session; cache null briefly (60s) so newly measured tracks update on next play
+      if (cached && (cached.lufs !== null || now - cached.fetchedAt < 60_000)) {
+        applyGainNow(cached.lufs, true);
+        return;
+      }
+
+      // Reset to unity gain while fetching loudness so the previous track's attenuation never lingers
+      applyGainNow(null, false);
+
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        recordNormalizeDiagnostic({
+          timestamp: new Date().toISOString(),
+          track: getTrackDiagnosticKey(track),
+          lufs: null,
+          gain: 1,
+        });
+        return;
+      }
+
+      const qs = new URLSearchParams();
+      if (videoId) {
+        qs.set('videoId', videoId);
+      } else {
+        if (track.artist) qs.set('artist', track.artist.trim());
+        qs.set('title', track.title.trim());
+      }
+
+      const targetTrackId = track.id;
+      void apiFetch<{lufs: number | null}>(`/api/yt-stream/loudness?${qs.toString()}`)
+        .then((res) => {
+          const lufs =
+            res && typeof res.lufs === 'number' && Number.isFinite(res.lufs) ? res.lufs : null;
+          loudnessCacheRef.current.set(cacheKey, {lufs, fetchedAt: Date.now()});
+          if (loudnessCacheRef.current.size > 500) {
+            const firstKey = loudnessCacheRef.current.keys().next().value;
+            if (firstKey) loudnessCacheRef.current.delete(firstKey);
+          }
+
+          if (normRequestIdRef.current !== normReqId) return;
+          if (stateRef.current.currentTrack?.id !== targetTrackId) return;
+
+          // Apply gain ONLY at track start; never change the level in the middle of a song
+          const currentPos = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+          if (currentPos > 3) {
+            recordNormalizeDiagnostic({
+              timestamp: new Date().toISOString(),
+              track: getTrackDiagnosticKey(track),
+              lufs: lufs !== null ? Math.round(lufs * 100) / 100 : null,
+              gain: Math.round(trackGainRef.current * 1000) / 1000,
+            });
+            return;
+          }
+
+          applyGainNow(lufs, true);
+        })
+        .catch(() => {
+          if (normRequestIdRef.current !== normReqId) return;
+          if (stateRef.current.currentTrack?.id !== targetTrackId) return;
+          recordNormalizeDiagnostic({
+            timestamp: new Date().toISOString(),
+            track: getTrackDiagnosticKey(track),
+            lufs: null,
+            gain: 1,
+          });
+        });
+    },
+    [rampAudioVolume]
+  );
+
   // Synchronously assign audio.src and call audio.play() on the persistent HTMLAudioElement
   // without awaiting React state updates or network calls (critical for iOS/Android lock-screen continuity).
   // If a track is cached in Cache Storage ('xlabplayer-audio-v1'), load from its ObjectURL so
@@ -1509,6 +1671,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       }
 
       if (!isSameLoadedTrack || options.resetIfSame) {
+        applyTrackStartNormalization(audio, track);
         recordTrackPlay(track);
       }
 
@@ -1519,6 +1682,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     [
       acquirePlaybackWebLock,
       activateMediaSessionForPlayback,
+      applyTrackStartNormalization,
       beginTrackTransition,
       clearRecoveryTimer,
       clearSlowTransitionTimer,
@@ -1607,6 +1771,9 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     if (!audio) return;
 
     if (currentTrackId === null) {
+      cancelVolumeRamp();
+      trackGainRef.current = 1;
+      normRequestIdRef.current += 1;
       endTrackTransition();
       clearRecoveryTimer();
       clearSlowTransitionTimer();
@@ -1639,6 +1806,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       loadAndPlayTrackSync(stateRef.current.currentTrack, {resetIfSame: false});
     }
   }, [
+    cancelVolumeRamp,
     clearRecoveryTimer,
     clearSlowTransitionTimer,
     clearVisibilityResumeTimers,
@@ -1650,12 +1818,15 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     syncMediaSessionMetadata,
   ]);
 
-  // Keep volume synced on the persistent audio element
+  useEffect(() => () => cancelVolumeRamp(), [cancelVolumeRamp]);
+
+  // Keep volume synced on the persistent audio element (composing userVolume * normalizationGain)
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    audio.volume = isMuted ? 0 : volume;
-  }, [volume, isMuted]);
+    cancelVolumeRamp();
+    audio.volume = isMuted ? 0 : Math.max(0, Math.min(1, volume * trackGainRef.current));
+  }, [volume, isMuted, cancelVolumeRamp]);
 
   const setVolume = useCallback((vol: number) => {
     const clamped = Math.max(0, Math.min(1, vol));

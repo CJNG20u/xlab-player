@@ -65,12 +65,22 @@ export interface MediaRecoveredDiagnosticEntry {
   platform: PlaybackPlatform;
 }
 
+export interface NormalizeDiagnosticEntry {
+  type: 'normalize';
+  timestamp: string;
+  track: string | null;
+  lufs: number | null;
+  gain: number;
+  platform: PlaybackPlatform;
+}
+
 export type PlaybackDiagnosticEntry =
   | TransitionDiagnosticEntry
   | LifecycleDiagnosticEntry
   | TapDiagnosticEntry
   | MediaErrorDiagnosticEntry
-  | MediaRecoveredDiagnosticEntry;
+  | MediaRecoveredDiagnosticEntry
+  | NormalizeDiagnosticEntry;
 
 export type TransitionDiagnosticInput = Omit<
   TransitionDiagnosticEntry,
@@ -95,6 +105,9 @@ export type MediaRecoveredDiagnosticInput = Omit<
   'type' | 'platform'
 > &
   Partial<Pick<MediaRecoveredDiagnosticEntry, 'type' | 'platform'>>;
+
+export type NormalizeDiagnosticInput = Omit<NormalizeDiagnosticEntry, 'type' | 'platform'> &
+  Partial<Pick<NormalizeDiagnosticEntry, 'type' | 'platform'>>;
 
 export const TRANSITION_LOG_STORAGE_KEY = 'xlab_transition_log';
 const MAX_TRANSITION_ENTRIES = 30;
@@ -208,6 +221,24 @@ function loadInitialRecords(): StoredDiagnosticRecord[] {
               typeof obj.msToRecover === 'number' && Number.isFinite(obj.msToRecover)
                 ? obj.msToRecover
                 : 0,
+            platform: isValidPlatform(obj.platform) ? obj.platform : 'other',
+          },
+        });
+        continue;
+      }
+
+      if (obj.type === 'normalize') {
+        valid.push({
+          id: nextRecordId++,
+          entry: {
+            type: 'normalize',
+            timestamp: obj.timestamp,
+            track: typeof obj.track === 'string' ? obj.track : null,
+            lufs: typeof obj.lufs === 'number' && Number.isFinite(obj.lufs) ? obj.lufs : null,
+            gain:
+              typeof obj.gain === 'number' && Number.isFinite(obj.gain)
+                ? Math.max(0, Math.min(1, obj.gain))
+                : 1,
             platform: isValidPlatform(obj.platform) ? obj.platform : 'other',
           },
         });
@@ -380,6 +411,19 @@ export function recordMediaRecoveredDiagnostic(input: MediaRecoveredDiagnosticIn
   const entry: MediaRecoveredDiagnosticEntry = {
     ...input,
     type: 'media-recovered',
+    platform: input.platform ?? detectPlaybackPlatform(),
+  };
+  records = [...records, {id, entry}].slice(-MAX_TRANSITION_ENTRIES);
+  mirrorToStorage();
+  notifyListeners();
+  return id;
+}
+
+export function recordNormalizeDiagnostic(input: NormalizeDiagnosticInput): number {
+  const id = nextRecordId++;
+  const entry: NormalizeDiagnosticEntry = {
+    ...input,
+    type: 'normalize',
     platform: input.platform ?? detectPlaybackPlatform(),
   };
   records = [...records, {id, entry}].slice(-MAX_TRANSITION_ENTRIES);

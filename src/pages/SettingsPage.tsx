@@ -2075,6 +2075,9 @@ export const SettingsPage: React.FC = () => {
                 if (item.type === 'media-recovered') {
                   return `${item.timestamp}  [media-recovered] track=${item.track ?? '-'}  attempt=${item.attempt}  t=${item.currentTime}s  ms=${item.msToRecover}  plat=${item.platform}`;
                 }
+                if (item.type === 'normalize') {
+                  return `${item.timestamp}  [normalize] track=${item.track ?? '-'}  lufs=${item.lufs !== null ? item.lufs.toFixed(1) : '-'}  gain=${item.gain.toFixed(3)}  plat=${item.platform}`;
+                }
                 const hiddenFor =
                   item.type === 'visible' ? `  hiddenFor=${item.secondsSinceHidden ?? '-'}s` : '';
                 return `${item.timestamp}  [${item.type}] track=${item.track ?? '-'}  paused=${item.paused}  t=${item.currentTime}s  remQ=${item.remainingQueue}${hiddenFor}  lock=${item.hasWebLock}  as=${item.audioSessionState ?? '-'}  plat=${item.platform}`;
