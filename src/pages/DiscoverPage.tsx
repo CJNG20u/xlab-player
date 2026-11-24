@@ -44,6 +44,11 @@ import {
 import {useBackClose} from '../lib/backStack';
 import {useScrollReady} from '../lib/scrollHistory';
 import {scrollMainToTop} from '../lib/tabMemory';
+import {
+  createRowWarmIntentController,
+  isBackgroundWarmupEnabled,
+  type WarmTrackTarget,
+} from '../lib/trackWarmup';
 import type {
   DiscoverAlbumItem,
   DiscoverAlbumTrack,
@@ -895,10 +900,48 @@ export const DiscoverPage: React.FC = () => {
     void loadDiscoverFeedRef.current(false);
   }, [lastPlayedArtistKey, offline, user?.id]);
 
+  // Pointerdown / touchstart playback-priority warm intent (cancels if pointer moves / scrolls)
+  const rowWarmIntentRef = useRef<ReturnType<typeof createRowWarmIntentController> | null>(null);
+  if (!rowWarmIntentRef.current) {
+    rowWarmIntentRef.current = createRowWarmIntentController();
+  }
+  useEffect(() => {
+    return () => {
+      rowWarmIntentRef.current?.cancel();
+    };
+  }, []);
+
+  const handleRowWarmPointerDown = useCallback(
+    (e: React.PointerEvent, target: WarmTrackTarget) => {
+      if (offline) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      rowWarmIntentRef.current?.start(
+        target,
+        {clientX: e.clientX, clientY: e.clientY},
+        e.target
+      );
+    },
+    [offline]
+  );
+
+  const handleRowWarmTouchStart = useCallback(
+    (e: React.TouchEvent, target: WarmTrackTarget) => {
+      if (offline) return;
+      const touch = e.touches[0];
+      if (!touch) return;
+      rowWarmIntentRef.current?.start(
+        target,
+        {clientX: touch.clientX, clientY: touch.clientY},
+        e.target
+      );
+    },
+    [offline]
+  );
+
   // Background prefetch the top 3 visible Discover tracks once the Discover feed loads
   const prefetchedDiscoverKeyRef = useRef<string>('');
   useEffect(() => {
-    if (offline || !discoverFeed || discoverFeed.newReleases.length === 0) return;
+    if (offline || !isBackgroundWarmupEnabled() || !discoverFeed || discoverFeed.newReleases.length === 0) return;
     const topThree = discoverFeed.newReleases.slice(0, 3);
     const key = topThree.map((i) => i.id || i.videoId || `${i.artist}:${i.title}`).join('|');
     if (prefetchedDiscoverKeyRef.current === key) return;
@@ -910,51 +953,57 @@ export const DiscoverPage: React.FC = () => {
         artist: item.artist,
         title: item.title,
         duration: item.duration,
-      }))
+      })),
+      {maxItems: 3}
     );
   }, [discoverFeed, offline]);
 
-  // Background prefetch the top 3 search song results (or link preview items) so tapping plays near-instantly
+  // Background prefetch the first 8 playable search results (debounced 400ms, cancelled on new search, skipped offline)
   const prefetchedSearchKeyRef = useRef<string>('');
   useEffect(() => {
-    if (offline) return;
+    if (offline || !isBackgroundWarmupEnabled()) return;
+
+    let itemsToPrefetch: WarmTrackTarget[] = [];
     if (structuredSearch && structuredSearch.tracks.length > 0) {
-      const topThree = structuredSearch.tracks.slice(0, 3);
-      const itemsToPrefetch = topThree
+      itemsToPrefetch = structuredSearch.tracks
         .map((track) => ({
           videoId: track.videoId,
           artist: track.artist,
           title: track.title,
           duration: track.duration,
         }))
-        .filter((item) => Boolean(item.videoId || item.title));
-      if (itemsToPrefetch.length === 0) return;
-
-      const key = itemsToPrefetch.map((i) => i.videoId || `${i.artist}:${i.title}`).join('|');
-      if (prefetchedSearchKeyRef.current === key) return;
-      prefetchedSearchKeyRef.current = key;
-
-      prefetchYouTubeStreams(itemsToPrefetch);
-      return;
+        .filter((item) => Boolean(item.videoId || (item.artist && item.title) || item.title))
+        .slice(0, 8);
+    } else if (previewItems.length > 0) {
+      itemsToPrefetch = previewItems
+        .map((item) => ({
+          videoId: extractYouTubeVideoIdFromItem(item),
+          artist: item.channel || item.artist,
+          title: item.title,
+          duration: item.duration,
+        }))
+        .filter((item) => Boolean(item.videoId || (item.artist && item.title) || item.title))
+        .slice(0, 8);
     }
 
-    if (previewItems.length === 0) return;
-    const topThree = previewItems.slice(0, 3);
-    const itemsToPrefetch = topThree
-      .map((item) => ({
-        videoId: extractYouTubeVideoIdFromItem(item),
-        artist: item.channel || item.artist,
-        title: item.title,
-        duration: item.duration,
-      }))
-      .filter((item) => Boolean(item.videoId || item.title));
     if (itemsToPrefetch.length === 0) return;
 
     const key = itemsToPrefetch.map((i) => i.videoId || `${i.artist}:${i.title}`).join('|');
     if (prefetchedSearchKeyRef.current === key) return;
-    prefetchedSearchKeyRef.current = key;
 
-    prefetchYouTubeStreams(itemsToPrefetch);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      if (controller.signal.aborted) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      if (!isBackgroundWarmupEnabled()) return;
+      prefetchedSearchKeyRef.current = key;
+      prefetchYouTubeStreams(itemsToPrefetch, {maxItems: 8, signal: controller.signal});
+    }, 400);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [offline, previewItems, structuredSearch]);
 
   const loadInfo = useCallback(async () => {
@@ -2173,11 +2222,20 @@ export const DiscoverPage: React.FC = () => {
                             const saveKey = track.videoId ? `yt-${track.videoId}` : track.id;
                             const saveStatus = getYouTubeSaveStatus(saveKey);
 
+                            const warmTarget: WarmTrackTarget = {
+                              videoId: track.videoId,
+                              artist: track.artist,
+                              title: track.title,
+                              duration: track.duration,
+                            };
+
                             return (
                               <div
                                 key={track.id}
                                 role="button"
                                 tabIndex={0}
+                                onPointerDown={(e) => handleRowWarmPointerDown(e, warmTarget)}
+                                onTouchStart={(e) => handleRowWarmTouchStart(e, warmTarget)}
                                 onClick={() =>
                                   handlePlaySearchTrack(track, structuredSearch.tracks)
                                 }
@@ -2229,6 +2287,7 @@ export const DiscoverPage: React.FC = () => {
 
                                     <button
                                       type="button"
+                                      data-warm-play="true"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         handlePlaySearchTrack(track, structuredSearch.tracks);
@@ -2398,6 +2457,23 @@ export const DiscoverPage: React.FC = () => {
                                   return (
                                     <button
                                       type="button"
+                                      data-warm-play="true"
+                                      onPointerDown={(e) =>
+                                        handleRowWarmPointerDown(e, {
+                                          videoId: extractYouTubeVideoIdFromItem(item),
+                                          artist: item.channel || item.artist,
+                                          title: item.title,
+                                          duration: item.duration,
+                                        })
+                                      }
+                                      onTouchStart={(e) =>
+                                        handleRowWarmTouchStart(e, {
+                                          videoId: extractYouTubeVideoIdFromItem(item),
+                                          artist: item.channel || item.artist,
+                                          title: item.title,
+                                          duration: item.duration,
+                                        })
+                                      }
                                       onClick={(e) =>
                                         handlePlayYouTubeItem(e, item, previewItems)
                                       }

@@ -1,3 +1,5 @@
+import type {TrackWarmthState} from './trackWarmup';
+
 export type PlaybackPlatform = 'ios' | 'android' | 'other';
 export type LifecycleDiagnosticType = 'hidden' | 'visible' | 'freeze' | 'resume';
 
@@ -30,7 +32,20 @@ export interface LifecycleDiagnosticEntry {
   hasWebLock: boolean;
 }
 
-export type PlaybackDiagnosticEntry = TransitionDiagnosticEntry | LifecycleDiagnosticEntry;
+export interface TapDiagnosticEntry {
+  type: 'tap';
+  timestamp: string;
+  track: string | null;
+  warmth: TrackWarmthState;
+  msToPlaying: number | null;
+  error: string | null;
+  platform: PlaybackPlatform;
+}
+
+export type PlaybackDiagnosticEntry =
+  | TransitionDiagnosticEntry
+  | LifecycleDiagnosticEntry
+  | TapDiagnosticEntry;
 
 export type TransitionDiagnosticInput = Omit<
   TransitionDiagnosticEntry,
@@ -43,6 +58,9 @@ export type LifecycleDiagnosticInput = Omit<
   'platform' | 'audioSessionState'
 > &
   Partial<Pick<LifecycleDiagnosticEntry, 'platform' | 'audioSessionState'>>;
+
+export type TapDiagnosticInput = Omit<TapDiagnosticEntry, 'type' | 'platform'> &
+  Partial<Pick<TapDiagnosticEntry, 'type' | 'platform'>>;
 
 export const TRANSITION_LOG_STORAGE_KEY = 'xlab_transition_log';
 const MAX_TRANSITION_ENTRIES = 30;
@@ -94,6 +112,10 @@ function isLifecycleType(val: unknown): val is LifecycleDiagnosticType {
   return val === 'hidden' || val === 'visible' || val === 'freeze' || val === 'resume';
 }
 
+function isValidWarmth(val: unknown): val is TrackWarmthState {
+  return val === 'warm' || val === 'matched-only' || val === 'cold';
+}
+
 function loadInitialRecords(): StoredDiagnosticRecord[] {
   if (typeof window === 'undefined') return [];
   try {
@@ -106,6 +128,25 @@ function loadInitialRecords(): StoredDiagnosticRecord[] {
       if (!item || typeof item !== 'object') continue;
       const obj = item as Record<string, unknown>;
       if (typeof obj.timestamp !== 'string') continue;
+
+      if (obj.type === 'tap') {
+        valid.push({
+          id: nextRecordId++,
+          entry: {
+            type: 'tap',
+            timestamp: obj.timestamp,
+            track: typeof obj.track === 'string' ? obj.track : null,
+            warmth: isValidWarmth(obj.warmth) ? obj.warmth : 'cold',
+            msToPlaying:
+              typeof obj.msToPlaying === 'number' && Number.isFinite(obj.msToPlaying)
+                ? obj.msToPlaying
+                : null,
+            error: typeof obj.error === 'string' ? obj.error : null,
+            platform: isValidPlatform(obj.platform) ? obj.platform : 'other',
+          },
+        });
+        continue;
+      }
 
       if (isLifecycleType(obj.type)) {
         const entry: LifecycleDiagnosticEntry = {
@@ -221,6 +262,40 @@ export function recordLifecycleDiagnostic(input: LifecycleDiagnosticInput): numb
   mirrorToStorage();
   notifyListeners();
   return id;
+}
+
+export function recordTapDiagnostic(input: TapDiagnosticInput): number {
+  const id = nextRecordId++;
+  const entry: TapDiagnosticEntry = {
+    ...input,
+    type: 'tap',
+    platform: input.platform ?? detectPlaybackPlatform(),
+  };
+  records = [...records, {id, entry}].slice(-MAX_TRANSITION_ENTRIES);
+  mirrorToStorage();
+  notifyListeners();
+  return id;
+}
+
+export function updateTapDiagnostic(
+  id: number,
+  patch: Partial<Pick<TapDiagnosticEntry, 'msToPlaying' | 'error'>>
+): void {
+  let changed = false;
+  records = records.map((rec) => {
+    if (rec.id !== id || rec.entry.type !== 'tap') return rec;
+    changed = true;
+    return {
+      ...rec,
+      entry: {
+        ...rec.entry,
+        ...patch,
+      },
+    };
+  });
+  if (!changed) return;
+  mirrorToStorage();
+  notifyListeners();
 }
 
 export function updateTransitionDiagnostic(

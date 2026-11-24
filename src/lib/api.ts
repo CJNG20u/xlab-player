@@ -7,6 +7,13 @@ import type {
   PlayHistoryEntry,
   Track,
 } from '../types';
+import {
+  isBackgroundWarmupEnabled,
+  isVideoIdWarm,
+  markTargetWarm,
+  warmYouTubeStreams,
+  type WarmYouTubeStreamsOptions,
+} from './trackWarmup';
 
 const TOKEN_STORAGE_KEY = 'xlabplayer_token';
 const PLAY_HISTORY_STORAGE_KEY = 'xlabplayer_play_history_v1';
@@ -170,11 +177,12 @@ export interface StreamPrefetchTarget {
 export function prefetchVideoIds(videoIds: string[], download = true): void {
   if (!videoIds || videoIds.length === 0) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+  if (!isBackgroundWarmupEnabled()) return;
   const cleaned: string[] = [];
   for (const raw of videoIds) {
     if (cleaned.length >= 3) break;
     const id = raw?.trim();
-    if (id && !cleaned.includes(id)) {
+    if (id && !cleaned.includes(id) && !isVideoIdWarm(id)) {
       cleaned.push(id);
     }
   }
@@ -191,33 +199,24 @@ export function prefetchVideoIds(videoIds: string[], download = true): void {
     credentials: 'include',
     body: JSON.stringify({videoIds: cleaned, download}),
     priority: 'low',
-  } as RequestInit).catch(() => {
-    // Best-effort background warmup
-  });
+  } as RequestInit)
+    .then((res) => {
+      if (!res.ok) return;
+      for (const id of cleaned) {
+        markTargetWarm({videoId: id});
+      }
+    })
+    .catch(() => {
+      // Best-effort background warmup
+    });
 }
 
-export function prefetchYouTubeStreams(items: StreamPrefetchTarget[]): void {
+export function prefetchYouTubeStreams(
+  items: StreamPrefetchTarget[],
+  options?: WarmYouTubeStreamsOptions
+): void {
   if (!items || items.length === 0) return;
-  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-  const cleaned = items
-    .slice(0, 5)
-    .filter((i) => Boolean(i.videoId?.trim() || i.title?.trim()));
-  if (cleaned.length === 0) return;
-
-  const token = getStoredToken();
-  const headers: Record<string, string> = {'Content-Type': 'application/json'};
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  void fetch('/api/yt-stream/prefetch', {
-    method: 'POST',
-    headers,
-    credentials: 'include',
-    body: JSON.stringify({items: cleaned}),
-    priority: 'low',
-  } as RequestInit).catch(() => {
-    // Best-effort background warmup
-  });
+  void warmYouTubeStreams(items, options);
 }
 
 export function getLocalPlayHistory(): PlayHistoryEntry[] {

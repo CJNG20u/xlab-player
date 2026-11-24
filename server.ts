@@ -17,11 +17,13 @@ import {
 import {
   cacheYouTubeThumbnailUrl,
   DirectProxyCircuitOpenError,
+  getCachedTrackVideoId,
   getCachedYouTubeAudioStream,
   getCachedYouTubeThumbnailUrl,
   getDirectProxyCircuitCooldownRemainingMs,
   getPipeStartupTimeoutMs,
   getVideoDirectProxyNegativeInfo,
+  hasAvailablePrefetchResolveSlot,
   inspectYouTubeStreamUrlParams,
   invalidateYouTubeAudioStreamCache,
   isAllowedYouTubeMediaUrl,
@@ -847,7 +849,8 @@ async function startServer() {
   });
 
   // Non-blocking background stream prefetch endpoint (supports metadata items + videoIds)
-  app.post('/api/yt-stream/prefetch', requireAuth, (req: AuthRequest, res) => {
+  // Also supports priority: 'playback' for pointerdown/touchstart intent warming (1 track, cancelable on disconnect).
+  app.post('/api/yt-stream/prefetch', requireAuth, async (req: AuthRequest, res) => {
     const rateKey = req.user?.id ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
     const rate = checkPrefetchRateLimit(rateKey);
     if (!rate.allowed) {
@@ -856,13 +859,14 @@ async function startServer() {
       return;
     }
 
+    const priority = req.body?.priority === 'playback' ? 'playback' : 'prefetch';
     const rawItems = Array.isArray(req.body?.items)
       ? req.body.items
       : req.body && typeof req.body === 'object'
         ? [req.body]
         : [];
     const items: PrefetchRequestItem[] = [];
-    for (const raw of rawItems.slice(0, 5)) {
+    for (const raw of rawItems.slice(0, 8)) {
       if (!raw || typeof raw !== 'object') continue;
       const rec = raw as Record<string, unknown>;
       const rawVid = typeof rec.videoId === 'string' ? rec.videoId.trim() : '';
@@ -880,29 +884,134 @@ async function startServer() {
             : undefined,
       });
     }
+
+    if (priority === 'playback') {
+      const target = items[0];
+      if (!target || (!target.videoId && !target.title)) {
+        res.status(202).json({ok: true, accepted: 0, warmed: false});
+        return;
+      }
+      if (isDirectProxyCircuitOpen() || upstreamBackoffRemainingSec() > 0) {
+        res.status(202).json({ok: true, accepted: 0, warmed: false, skipped: 'circuit_open'});
+        return;
+      }
+
+      let aborted = false;
+      req.on('close', () => {
+        if (!res.writableEnded) {
+          aborted = true;
+        }
+      });
+
+      try {
+        let videoId = target.videoId || '';
+        if (!videoId && target.title) {
+          const matched = await resolveTrackToVideoId({
+            artist: target.artist || '',
+            title: target.title,
+            duration: target.duration,
+            priority: 'playback',
+          });
+          videoId = matched.videoId;
+        }
+        if (aborted || !videoId || !isValidYouTubeVideoId(videoId)) {
+          if (!res.headersSent) {
+            res.status(202).json({ok: true, accepted: 0, warmed: false});
+          }
+          return;
+        }
+        if (isVideoDirectProxyNegative(videoId) || isDirectProxyCircuitOpen() || upstreamBackoffRemainingSec() > 0) {
+          if (!res.headersSent) {
+            res.status(202).json({ok: true, accepted: 0, videoId, warmed: false});
+          }
+          return;
+        }
+        if (!getCachedYouTubeAudioStream(videoId)) {
+          await resolveYouTubeAudioStreamUrl(videoId, {priority: 'playback'});
+        }
+        if (!res.headersSent) {
+          res.status(200).json({ok: true, accepted: 1, videoId, warmed: true});
+        }
+      } catch {
+        if (!res.headersSent) {
+          res.status(202).json({ok: true, accepted: 0, warmed: false});
+        }
+      }
+      return;
+    }
+
     const accepted = enqueueMetadataPrefetch(items);
     res.status(202).json({ok: true, accepted});
   });
 
   // Resolve structured track metadata (artist, title, duration) -> cached YouTube videoId
+  // Matching only (never resolves stream URL). Supports priority: 'low' for background album/playlist matching.
   app.post('/api/yt-stream/resolve', requireAuth, async (req: AuthRequest, res) => {
     const artist = typeof req.body?.artist === 'string' ? req.body.artist.trim().slice(0, 120) : '';
     const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 160) : '';
     const duration = Number.isFinite(Number(req.body?.duration))
       ? Math.max(0, Number(req.body.duration))
       : 0;
+    const isLowPriority = req.body?.priority === 'low';
     if (!title) {
       res.status(400).json({error: 'Track title is required'});
       return;
     }
+
+    if (isLowPriority) {
+      const rateKey = req.user?.id ? `user:${req.user.id}` : `ip:${req.ip || 'unknown'}`;
+      const rate = checkPrefetchRateLimit(rateKey);
+      if (!rate.allowed) {
+        res.setHeader('Retry-After', String(rate.retryAfterSec));
+        res.status(429).json({error: 'Too many resolve requests'});
+        return;
+      }
+
+      // Serve already-cached mappings immediately without touching YouTube or resolve slots
+      const cachedVid = getCachedTrackVideoId(artist, title);
+      if (cachedVid && isValidYouTubeVideoId(cachedVid)) {
+        res.json({
+          videoId: cachedVid,
+          matchedTitle: title,
+          matchedDuration: duration,
+          fromCache: true,
+          url: `https://www.youtube.com/watch?v=${cachedVid}`,
+          streamUrl: `/api/yt-stream/${encodeURIComponent(cachedVid)}`,
+        });
+        return;
+      }
+
+      if (isDirectProxyCircuitOpen()) {
+        res.json({skipped: true, reason: 'circuit_open'});
+        return;
+      }
+      if (upstreamBackoffRemainingSec() > 0) {
+        res.json({skipped: true, reason: 'backoff'});
+        return;
+      }
+      if (!hasAvailablePrefetchResolveSlot()) {
+        res.json({skipped: true, reason: 'busy'});
+        return;
+      }
+    }
+
     try {
-      const matched = await resolveTrackToVideoId({artist, title, duration});
+      const matched = await resolveTrackToVideoId({
+        artist,
+        title,
+        duration,
+        priority: isLowPriority ? 'prefetch' : 'playback',
+      });
       res.json({
         ...matched,
         url: `https://www.youtube.com/watch?v=${matched.videoId}`,
         streamUrl: `/api/yt-stream/${encodeURIComponent(matched.videoId)}`,
       });
     } catch (err) {
+      if (isLowPriority) {
+        res.json({skipped: true, reason: 'unavailable'});
+        return;
+      }
       const msg = err instanceof Error ? err.message : 'Failed to match audio stream';
       res.status(502).json({error: msg});
     }

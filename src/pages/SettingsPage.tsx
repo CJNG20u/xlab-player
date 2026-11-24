@@ -51,6 +51,11 @@ import {
   type PlaybackDiagnosticEntry,
 } from '../lib/playbackDiagnostics';
 import {useScrollReady} from '../lib/scrollHistory';
+import {
+  isBackgroundWarmupEnabled,
+  setBackgroundWarmupEnabled,
+  subscribeBackgroundWarmup,
+} from '../lib/trackWarmup';
 import type {AppSettings, MountHealth, ScanProgress, SystemStatus, User} from '../types';
 import {
   clearAllOfflineMusic,
@@ -167,6 +172,21 @@ export const SettingsPage: React.FC = () => {
     const saved = setDeviceName(deviceNameInput);
     setDeviceNameInput(saved);
     setDeviceNameFeedback(`Device name saved as "${saved}".`);
+  };
+
+  // Background Track Warming (All Users, default ON)
+  const [bgWarmupEnabled, setBgWarmupEnabled] = useState<boolean>(() =>
+    isBackgroundWarmupEnabled()
+  );
+
+  useEffect(() => {
+    return subscribeBackgroundWarmup((enabled) => setBgWarmupEnabled(enabled));
+  }, []);
+
+  const handleToggleBgWarmup = () => {
+    const next = !bgWarmupEnabled;
+    setBgWarmupEnabled(next);
+    setBackgroundWarmupEnabled(next);
   };
 
   useEffect(() => {
@@ -745,6 +765,37 @@ export const SettingsPage: React.FC = () => {
             <span
               className={`inline-block h-4 w-4 transform rounded-full transition-transform ${
                 autoplayEnabled
+                  ? 'translate-x-6 bg-[var(--accent-contrast)]'
+                  : 'translate-x-1 bg-[var(--text-secondary)]'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 pt-4 mt-4 border-t border-[var(--border-subtle)]">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-[var(--text-primary)]">
+              Warm tracks in background
+            </p>
+            <p className="text-xs text-[var(--text-secondary)]">
+              Pre-match and warm visible search, album, and playlist tracks before you tap so playback starts faster.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={bgWarmupEnabled}
+            aria-label="Warm tracks in background"
+            onClick={handleToggleBgWarmup}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              bgWarmupEnabled
+                ? 'bg-[var(--accent)]'
+                : 'bg-[var(--bg-elevated)] border border-[var(--border-strong)]'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full transition-transform ${
+                bgWarmupEnabled
                   ? 'translate-x-6 bg-[var(--accent-contrast)]'
                   : 'translate-x-1 bg-[var(--text-secondary)]'
               }`}
@@ -1997,6 +2048,9 @@ export const SettingsPage: React.FC = () => {
               .map((item) => {
                 if (item.type === 'transition') {
                   return `${item.timestamp}  [transition] ${item.from ?? '-'} -> ${item.to ?? '-'}  vis=${item.visibilityAtEnded}  prewarmed: ${item.prewarmed}  ms=${item.msToPlaying ?? '-'}  rs=${item.readyState ?? '-'} ns=${item.networkState ?? '-'}  lock=${item.hasWebLock}  as=${item.audioSessionState ?? '-'}  plat=${item.platform}${item.error ? `  err=${item.error}` : ''}`;
+                }
+                if (item.type === 'tap') {
+                  return `${item.timestamp}  [tap] track=${item.track ?? '-'}  warmth=${item.warmth}  ms=${item.msToPlaying ?? '-'}  plat=${item.platform}${item.error ? `  err=${item.error}` : ''}`;
                 }
                 const hiddenFor =
                   item.type === 'visible' ? `  hiddenFor=${item.secondsSinceHidden ?? '-'}s` : '';

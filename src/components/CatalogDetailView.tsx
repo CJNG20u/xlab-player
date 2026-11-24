@@ -39,6 +39,13 @@ import {
   getUnifiedPageHeaderTopHex,
   useStatusBarColor,
 } from '../lib/themeColor';
+import {
+  createRowWarmIntentController,
+  isBackgroundWarmupEnabled,
+  isTargetWarm,
+  runBackgroundTrackMatcher,
+  type WarmTrackTarget,
+} from '../lib/trackWarmup';
 import type {
   DiscoverAlbumDetail,
   DiscoverAlbumTrack,
@@ -271,6 +278,66 @@ const VirtualizedYouTubePlaylistTracks: React.FC<VirtualizedYouTubePlaylistTrack
     };
   }, [mainScrollElement, tracks.length, virtualizer]);
 
+  const rowWarmIntentRef = useRef<ReturnType<typeof createRowWarmIntentController> | null>(null);
+  if (!rowWarmIntentRef.current) {
+    rowWarmIntentRef.current = createRowWarmIntentController();
+  }
+  useEffect(() => {
+    return () => {
+      rowWarmIntentRef.current?.cancel();
+    };
+  }, []);
+
+  // Warm up to 3 visible unwarmed tracks in the virtualized list, debounced 300ms after scrolling stops
+  useEffect(() => {
+    if (!mainScrollElement || tracks.length === 0) return;
+
+    let timer: number | null = null;
+    const warmVisibleRows = () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      if (!isBackgroundWarmupEnabled()) return;
+
+      const scrollTop = mainScrollElement.scrollTop;
+      const viewBottom = scrollTop + mainScrollElement.clientHeight;
+      const visibleItems = virtualizer.getVirtualItems().filter((vItem) => {
+        return vItem.end >= scrollTop && vItem.start <= viewBottom;
+      });
+
+      const candidates: WarmTrackTarget[] = [];
+      for (const vItem of visibleItems) {
+        if (candidates.length >= 3) break;
+        const track = tracks[vItem.index];
+        if (!track) continue;
+        const target: WarmTrackTarget = {
+          videoId: track.videoId,
+          artist: track.artist || track.channel,
+          title: track.title,
+          duration: track.duration,
+        };
+        if (isTargetWarm(target)) continue;
+        candidates.push(target);
+      }
+
+      if (candidates.length > 0) {
+        prefetchYouTubeStreams(candidates, {maxItems: 3});
+      }
+    };
+
+    const handleScroll = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        warmVisibleRows();
+      }, 300);
+    };
+
+    mainScrollElement.addEventListener('scroll', handleScroll, {passive: true});
+    return () => {
+      mainScrollElement.removeEventListener('scroll', handleScroll);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [mainScrollElement, tracks, virtualizer]);
+
   const effectiveScrollMargin = virtualizer.options.scrollMargin;
 
   return (
@@ -309,6 +376,33 @@ const VirtualizedYouTubePlaylistTracks: React.FC<VirtualizedYouTubePlaylistTrack
             <div
               role="button"
               tabIndex={0}
+              onPointerDown={(e) => {
+                if (e.pointerType === 'mouse' && e.button !== 0) return;
+                rowWarmIntentRef.current?.start(
+                  {
+                    videoId: track.videoId,
+                    artist: track.artist || track.channel,
+                    title: track.title,
+                    duration: track.duration,
+                  },
+                  {clientX: e.clientX, clientY: e.clientY},
+                  e.target
+                );
+              }}
+              onTouchStart={(e) => {
+                const touch = e.touches[0];
+                if (!touch) return;
+                rowWarmIntentRef.current?.start(
+                  {
+                    videoId: track.videoId,
+                    artist: track.artist || track.channel,
+                    title: track.title,
+                    duration: track.duration,
+                  },
+                  {clientX: touch.clientX, clientY: touch.clientY},
+                  e.target
+                );
+              }}
               onClick={() => onPlayTrack(track, virtualRow.index)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
@@ -549,8 +643,10 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   onFlashToast,
 }) => {
   const {theme, isLight, isTidal} = useTheme();
+  const {element: mainScrollElement} = useMainScroll();
   const {
     currentTrack,
+    queue,
     isPlaying,
     isBuffering,
     playTrack,
@@ -718,8 +814,55 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     void loadDetail(false);
   }, [loadDetail]);
 
+  // Pointerdown / touchstart playback-priority warm intent for album & artist track rows
+  const rowWarmIntentRef = useRef<ReturnType<typeof createRowWarmIntentController> | null>(null);
+  if (!rowWarmIntentRef.current) {
+    rowWarmIntentRef.current = createRowWarmIntentController();
+  }
+  useEffect(() => {
+    return () => {
+      rowWarmIntentRef.current?.cancel();
+    };
+  }, []);
+
+  const handleTrackRowPointerDown = useCallback(
+    (e: React.PointerEvent, track: DiscoverAlbumTrack) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      rowWarmIntentRef.current?.start(
+        {
+          videoId: track.videoId,
+          artist: track.artist,
+          title: track.title,
+          duration: track.duration,
+        },
+        {clientX: e.clientX, clientY: e.clientY},
+        e.target
+      );
+    },
+    []
+  );
+
+  const handleTrackRowTouchStart = useCallback(
+    (e: React.TouchEvent, track: DiscoverAlbumTrack) => {
+      const touch = e.touches[0];
+      if (!touch) return;
+      rowWarmIntentRef.current?.start(
+        {
+          videoId: track.videoId,
+          artist: track.artist,
+          title: track.title,
+          duration: track.duration,
+        },
+        {clientX: touch.clientX, clientY: touch.clientY},
+        e.target
+      );
+    },
+    []
+  );
+
   // Background prefetch top 3 tracks whenever an album, artist, or playlist detail view loads
   useEffect(() => {
+    if (!isBackgroundWarmupEnabled()) return;
     if (route.type === 'playlist') {
       const tracks = ytPlaylist?.tracks;
       if (!tracks || tracks.length === 0) return;
@@ -729,7 +872,8 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
           artist: t.artist || t.channel,
           title: t.title,
           duration: t.duration,
-        }))
+        })),
+        {maxItems: 3}
       );
       return;
     }
@@ -741,9 +885,124 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         artist: t.artist,
         title: t.title,
         duration: t.duration,
-      }))
+      })),
+      {maxItems: 3}
     );
   }, [album, artist, route.type, ytPlaylist]);
+
+  // Warm up to 3 visible tracks in album/artist track lists, debounced 300ms after scrolling stops
+  const catalogTrackListRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!mainScrollElement) return;
+    const tracks =
+      route.type === 'album'
+        ? album?.tracks
+        : route.type === 'artist'
+          ? artist?.topTracks
+          : null;
+    if (!tracks || tracks.length <= 3) return;
+
+    let timer: number | null = null;
+    const warmVisibleRows = () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      if (!isBackgroundWarmupEnabled()) return;
+      const container = catalogTrackListRef.current;
+      if (!container) return;
+
+      const scrollRect = mainScrollElement.getBoundingClientRect();
+      const rows = container.querySelectorAll<HTMLElement>('[data-track-index]');
+      const candidates: WarmTrackTarget[] = [];
+
+      for (const row of rows) {
+        if (candidates.length >= 3) break;
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom < scrollRect.top || rect.top > scrollRect.bottom) continue;
+        const idx = Number(row.dataset.trackIndex);
+        const track = Number.isInteger(idx) ? tracks[idx] : undefined;
+        if (!track) continue;
+        const target: WarmTrackTarget = {
+          videoId: track.videoId,
+          artist: track.artist,
+          title: track.title,
+          duration: track.duration,
+        };
+        if (isTargetWarm(target)) continue;
+        candidates.push(target);
+      }
+
+      if (candidates.length > 0) {
+        prefetchYouTubeStreams(candidates, {maxItems: 3});
+      }
+    };
+
+    const handleScroll = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        warmVisibleRows();
+      }, 300);
+    };
+
+    mainScrollElement.addEventListener('scroll', handleScroll, {passive: true});
+    return () => {
+      mainScrollElement.removeEventListener('scroll', handleScroll);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [album, artist, mainScrollElement, route.type]);
+
+  // Lowest-priority background track->video matching (1 at a time, ~1.5s apart, matching only).
+  // Aborts immediately when leaving the view, changing detail route, or when the playback queue changes.
+  const bgMatcherAbortRef = useRef<AbortController | null>(null);
+  const matcherInitialQueueRef = useRef(queue);
+
+  useEffect(() => {
+    matcherInitialQueueRef.current = queue;
+    const rawTracks: WarmTrackTarget[] =
+      route.type === 'album' && album?.tracks
+        ? album.tracks.map((t) => ({
+            videoId: t.videoId,
+            artist: t.artist,
+            title: t.title,
+            duration: t.duration,
+          }))
+        : route.type === 'artist' && artist?.topTracks
+          ? artist.topTracks.map((t) => ({
+              videoId: t.videoId,
+              artist: t.artist,
+              title: t.title,
+              duration: t.duration,
+            }))
+          : route.type === 'playlist' && ytPlaylist?.tracks
+            ? ytPlaylist.tracks.map((t) => ({
+                videoId: t.videoId,
+                artist: t.artist || t.channel,
+                title: t.title,
+                duration: t.duration,
+              }))
+            : [];
+
+    if (rawTracks.length === 0) return;
+
+    const controller = new AbortController();
+    bgMatcherAbortRef.current = controller;
+    void runBackgroundTrackMatcher(rawTracks, controller.signal, 1500);
+
+    return () => {
+      controller.abort();
+      if (bgMatcherAbortRef.current === controller) {
+        bgMatcherAbortRef.current = null;
+      }
+    };
+    // Intentionally exclude `queue` from restarting the matcher; queue changes abort via the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [album, artist, route.id, route.type, ytPlaylist]);
+
+  useEffect(() => {
+    if (queue !== matcherInitialQueueRef.current) {
+      bgMatcherAbortRef.current?.abort();
+      bgMatcherAbortRef.current = null;
+    }
+  }, [queue]);
 
   // Play clicked track, queue rest of list, and prefetch clicked track + next 2 tracks
   const handlePlayTrackFromList = useCallback(
@@ -1419,8 +1678,11 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
 
           {/* Complete Numbered Album Tracklist */}
           <div className="max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-4">
-          <div className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]">
-            {album.tracks.map((track) => {
+          <div
+            ref={catalogTrackListRef}
+            className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]"
+          >
+            {album.tracks.map((track, trackIdx) => {
               const active = isTrackActive(track);
               const playing = active && isPlaying && !isBuffering;
               const buffering = active && isBuffering;
@@ -1431,8 +1693,11 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               return (
                 <div
                   key={track.id}
+                  data-track-index={trackIdx}
                   role="button"
                   tabIndex={0}
+                  onPointerDown={(e) => handleTrackRowPointerDown(e, track)}
+                  onTouchStart={(e) => handleTrackRowTouchStart(e, track)}
                   onClick={() => handlePlayTrackFromList(track, album.tracks)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -1663,8 +1928,11 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
                 Top Tracks
               </h2>
-              <div className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]">
-                {artist.topTracks.map((track) => {
+              <div
+                ref={catalogTrackListRef}
+                className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)]"
+              >
+                {artist.topTracks.map((track, trackIdx) => {
                   const active = isTrackActive(track);
                   const playing = active && isPlaying && !isBuffering;
                   const buffering = active && isBuffering;
@@ -1674,8 +1942,11 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                   return (
                     <div
                       key={track.id}
+                      data-track-index={trackIdx}
                       role="button"
                       tabIndex={0}
+                      onPointerDown={(e) => handleTrackRowPointerDown(e, track)}
+                      onTouchStart={(e) => handleTrackRowTouchStart(e, track)}
                       onClick={() => handlePlayTrackFromList(track, artist.topTracks)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {

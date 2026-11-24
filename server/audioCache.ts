@@ -1539,12 +1539,60 @@ export function requestPrefetch(
  * and delegates directly into the unified 2-resolve / 1-download worker pool.
  */
 const metadataMatchInFlight = new Set<string>();
+const metadataMatchQueue: Array<{matchKey: string; artist: string; title: string; duration: number}> = [];
+let metadataMatchWorkerActive = false;
+
+function drainMetadataMatchQueue(): void {
+  if (metadataMatchWorkerActive) return;
+  metadataMatchWorkerActive = true;
+
+  void (async () => {
+    try {
+      while (metadataMatchQueue.length > 0) {
+        if (isDirectProxyCircuitOpen() || upstreamBackoffRemainingSec() > 0) {
+          // Clear queued background matches while upstream is in cooldown/backoff
+          while (metadataMatchQueue.length > 0) {
+            const dropped = metadataMatchQueue.shift();
+            if (dropped) metadataMatchInFlight.delete(dropped.matchKey);
+          }
+          break;
+        }
+        const task = metadataMatchQueue.shift();
+        if (!task) break;
+        try {
+          const matched = await resolveTrackToVideoId({
+            artist: task.artist,
+            title: task.title,
+            duration: task.duration,
+            priority: 'prefetch',
+          });
+          if (isValidYouTubeVideoId(matched.videoId)) {
+            requestPrefetch([matched.videoId], {download: true, maxItems: 1});
+          }
+        } catch {
+          // Best-effort background metadata match
+        } finally {
+          metadataMatchInFlight.delete(task.matchKey);
+        }
+      }
+    } finally {
+      metadataMatchWorkerActive = false;
+      if (metadataMatchQueue.length > 0 && !isDirectProxyCircuitOpen() && upstreamBackoffRemainingSec() === 0) {
+        drainMetadataMatchQueue();
+      }
+    }
+  })();
+}
 
 export function enqueueMetadataPrefetch(items: PrefetchRequestItem[]): number {
+  if (isDirectProxyCircuitOpen() || upstreamBackoffRemainingSec() > 0) {
+    return 0;
+  }
+
   let accepted = 0;
   const directVideoIds: string[] = [];
 
-  for (const raw of items.slice(0, 5)) {
+  for (const raw of items.slice(0, 8)) {
     const vid = typeof raw.videoId === 'string' ? raw.videoId.trim() : '';
     const artist = typeof raw.artist === 'string' ? raw.artist.trim() : '';
     const title = typeof raw.title === 'string' ? raw.title.trim() : '';
@@ -1567,24 +1615,16 @@ export function enqueueMetadataPrefetch(items: PrefetchRequestItem[]): number {
       continue;
     }
     metadataMatchInFlight.add(matchKey);
+    metadataMatchQueue.push({matchKey, artist, title, duration});
     accepted += 1;
+  }
 
-    void (async () => {
-      try {
-        const matched = await resolveTrackToVideoId({artist, title, duration});
-        if (isValidYouTubeVideoId(matched.videoId)) {
-          requestPrefetch([matched.videoId], {download: true, maxItems: 1});
-        }
-      } catch {
-        // Best-effort background metadata match
-      } finally {
-        metadataMatchInFlight.delete(matchKey);
-      }
-    })();
+  if (metadataMatchQueue.length > 0) {
+    drainMetadataMatchQueue();
   }
 
   if (directVideoIds.length > 0) {
-    const res = requestPrefetch(directVideoIds, {download: true, maxItems: 5});
+    const res = requestPrefetch(directVideoIds, {download: true, maxItems: 8});
     accepted += res.queued.length;
   }
 

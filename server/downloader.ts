@@ -2858,6 +2858,10 @@ function canAcquireResolveSlot(priority: StreamResolvePriority): boolean {
   return activeResolveSlots < prefetchCap;
 }
 
+export function hasAvailablePrefetchResolveSlot(): boolean {
+  return canAcquireResolveSlot('prefetch');
+}
+
 function drainResolveWaitQueue(): void {
   while (resolveWaitQueue.length > 0) {
     const playbackIdx = resolveWaitQueue.findIndex((w) => w.priority === 'playback');
@@ -5883,12 +5887,14 @@ export async function resolveTrackToVideoId(input: {
   title: string;
   duration?: number;
   forceRefresh?: boolean;
+  priority?: StreamResolvePriority;
 }): Promise<{videoId: string; matchedTitle: string; matchedDuration: number; fromCache: boolean}> {
   const artist = sanitizeMatchSearchFragment(input.artist || '');
   const title = sanitizeMatchSearchFragment(input.title || '');
   const targetDuration = Number.isFinite(Number(input.duration))
     ? Math.max(0, Math.round(Number(input.duration)))
     : 0;
+  const priority: StreamResolvePriority = input.priority ?? 'playback';
 
   if (!title) {
     throw new Error('Track title is required to resolve audio stream');
@@ -5915,9 +5921,16 @@ export async function resolveTrackToVideoId(input: {
     }
   }
 
+  if (priority === 'prefetch' && (isDirectProxyCircuitOpen() || upstreamBackoffRemainingSec() > 0)) {
+    throw new Error('Upstream YouTube resolver is temporarily backing off');
+  }
+
   const searchPromise = (async () => {
     const searchQuery = artist ? `${artist} - ${title} audio` : `${title} audio`;
-    const entries = await runFlatYtSearch(`ytsearch6:${searchQuery}`, null);
+    const entries = await withYtdlpResolveSlot(
+      () => runFlatYtSearch(`ytsearch6:${searchQuery}`, null),
+      priority
+    );
 
     let bestEntry: Record<string, unknown> | null = null;
     let bestVideoId = '';

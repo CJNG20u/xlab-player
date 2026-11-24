@@ -30,9 +30,16 @@ import {
 import {playbackClock} from '../lib/playbackClock';
 import {
   recordLifecycleDiagnostic,
+  recordTapDiagnostic,
   recordTransitionDiagnostic,
+  updateTapDiagnostic,
   updateTransitionDiagnostic,
 } from '../lib/playbackDiagnostics';
+import {
+  getTrackWarmthState,
+  isBackgroundWarmupEnabled,
+  markTrackWarm,
+} from '../lib/trackWarmup';
 import {useAuth} from './AuthContext';
 import {
   getCachedCanvasArtwork,
@@ -515,6 +522,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const loadRequestIdRef = useRef(0);
   const lastLoadUsedPrewarmedRef = useRef(false);
   const pendingTransitionRef = useRef<{id: number; endedAt: number} | null>(null);
+  const pendingTapRef = useRef<{id: number; tappedAt: number} | null>(null);
   const slowTransitionTimerRef = useRef<number | null>(null);
   const slowTransitionRetriesRef = useRef(0);
   const lastRecordedPlayRef = useRef<{key: string; at: number} | null>(null);
@@ -905,6 +913,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     // Prewarm streamed YouTube/"Online" tracks into an in-memory Blob URL so lock-screen `ended`
     // transitions swap `audio.src` synchronously without waiting on server resolution/ad-gate.
     if (nextItem.isYouTubeStream) {
+      if (!isBackgroundWarmupEnabled()) return;
       const streamKey = getStreamedTrackCacheKey(nextItem);
       const videoId = getYouTubeVideoId(nextItem);
       const streamUrl = videoId
@@ -1922,6 +1931,22 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
   const playTrack = useCallback(
     (track: Track, list?: Track[]) => {
       autoplayClearedForTrackKeyRef.current = null;
+      const beginTapDiagnostic = (target: Track) => {
+        const blobKey = target.isYouTubeStream
+          ? getStreamedTrackCacheKey(target)
+          : String(target.id);
+        const hasBlob = Boolean(blobKey && prewarmedObjectUrlsRef.current.has(blobKey));
+        const warmth = getTrackWarmthState(target, hasBlob);
+        const id = recordTapDiagnostic({
+          timestamp: new Date().toISOString(),
+          track: getTrackDiagnosticKey(target),
+          warmth,
+          msToPlaying: null,
+          error: null,
+        });
+        pendingTapRef.current = {id, tappedAt: Date.now()};
+      };
+
       if (list && list.length > 0) {
         const isSameQueueRef = list === stateRef.current.queue;
         if (!isSameQueueRef) {
@@ -1934,6 +1959,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         const idx = list.findIndex((t) => t.id === track.id);
         const resolvedIdx = idx >= 0 ? idx : 0;
         const resolvedTrack = list[resolvedIdx] ?? track;
+        beginTapDiagnostic(resolvedTrack);
         stateRef.current.queue = list;
         stateRef.current.currentIndex = resolvedIdx;
         stateRef.current.currentTrack = resolvedTrack;
@@ -1948,6 +1974,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       const existingIdx = prevQueue.findIndex((t) => t.id === track.id);
       if (existingIdx >= 0) {
         const resolvedTrack = prevQueue[existingIdx];
+        beginTapDiagnostic(resolvedTrack);
         stateRef.current.currentIndex = existingIdx;
         stateRef.current.currentTrack = resolvedTrack;
         loadAndPlayTrackSync(resolvedTrack, {resetIfSame: true});
@@ -1959,10 +1986,12 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setRadioSeed(null);
       const nextQueue = [...prevQueue, stripQueueSourceMeta(track)];
       const nextIdx = nextQueue.length - 1;
+      const resolvedTrack = nextQueue[nextIdx];
+      beginTapDiagnostic(resolvedTrack);
       stateRef.current.queue = nextQueue;
       stateRef.current.currentIndex = nextIdx;
-      stateRef.current.currentTrack = nextQueue[nextIdx];
-      loadAndPlayTrackSync(nextQueue[nextIdx], {resetIfSame: true});
+      stateRef.current.currentTrack = resolvedTrack;
+      loadAndPlayTrackSync(resolvedTrack, {resetIfSame: true});
       setQueue(nextQueue);
       setCurrentIndex(nextIdx);
     },
@@ -2881,6 +2910,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
         updateTransitionDiagnostic(pendingTransitionRef.current.id, {msToPlaying});
         pendingTransitionRef.current = null;
       }
+      if (pendingTapRef.current) {
+        const msToPlaying = Math.max(0, Date.now() - pendingTapRef.current.tappedAt);
+        updateTapDiagnostic(pendingTapRef.current.id, {msToPlaying});
+        pendingTapRef.current = null;
+      }
+      if (stateRef.current.currentTrack?.isYouTubeStream) {
+        markTrackWarm(stateRef.current.currentTrack);
+      }
       setIsBuffering(false);
       userPausedRef.current = false;
       wantPlayingRef.current = true;
@@ -3154,12 +3191,18 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     const handleError = () => {
       lifecycleRef.current.endTrackTransition();
       setIsBuffering(false);
-      if (pendingTransitionRef.current) {
+      if (pendingTransitionRef.current || pendingTapRef.current) {
         const mediaErr = audio.error;
         const msg =
           mediaErr?.message ||
           (mediaErr ? `MediaError code ${mediaErr.code}` : 'Audio playback error');
-        updateTransitionDiagnostic(pendingTransitionRef.current.id, {error: msg});
+        if (pendingTransitionRef.current) {
+          updateTransitionDiagnostic(pendingTransitionRef.current.id, {error: msg});
+        }
+        if (pendingTapRef.current) {
+          updateTapDiagnostic(pendingTapRef.current.id, {error: msg});
+          pendingTapRef.current = null;
+        }
       }
       if (
         wantPlayingRef.current &&
