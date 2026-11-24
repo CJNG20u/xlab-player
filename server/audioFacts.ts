@@ -20,6 +20,7 @@ export const LEVEL_DROP_DB = 12;
 export const MIN_RUN_PCT = 25;
 export const MIN_RUN_SECONDS = 20;
 export const EDGE_IGNORE_SECONDS = 8;
+export const REFERENCE_LOUDNESS_PERCENTILE = 75;
 export const SILENT_LUFS_THRESHOLD = -50;
 export const SILENT_TRUE_PEAK_THRESHOLD = -45;
 export const MAX_BAD_CANDIDATES_PER_TRACK = 2;
@@ -160,29 +161,35 @@ export function getAudioQcSummary(): AudioQcSummary {
 // Pure Analysis & QC Logic (exported for unit tests)
 // ---------------------------------------------------------------------------
 
-export function computeMedian(values: number[]): number | null {
+export function computePercentile(values: number[], percentile: number): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) {
-    return sorted[mid];
-  }
-  return (sorted[mid - 1] + sorted[mid]) / 2;
+  if (sorted.length === 1) return sorted[0];
+  const clamped = Math.max(0, Math.min(100, percentile));
+  const rank = (clamped / 100) * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  const frac = rank - lo;
+  return sorted[lo] + frac * (sorted[hi] - sorted[lo]);
+}
+
+export function computeMedian(values: number[]): number | null {
+  return computePercentile(values, 50);
 }
 
 export function analyzeMomentaryLoudness(
   samples: MomentarySample[],
   durationSec: number
-): {medianLufs: number | null; lowRunPct: number; longestRunSec: number} {
+): {referenceLufs: number | null; lowRunPct: number; longestRunSec: number} {
   if (!Number.isFinite(durationSec) || durationSec <= EDGE_IGNORE_SECONDS * 2 || samples.length < 2) {
-    return {medianLufs: null, lowRunPct: 0, longestRunSec: 0};
+    return {referenceLufs: null, lowRunPct: 0, longestRunSec: 0};
   }
 
   const windowStart = EDGE_IGNORE_SECONDS;
   const windowEnd = durationSec - EDGE_IGNORE_SECONDS;
   const interior = samples.filter((s) => s.t >= windowStart && s.t <= windowEnd);
   if (interior.length < 2) {
-    return {medianLufs: null, lowRunPct: 0, longestRunSec: 0};
+    return {referenceLufs: null, lowRunPct: 0, longestRunSec: 0};
   }
 
   // Estimate step size between consecutive ebur128 samples (~0.1s)
@@ -193,12 +200,17 @@ export function analyzeMomentaryLoudness(
   }
   const stepSec = computeMedian(deltas) ?? 0.1;
 
-  const medianLufs = computeMedian(interior.map((s) => s.m));
-  if (medianLufs === null || !Number.isFinite(medianLufs)) {
-    return {medianLufs: null, lowRunPct: 0, longestRunSec: 0};
+  // Use the 75th percentile of interior momentary loudness as the "normal" reference level
+  // so tracks that are 50-60% quiet still anchor to the normal loud section.
+  const referenceLufs = computePercentile(
+    interior.map((s) => s.m),
+    REFERENCE_LOUDNESS_PERCENTILE
+  );
+  if (referenceLufs === null || !Number.isFinite(referenceLufs)) {
+    return {referenceLufs: null, lowRunPct: 0, longestRunSec: 0};
   }
 
-  const threshold = medianLufs - LEVEL_DROP_DB;
+  const threshold = referenceLufs - LEVEL_DROP_DB;
   let longestRunSec = 0;
   let runStartIdx: number | null = null;
 
@@ -219,7 +231,7 @@ export function analyzeMomentaryLoudness(
 
   const lowRunPct = Math.min(100, Math.round((longestRunSec / durationSec) * 10000) / 100);
   return {
-    medianLufs: Math.round(medianLufs * 100) / 100,
+    referenceLufs: Math.round(referenceLufs * 100) / 100,
     lowRunPct,
     longestRunSec: Math.round(longestRunSec * 100) / 100,
   };

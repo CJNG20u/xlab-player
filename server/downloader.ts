@@ -94,15 +94,7 @@ export function hasConfiguredCookies(): boolean {
   }
 }
 
-export function normalizeDownloadQuality(raw?: unknown): DownloadQuality {
-  const val = String(raw ?? '')
-    .trim()
-    .toLowerCase();
-  if (val === 'standard' || val === 'high' || val === 'ultra') return val;
-  const settingVal = getSetting('ytdlp_download_quality', 'ultra').trim().toLowerCase();
-  if (settingVal === 'standard' || settingVal === 'high' || settingVal === 'ultra') {
-    return settingVal;
-  }
+export function normalizeDownloadQuality(_raw?: unknown): DownloadQuality {
   return 'ultra';
 }
 
@@ -1214,21 +1206,18 @@ export function enqueueDownloadJob(params: {
   quality?: DownloadQuality;
   thumbnailUrl?: string;
 }): DownloadJobRow {
-  const quality = normalizeDownloadQuality(params.quality);
   const requestedFormat = String(params.format || '').trim().toLowerCase();
   const storedFormat =
-    quality === 'standard' || quality === 'high'
-      ? 'mp3'
-      : requestedFormat === 'opus'
-        ? 'opus'
-        : requestedFormat === 'mp3'
-          ? 'mp3'
-          : 'm4a';
+    requestedFormat === 'opus'
+      ? 'opus'
+      : requestedFormat === 'mp3'
+        ? 'mp3'
+        : 'm4a';
 
   const result = db
     .prepare(
       `INSERT INTO download_jobs (user_id, url, title, artist, album, format, quality, status, progress, stage, thumbnail_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, 'Queued', ?)`
+       VALUES (?, ?, ?, ?, ?, ?, 'ultra', 'queued', 0, 'Queued', ?)`
     )
     .run(
       params.userId,
@@ -1237,7 +1226,6 @@ export function enqueueDownloadJob(params: {
       params.artist,
       params.album,
       storedFormat,
-      quality,
       params.thumbnailUrl || ''
     );
   const job = db
@@ -1540,7 +1528,6 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
   const ffmpegPath = getFfmpegPath();
   const cropCover = getSetting('ytdlp_crop_cover', 'true') === 'true';
   const musicDir = path.resolve(getMusicDir());
-  const quality = normalizeDownloadQuality(job.quality);
 
   const jobUuid = crypto.randomUUID();
   const tmpWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xlab-dl-'));
@@ -1667,7 +1654,7 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
       }
     }
 
-    // STAGE 3: Fallback extraction (`-x --audio-format <codec>`) with configured quality profile
+    // STAGE 3: Fallback native audio download (keeping original codec, zero re-encoding)
     if (!downloadedAudioPath) {
       if (!tempCookiePath && hasConfiguredCookies()) {
         tempCookiePath = createTempCookiesCopy();
@@ -1675,12 +1662,12 @@ async function executeDownloadJob(job: DownloadJobRow): Promise<void> {
       updateJob(job.id, {
         status: 'downloading',
         progress: 12,
-        stage: `Fallback Extraction (${quality})`,
+        stage: 'Fallback Native Audio',
       });
       try {
         await spawnYtdlpStage(
           job.id,
-          `Fallback Extraction (${quality})`,
+          'Fallback Native Audio',
           buildStage3ExtractionArgs(tempCookiePath),
           14,
           74

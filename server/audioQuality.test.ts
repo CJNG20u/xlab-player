@@ -144,43 +144,87 @@ test('Phase 1: rankVideoCandidates sorts by rounded 1-decimal score, then source
   assert.equal(ranked[0].videoId, '33333333333');
 });
 
-test('Phase 2: analyzeMomentaryLoudness detects sustained >=12dB drops ignoring first/last 8s', () => {
+test('Phase 2: analyzeMomentaryLoudness uses 75th percentile reference and flags 30%, 50%, 60% quiet drops while allowing 10s intro and 15s bridge', () => {
   assert.equal(LEVEL_DROP_DB, 12);
   assert.equal(MIN_RUN_PCT, 25);
   assert.equal(MIN_RUN_SECONDS, 20);
 
-  // 100s track: loud (-10 LUFS) except 30s quiet drop (-28 LUFS) from t=25..55
-  const samples: MomentarySample[] = [];
-  for (let i = 0; i <= 1000; i++) {
-    const t = i * 0.1;
-    const m = t >= 25 && t <= 55 ? -28 : -10;
-    samples.push({t, m});
-  }
-  const analysis = analyzeMomentaryLoudness(samples, 100);
-  assert.equal(analysis.medianLufs, -10);
-  assert.ok(analysis.longestRunSec >= 29.5 && analysis.longestRunSec <= 30.5);
-  assert.ok(analysis.lowRunPct >= 29.5 && analysis.lowRunPct <= 30.5);
+  const buildSamples = (
+    durationSec: number,
+    quietStart: number,
+    quietEnd: number,
+    normalLufs = -10,
+    quietLufs = -22
+  ): MomentarySample[] => {
+    const out: MomentarySample[] = [];
+    const totalSteps = Math.round(durationSec * 10);
+    for (let i = 0; i <= totalSteps; i++) {
+      const t = Math.round(i * 10) / 100;
+      const m = t >= quietStart && t < quietEnd ? quietLufs : normalLufs;
+      out.push({t, m});
+    }
+    return out;
+  };
 
-  const qc = evaluateAudioQc({
-    lufs: -12,
+  // 30%, 50%, and 60% quiet tracks (>=12 dB below normal) must all report level-drop
+  for (const pct of [30, 50, 60]) {
+    const durationSec = 100;
+    const quietStart = 15;
+    const quietEnd = quietStart + pct;
+    const samples = buildSamples(durationSec, quietStart, quietEnd, -10, -22);
+    const analysis = analyzeMomentaryLoudness(samples, durationSec);
+    assert.equal(analysis.referenceLufs, -10, `${pct}% quiet track should anchor reference to -10 LUFS`);
+    assert.ok(
+      analysis.longestRunSec >= pct - 0.5 && analysis.longestRunSec <= pct + 0.5,
+      `${pct}% quiet track longestRunSec=${analysis.longestRunSec}`
+    );
+    assert.ok(
+      analysis.lowRunPct >= pct - 0.5 && analysis.lowRunPct <= pct + 0.5,
+      `${pct}% quiet track lowRunPct=${analysis.lowRunPct}`
+    );
+
+    const qc = evaluateAudioQc({
+      lufs: -14,
+      truePeakDb: -1,
+      durationSec,
+      lowRunPct: analysis.lowRunPct,
+      longestRunSec: analysis.longestRunSec,
+      requestedDuration: durationSec,
+    });
+    assert.equal(qc.status, 'bad', `${pct}% quiet track must be bad`);
+    assert.equal(qc.reason, 'level-drop', `${pct}% quiet track must be level-drop`);
+  }
+
+  // 10-second quiet intro (first 8s ignored, leaving ~2s in interior) -> must stay ok
+  const quietIntroSamples = buildSamples(100, 0, 10, -10, -35);
+  const introAnalysis = analyzeMomentaryLoudness(quietIntroSamples, 100);
+  assert.equal(introAnalysis.referenceLufs, -10);
+  const introQc = evaluateAudioQc({
+    lufs: -11,
     truePeakDb: -1,
     durationSec: 100,
-    lowRunPct: analysis.lowRunPct,
-    longestRunSec: analysis.longestRunSec,
+    lowRunPct: introAnalysis.lowRunPct,
+    longestRunSec: introAnalysis.longestRunSec,
     requestedDuration: 100,
   });
-  assert.equal(qc.status, 'bad');
-  assert.equal(qc.reason, 'level-drop');
+  assert.equal(introQc.status, 'ok');
 
-  // Quiet intro/outro within first/last 8s only -> must NOT trigger level-drop
-  const edgeOnly: MomentarySample[] = [];
-  for (let i = 0; i <= 1000; i++) {
-    const t = i * 0.1;
-    const m = t < 7.5 || t > 92.5 ? -40 : -11;
-    edgeOnly.push({t, m});
+  // 15-second quiet bridge -> must stay ok (below MIN_RUN_SECONDS=20, even on a shorter 50s track)
+  for (const durationSec of [100, 50]) {
+    const bridgeSamples = buildSamples(durationSec, 18, 33, -10, -32);
+    const bridgeAnalysis = analyzeMomentaryLoudness(bridgeSamples, durationSec);
+    assert.equal(bridgeAnalysis.referenceLufs, -10);
+    assert.ok(bridgeAnalysis.longestRunSec <= 15.5);
+    const bridgeQc = evaluateAudioQc({
+      lufs: -12,
+      truePeakDb: -1,
+      durationSec,
+      lowRunPct: bridgeAnalysis.lowRunPct,
+      longestRunSec: bridgeAnalysis.longestRunSec,
+      requestedDuration: durationSec,
+    });
+    assert.equal(bridgeQc.status, 'ok', `15s quiet bridge on ${durationSec}s track must stay ok`);
   }
-  const edgeAnalysis = analyzeMomentaryLoudness(edgeOnly, 100);
-  assert.equal(edgeAnalysis.lowRunPct, 0);
 });
 
 test('Phase 2: parseEbur128Output parses frame series and final Summary block', () => {
