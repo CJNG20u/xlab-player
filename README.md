@@ -214,6 +214,7 @@ sudo systemctl status xlabplayer
 | `AUDIO_CACHE_MB` | `2048` | `2048` | Maximum disk audio cache size in MB (`0` disables disk caching). |
 | `YT_AD_GATE_MAX_WAIT_MS` | `12000` | `12000` | Max TV ad-gate polling window in ms for interactive playback. |
 | `YT_AD_GATE_MAX_WAIT_PREFETCH_MS` | `25000` | `25000` | Max TV ad-gate polling window in ms for background prefetch (clamped `1000-120000`). |
+| `YT_DISABLE_FAST_PATH` | `0` | `0` | Set to `1` to never run the `android-vr-fast` strategy or fetch `visitor_data` for it. Even when `0`, `android-vr-fast` auto-disables for 30 minutes after 3 consecutive bot-check rejections. |
 | `MUSIC_DIR` | `/music` | `./music_library` | Initial music library path seeded into the database on first boot (can later be changed in **Settings**). |
 | `YTDLP_VERSION` | `2026.08.19` | *(Docker build arg)* | Pinned `yt-dlp` release tag installed in the Docker image. Override to test a newer release. |
 | `YTDLP_PATH` | `/usr/local/bin/yt-dlp` | `yt-dlp` | Path or command name for the `yt-dlp` binary seeded on first boot. |

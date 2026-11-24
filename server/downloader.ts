@@ -2713,6 +2713,57 @@ export function isPreferVisionosEnabled(): boolean {
   return raw === '1' || raw === 'true' || raw === 'yes';
 }
 
+export function isFastPathDisabledByEnv(): boolean {
+  const raw = process.env.YT_DISABLE_FAST_PATH?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
+const FAST_PATH_BOT_FAILURE_THRESHOLD = 3;
+const FAST_PATH_AUTO_DISABLE_MS = 30 * 60 * 1000; // 30 minutes
+const FAST_PATH_BOT_CHECK_RE = /sign in to confirm you(?:'|’)?re not a bot/i;
+
+let fastPathConsecutiveBotFailures = 0;
+let fastPathAutoDisabledUntilMs = 0;
+
+function isAndroidVrFastPathDisabled(now = Date.now()): boolean {
+  if (isFastPathDisabledByEnv()) {
+    return true;
+  }
+  if (fastPathAutoDisabledUntilMs > 0) {
+    if (now < fastPathAutoDisabledUntilMs) {
+      return true;
+    }
+    fastPathAutoDisabledUntilMs = 0;
+    fastPathConsecutiveBotFailures = 0;
+    console.info(
+      '[yt-stream-resolve] android-vr-fast auto-disable expired after 30m; re-enabling fast path for retry'
+    );
+  }
+  return false;
+}
+
+function recordAndroidVrFastPathSuccess(): void {
+  fastPathConsecutiveBotFailures = 0;
+  fastPathAutoDisabledUntilMs = 0;
+}
+
+function recordAndroidVrFastPathFailure(detail: string): void {
+  if (FAST_PATH_BOT_CHECK_RE.test(detail)) {
+    fastPathConsecutiveBotFailures += 1;
+    if (
+      fastPathConsecutiveBotFailures >= FAST_PATH_BOT_FAILURE_THRESHOLD &&
+      fastPathAutoDisabledUntilMs === 0
+    ) {
+      fastPathAutoDisabledUntilMs = Date.now() + FAST_PATH_AUTO_DISABLE_MS;
+      console.warn(
+        `[yt-stream-resolve] android-vr-fast rejected with bot check ${fastPathConsecutiveBotFailures} times in a row; auto-disabling fast path for 30 minutes`
+      );
+    }
+  } else {
+    fastPathConsecutiveBotFailures = 0;
+  }
+}
+
 function isDebugCompareEnabled(): boolean {
   const raw = process.env.YT_DEBUG_COMPARE?.trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes';
@@ -3697,6 +3748,9 @@ function fetchVisitorDataOverIpv4(): Promise<string | null> {
  * Non-blocking when a renewal is already in flight so concurrent resolvers never queue.
  */
 export async function getVisitorData(): Promise<string | null> {
+  if (isFastPathDisabledByEnv()) {
+    return null;
+  }
   const now = Date.now();
   if (now < visitorDataState.retryAtMs) {
     return null;
@@ -5172,11 +5226,13 @@ export async function resolveYouTubeAudioStreamUrl(
           stderr: stderrText || execErr.message.slice(0, 500),
         })
       );
-      throw new Error(
+      const err = new Error(
         isTimeout
           ? `yt-dlp ${strategy} timed out after ${elapsedMs}ms (limit ${timeoutMs}ms)`
           : `yt-dlp ${strategy} exited (${String(code ?? signal ?? 'error')}): ${(stderrText || execErr.message).slice(0, 260)}`
-      );
+      ) as Error & {fullStderr?: string};
+      err.fullStderr = stderrText || execErr.message;
+      throw err;
     }
 
     const trimmed = stdout.trim();
@@ -5361,8 +5417,8 @@ export async function resolveYouTubeAudioStreamUrl(
         }
 
         // 1. Optional android_vr + cached visitor_data fast path (interactive playback only;
-        // skipped by prefetch and skipped on CDN 403/410 retries).
-        if (!options.skipFastPath) {
+        // skipped by prefetch, CDN 403/410 retries, YT_DISABLE_FAST_PATH=1, or 30m bot-check auto-disable).
+        if (!options.skipFastPath && !isAndroidVrFastPathDisabled()) {
           const visitor = await getVisitorData();
           if (visitor) {
             strategies.push({
@@ -5485,6 +5541,9 @@ export async function resolveYouTubeAudioStreamUrl(
               requireAudioOnly: step.requireAudioOnly,
             }
           );
+          if (step.strategy === 'android-vr-fast') {
+            recordAndroidVrFastPathSuccess();
+          }
           break;
         } catch (err) {
           lastError = err;
@@ -5500,6 +5559,11 @@ export async function resolveYouTubeAudioStreamUrl(
               rejectVisitorData(step.visitorToken);
             }
             const msg = err instanceof Error ? err.message : String(err);
+            const fullDetail =
+              err && typeof err === 'object' && 'fullStderr' in err && typeof (err as {fullStderr?: unknown}).fullStderr === 'string'
+                ? (err as {fullStderr: string}).fullStderr
+                : msg;
+            recordAndroidVrFastPathFailure(fullDetail);
             console.info(
               `[yt-stream-resolve] ${videoId} android-vr-fast rejected (${msg}); dropped visitor_data for 60s and continuing with default strategy`
             );
