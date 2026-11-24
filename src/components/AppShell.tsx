@@ -35,6 +35,7 @@ import {useRemoteHost} from '../hooks/useRemoteHost';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
 import {usePlaybackTime} from '../lib/playbackClock';
+import {useYouTubePlaylistJobsSync} from '../lib/playlistJobs';
 import {useRemoteControl} from '../lib/remoteControl';
 import {useMainScrollRestoration} from '../lib/scrollHistory';
 import {getTabGroup, openPrimaryDestination, rememberTabLocation} from '../lib/tabMemory';
@@ -147,6 +148,7 @@ export const AppShell: React.FC = () => {
     cycleRepeat,
     toggleLikeTrack,
     libraryRefreshVersion,
+    bumpLibraryRefresh,
     saveYouTubeTrackToLibrary,
     getYouTubeSaveStatus,
     remoteHostApi,
@@ -163,8 +165,24 @@ export const AppShell: React.FC = () => {
   const [shellToast, setShellToast] = useState<string | null>(null);
   const flashShellToast = useCallback((msg: string) => {
     setShellToast(msg);
-    setTimeout(() => setShellToast(null), 2800);
+    setTimeout(() => setShellToast(null), 3200);
   }, []);
+
+  useYouTubePlaylistJobsSync(!offline && Boolean(user), {
+    onProgress: bumpLibraryRefresh,
+    onComplete: (job) => {
+      bumpLibraryRefresh();
+      if (job.state === 'completed') {
+        flashShellToast(
+          job.failed > 0
+            ? `Downloaded "${job.playlistName}" (${job.done}/${job.total}, ${job.failed} failed)`
+            : `Downloaded "${job.playlistName}" (${job.done}/${job.total} tracks)`
+        );
+      } else if (job.state === 'failed') {
+        flashShellToast(`Playlist download failed for "${job.playlistName}"`);
+      }
+    },
+  });
   const {isInstallable, isInstalled, install} = usePWAInstall();
   const navigate = useNavigate();
   const location = useLocation();

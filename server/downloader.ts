@@ -2000,6 +2000,31 @@ function loadCanonicalTrackRow(
   };
 }
 
+export function findLibraryTrackByVideoId(
+  videoId: string
+): {id: number; rel_path: string; absPath: string} | null {
+  const cleanId = (videoId || '').trim();
+  if (!isValidYouTubeVideoId(cleanId)) return null;
+
+  const row = db
+    .prepare('SELECT id, rel_path FROM tracks WHERE youtube_video_id = ? LIMIT 1')
+    .get(cleanId) as {id: number; rel_path: string} | undefined;
+  if (!row || !row.rel_path) return null;
+
+  const musicDir = path.resolve(getMusicDir());
+  const absPath = path.resolve(musicDir, row.rel_path);
+  if (!absPath.startsWith(musicDir + path.sep)) return null;
+  try {
+    const st = fs.statSync(absPath);
+    if (st.isFile() && st.size > 0) {
+      return {id: row.id, rel_path: row.rel_path, absPath};
+    }
+  } catch {
+    // File missing on disk — allow re-download
+  }
+  return null;
+}
+
 export async function downloadTrackToNas(
   input: DirectNasDownloadInput
 ): Promise<DirectNasDownloadResult> {
@@ -2077,7 +2102,14 @@ export async function downloadTrackToNas(
   }
 
   const workPromise = (async (): Promise<DirectNasDownloadResult> => {
-    // Fast-path: already saved on disk in /music/Downloads
+    // Fast-path 1: already indexed in library for this YouTube videoId
+    const existingByVideo = findLibraryTrackByVideoId(videoId);
+    if (existingByVideo) {
+      const track = loadCanonicalTrackRow(existingByVideo.id, input.userId, existingByVideo.absPath);
+      return {track, filePath: existingByVideo.absPath, alreadyExists: true};
+    }
+
+    // Fast-path 2: already saved on disk in /music/Downloads
     if (fs.existsSync(finalAudioPath)) {
       const st = fs.statSync(finalAudioPath);
       if (st.isFile() && st.size > 0) {
@@ -2086,6 +2118,9 @@ export async function downloadTrackToNas(
           artist: resolvedArtist,
           album: resolvedAlbum,
         });
+        db.prepare(
+          "UPDATE tracks SET youtube_video_id = ? WHERE id = ? AND (youtube_video_id IS NULL OR youtube_video_id = '')"
+        ).run(videoId, indexed.id);
         const track = loadCanonicalTrackRow(indexed.id, input.userId, finalAudioPath);
         return {track, filePath: finalAudioPath, alreadyExists: true};
       }
@@ -2247,6 +2282,10 @@ export async function downloadTrackToNas(
         album: resolvedAlbum,
         coverFilePath: coverPath,
       });
+
+      db.prepare(
+        "UPDATE tracks SET youtube_video_id = ? WHERE id = ? AND (youtube_video_id IS NULL OR youtube_video_id = '')"
+      ).run(videoId, indexed.id);
 
       const track = loadCanonicalTrackRow(indexed.id, input.userId, finalAudioPath);
       return {track, filePath: finalAudioPath, alreadyExists: false};

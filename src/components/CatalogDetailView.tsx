@@ -11,6 +11,7 @@ import {
   Play,
   RefreshCw,
   Shuffle,
+  X,
 } from 'lucide-react';
 import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {useMainScroll} from '../context/MainScrollContext';
@@ -24,6 +25,12 @@ import {
   isValidYouTubeVideoId,
   prefetchYouTubeStreams,
 } from '../lib/api';
+import {useBackClose} from '../lib/backStack';
+import {
+  cancelYouTubePlaylistJob,
+  upsertYouTubePlaylistJob,
+  useYouTubePlaylistJobs,
+} from '../lib/playlistJobs';
 import {
   computeLightTintedTopHex,
   computeNowPlayingTopHex,
@@ -39,6 +46,7 @@ import type {
   Playlist,
   Track,
   YouTubePlaylistDetail,
+  YouTubePlaylistJob,
   YouTubePlaylistTrackItem,
 } from '../types';
 
@@ -589,11 +597,37 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   } | null>(null);
   const playlistSaveCancelRef = useRef(false);
 
+  // Server-side "Download playlist" modal & active job state
+  const playlistDownloadJobs = useYouTubePlaylistJobs();
+  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [downloadPlaylistName, setDownloadPlaylistName] = useState('');
+  const [downloadSubmitting, setDownloadSubmitting] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+
+  const closeDownloadModal = useCallback(() => {
+    if (downloadSubmitting) return;
+    setDownloadModalOpen(false);
+  }, [downloadSubmitting]);
+  useBackClose(downloadModalOpen, closeDownloadModal);
+
+  const activeYouTubePlaylistJob = useMemo(() => {
+    if (route.type !== 'playlist') return null;
+    const targetId = ytPlaylist?.playlistId || route.id;
+    return (
+      playlistDownloadJobs.find(
+        (j) => j.youtubePlaylistId === targetId && j.state === 'running'
+      ) ?? null
+    );
+  }, [playlistDownloadJobs, route.id, route.type, ytPlaylist?.playlistId]);
+
   useEffect(() => {
     albumDownloadCancelRef.current = true;
     setAlbumDownloadState(null);
     playlistSaveCancelRef.current = true;
     setPlaylistSaveState(null);
+    setDownloadModalOpen(false);
+    setDownloadError(null);
     return () => {
       albumDownloadCancelRef.current = true;
       playlistSaveCancelRef.current = true;
@@ -883,6 +917,65 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     },
     [canDownload, onFlashToast, saveYouTubeTrackToLibrary, ytPlaylist?.title]
   );
+
+  const openDownloadPlaylistModal = useCallback(() => {
+    if (!canDownload || !ytPlaylist || ytPlaylist.tracks.length === 0) return;
+    setDownloadPlaylistName((ytPlaylist.title || '').slice(0, 100));
+    setDownloadError(null);
+    setDownloadModalOpen(true);
+  }, [canDownload, ytPlaylist]);
+
+  const handleStartPlaylistDownload = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!canDownload || !ytPlaylist) return;
+      const cleanName = downloadPlaylistName.trim().slice(0, 100);
+      if (!cleanName) return;
+
+      setDownloadSubmitting(true);
+      setDownloadError(null);
+      try {
+        const res = await apiFetch<{job: YouTubePlaylistJob; playlist: Playlist}>(
+          `/api/youtube/playlist/${encodeURIComponent(ytPlaylist.playlistId)}/download`,
+          {
+            method: 'POST',
+            body: JSON.stringify({name: cleanName}),
+          }
+        );
+        if (res.job) {
+          upsertYouTubePlaylistJob(res.job);
+        }
+        bumpLibraryRefresh();
+        setDownloadModalOpen(false);
+        if (res.job?.state === 'completed') {
+          onFlashToast(`Downloaded "${cleanName}" (${res.job.done}/${res.job.total} tracks)`);
+        } else {
+          onFlashToast(`Downloading "${cleanName}" to Playlists...`);
+        }
+      } catch (err) {
+        setDownloadError(
+          err instanceof Error ? err.message : 'Failed to start playlist download'
+        );
+      } finally {
+        setDownloadSubmitting(false);
+      }
+    },
+    [bumpLibraryRefresh, canDownload, downloadPlaylistName, onFlashToast, ytPlaylist]
+  );
+
+  const handleCancelActivePlaylistDownload = useCallback(async () => {
+    if (!activeYouTubePlaylistJob || cancellingJobId === activeYouTubePlaylistJob.id) return;
+    setCancellingJobId(activeYouTubePlaylistJob.id);
+    try {
+      await cancelYouTubePlaylistJob(activeYouTubePlaylistJob.id);
+      bumpLibraryRefresh();
+      onFlashToast(`Cancelled download for "${activeYouTubePlaylistJob.playlistName}"`);
+    } catch (err) {
+      onFlashToast(err instanceof Error ? err.message : 'Could not cancel download');
+    } finally {
+      setCancellingJobId(null);
+    }
+  }, [activeYouTubePlaylistJob, bumpLibraryRefresh, cancellingJobId, onFlashToast]);
 
   const handleSaveAsXlabPlaylist = useCallback(async () => {
     if (!canDownload || !ytPlaylist || ytPlaylist.tracks.length === 0) return;
@@ -1904,6 +1997,42 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                           )}
                         </button>
                       )}
+
+                      {activeYouTubePlaylistJob ? (
+                        <div className="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-[var(--accent)] bg-[var(--accent-soft)] pl-4 pr-2 py-1.5 text-sm font-semibold text-[var(--accent)] whitespace-nowrap">
+                          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                          <span className="font-mono tabular-nums">
+                            Downloading {activeYouTubePlaylistJob.done}/
+                            {activeYouTubePlaylistJob.total}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={cancellingJobId === activeYouTubePlaylistJob.id}
+                            onClick={() => void handleCancelActivePlaylistDownload()}
+                            className="inline-flex items-center gap-1 rounded-full border border-[var(--accent)]/40 bg-[var(--bg-secondary)]/70 px-2.5 py-1 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] disabled:opacity-50 transition-colors"
+                            aria-label="Cancel playlist download"
+                            title="Cancel playlist download"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>Cancel</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={!canDownload}
+                          onClick={openDownloadPlaylistModal}
+                          title={
+                            canDownload
+                              ? 'Download all tracks into a playlist'
+                              : 'Download permission required'
+                          }
+                          className="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--bg-secondary)]/85 backdrop-blur-sm px-5 py-2.5 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] hover:border-[var(--accent)] disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-[var(--bg-secondary)]/85 disabled:hover:border-[var(--border-strong)] transition-colors whitespace-nowrap"
+                        >
+                          <Download className="w-4 h-4" />
+                          <span>Download playlist</span>
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1936,6 +2065,79 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               />
             )}
           </div>
+
+          {/* Download Playlist Name Prompt Modal */}
+          {downloadModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-xs">
+              <div className="w-full max-w-md rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 shadow-2xl">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-display text-xl font-bold text-[var(--text-primary)]">
+                    Download Playlist
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={closeDownloadModal}
+                    disabled={downloadSubmitting}
+                    className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
+                    aria-label="Close modal"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <p className="text-xs text-[var(--text-secondary)] mb-4">
+                  Creates a playlist right away and downloads{' '}
+                  {Math.min(ytPlaylist.tracks.length, 200)}{' '}
+                  {ytPlaylist.tracks.length === 1 ? 'track' : 'tracks'} in the background.
+                </p>
+
+                <form onSubmit={(e) => void handleStartPlaylistDownload(e)} className="space-y-4">
+                  <div>
+                    <label
+                      htmlFor="yt-download-playlist-name"
+                      className="block text-sm font-medium text-[var(--text-secondary)] mb-1.5"
+                    >
+                      Playlist Name
+                    </label>
+                    <input
+                      id="yt-download-playlist-name"
+                      type="text"
+                      required
+                      autoFocus
+                      maxLength={100}
+                      value={downloadPlaylistName}
+                      onChange={(e) => setDownloadPlaylistName(e.target.value)}
+                      placeholder="Enter playlist name"
+                      className="w-full rounded-md bg-[var(--bg-input)] px-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none"
+                    />
+                  </div>
+
+                  {downloadError && (
+                    <p className="text-sm text-[var(--danger-text)]">{downloadError}</p>
+                  )}
+
+                  <div className="flex items-center justify-end gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={closeDownloadModal}
+                      disabled={downloadSubmitting}
+                      className="px-4 py-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={downloadSubmitting || !downloadPlaylistName.trim()}
+                      className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors"
+                    >
+                      {downloadSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <span>{downloadSubmitting ? 'Starting...' : 'Download'}</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
         </div>
       ) : null}
     </div>

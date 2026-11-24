@@ -26,7 +26,7 @@ import {
   getCachedDominantColor,
   useStatusBarColor,
 } from '../lib/themeColor';
-import type {Playlist, Track} from '../types';
+import type {Playlist, Track, YouTubePlaylistJob} from '../types';
 import {getOfflineCoverBlobUrl} from '../utils/offlineStore';
 import {PlaylistMosaic} from './AlbumArt';
 
@@ -197,6 +197,7 @@ interface PlaylistsHubViewProps {
   onExportM3u: (playlist: Playlist) => Promise<void>;
   onDeletePlaylist: (playlistId: number) => Promise<void>;
   onNavigateHomeTab: (tab: 'liked' | 'recent' | 'offline' | 'all') => void;
+  playlistDownloadJobs?: Map<number, YouTubePlaylistJob>;
 }
 
 export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
@@ -217,6 +218,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   onExportM3u,
   onDeletePlaylist,
   onNavigateHomeTab,
+  playlistDownloadJobs,
 }) => {
   const {theme, isLight, isTidal} = useTheme();
   const [recentIds, setRecentIds] = useState<number[]>(() => readRecentPlaylistIds());
@@ -680,11 +682,16 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
 
   const renderPlaylistCard = (pl: Playlist, keyPrefix: string) => {
     const isMenuOpen = menuState?.playlist.id === pl.id;
-    const subtitleText = pl.description
-      ? pl.description
-      : pl.source === 'm3u'
-        ? `M3U · ${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`
-        : `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`;
+    const downloadJob = playlistDownloadJobs?.get(pl.id);
+    const isJobDownloading = downloadJob?.state === 'running';
+    const subtitleText =
+      isJobDownloading && pl.track_count === 0
+        ? `Downloading ${downloadJob.done}/${downloadJob.total}...`
+        : pl.description
+          ? pl.description
+          : pl.source === 'm3u'
+            ? `M3U · ${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`
+            : `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`;
 
     return (
       <div
@@ -706,6 +713,18 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
             alt={pl.name}
             className="w-full h-full rounded-xl transition-transform duration-300 ease-out group-hover:scale-[1.03]"
           />
+
+          {isJobDownloading && downloadJob && (
+            <div
+              className="absolute top-2 left-2 inline-flex items-center gap-1.5 rounded-full bg-black/75 backdrop-blur-md px-2.5 py-1 text-[11px] font-semibold text-white ring-1 ring-white/15 shadow-md"
+              title={`Downloading playlist (${downloadJob.done}/${downloadJob.total})`}
+            >
+              <Loader2 className="w-3 h-3 animate-spin text-[var(--accent)]" />
+              <span className="font-mono tabular-nums">
+                {downloadJob.done}/{downloadJob.total}
+              </span>
+            </div>
+          )}
 
           <button
             type="button"

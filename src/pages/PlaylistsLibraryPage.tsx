@@ -45,6 +45,11 @@ import {
   getYouTubeThumbProxyUrl,
   getYouTubeVideoId,
 } from '../lib/api';
+import {
+  cancelYouTubePlaylistJob,
+  fetchYouTubePlaylistJobDetail,
+  useYouTubePlaylistJobs,
+} from '../lib/playlistJobs';
 import {useScrollReady} from '../lib/scrollHistory';
 import {
   computeLightTintedTopHex,
@@ -54,7 +59,7 @@ import {
   getCachedDominantColor,
   useStatusBarColor,
 } from '../lib/themeColor';
-import type {Playlist, Track} from '../types';
+import type {Playlist, Track, YouTubePlaylistJob} from '../types';
 import {
   getOfflineCoverBlobUrl,
   getOfflinePlaylists,
@@ -158,6 +163,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [activePlaylist, setActivePlaylist] = useState<Playlist | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadedRouteKey, setLoadedRouteKey] = useState<string | null>(null);
+  const loadedViewKeyRef = useRef<string | null>(null);
   const loadSeqRef = useRef(0);
   const currentRouteKey = `${location.pathname}${location.search}`;
   const [createOpen, setCreateOpen] = useState(false);
@@ -201,10 +207,68 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [pageToast, setPageToast] = useState<string | null>(null);
   const detailMenuRef = useRef<HTMLDivElement | null>(null);
 
+  // Server-side YouTube playlist download jobs
+  const playlistDownloadJobs = useYouTubePlaylistJobs();
+  const [activeJobDetail, setActiveJobDetail] = useState<YouTubePlaylistJob | null>(null);
+  const [cancellingServerJobId, setCancellingServerJobId] = useState<string | null>(null);
+
+  const playlistDownloadJobsByPlaylistId = useMemo(() => {
+    const map = new Map<number, YouTubePlaylistJob>();
+    for (const job of playlistDownloadJobs) {
+      const existing = map.get(job.playlistId);
+      if (!existing || (existing.state !== 'running' && job.state === 'running')) {
+        map.set(job.playlistId, job);
+      }
+    }
+    return map;
+  }, [playlistDownloadJobs]);
+
+  const activePlaylistServerJob = useMemo(() => {
+    if (!activePlaylist) return null;
+    return playlistDownloadJobsByPlaylistId.get(activePlaylist.id) ?? null;
+  }, [activePlaylist, playlistDownloadJobsByPlaylistId]);
+
+  useEffect(() => {
+    if (offline || !activePlaylistServerJob) {
+      setActiveJobDetail(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchYouTubePlaylistJobDetail(activePlaylistServerJob.id).then((detail) => {
+      if (!cancelled && detail) {
+        setActiveJobDetail(detail);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    offline,
+    activePlaylistServerJob?.id,
+    activePlaylistServerJob?.done,
+    activePlaylistServerJob?.failed,
+    activePlaylistServerJob?.state,
+  ]);
+
   const flashToast = useCallback((msg: string) => {
     setPageToast(msg);
     setTimeout(() => setPageToast(null), 3200);
   }, []);
+
+  const handleCancelServerPlaylistJob = useCallback(async () => {
+    if (!activePlaylistServerJob || cancellingServerJobId === activePlaylistServerJob.id) return;
+    setCancellingServerJobId(activePlaylistServerJob.id);
+    try {
+      const updated = await cancelYouTubePlaylistJob(activePlaylistServerJob.id);
+      if (updated) setActiveJobDetail(updated);
+      bumpLibraryRefresh();
+      flashToast(`Cancelled download for "${activePlaylistServerJob.playlistName}"`);
+    } catch (err) {
+      flashToast(err instanceof Error ? err.message : 'Could not cancel download');
+    } finally {
+      setCancellingServerJobId(null);
+    }
+  }, [activePlaylistServerJob, bumpLibraryRefresh, cancellingServerJobId, flashToast]);
 
   const canEditPlaylist = useCallback(
     (pl: Playlist | null | undefined): boolean =>
@@ -294,7 +358,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const loadContent = useCallback(async () => {
     const seq = ++loadSeqRef.current;
     const targetRouteKey = currentRouteKey;
-    setLoading(true);
+    const viewKey = `${targetRouteKey}|${activeTab}`;
+    if (loadedViewKeyRef.current !== viewKey) {
+      setLoading(true);
+    }
     try {
       await loadPlaylists();
       if (loadSeqRef.current !== seq) return;
@@ -352,6 +419,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       }
     } finally {
       if (loadSeqRef.current === seq) {
+        loadedViewKeyRef.current = viewKey;
         setLoadedRouteKey(targetRouteKey);
         setLoading(false);
       }
@@ -1043,6 +1111,29 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="font-mono tabular-nums">{formatDuration(totalDuration)}</span>
+                    {activePlaylistServerJob?.state === 'running' && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent)]/40 bg-[var(--accent-soft)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--accent)]">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <span className="font-mono tabular-nums">
+                            {activePlaylistServerJob.done}/{activePlaylistServerJob.total}
+                          </span>
+                        </span>
+                      </>
+                    )}
+                    {activePlaylistServerJob &&
+                      activePlaylistServerJob.state !== 'running' &&
+                      activePlaylistServerJob.failed > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-[var(--text-muted)]">
+                            {activePlaylistServerJob.failed}{' '}
+                            {activePlaylistServerJob.failed === 1 ? 'track' : 'tracks'} failed to
+                            download
+                          </span>
+                        </>
+                      )}
                   </div>
                 </div>
               </div>
@@ -1059,6 +1150,24 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   >
                     <Play className="w-5 h-5 fill-current ml-0.5" />
                   </button>
+
+                  {activePlaylistServerJob?.state === 'running' && !offline && (
+                    <div className="inline-flex items-center gap-2 rounded-full border border-[var(--accent)] bg-[var(--accent-soft)] pl-3.5 pr-1.5 py-1.5 text-xs font-semibold text-[var(--accent)] whitespace-nowrap">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      <span className="font-mono tabular-nums">
+                        Downloading {activePlaylistServerJob.done}/{activePlaylistServerJob.total}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={cancellingServerJobId === activePlaylistServerJob.id}
+                        onClick={() => void handleCancelServerPlaylistJob()}
+                        className="inline-flex items-center gap-1 rounded-full border border-[var(--accent)]/40 bg-[var(--bg-secondary)]/80 px-2.5 py-1 text-[11px] font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] disabled:opacity-50 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                        <span>Cancel</span>
+                      </button>
+                    </div>
+                  )}
 
                   {/* Download Playlist Offline Button with Progress State */}
                   {tracks.length > 0 && (
@@ -1213,46 +1322,134 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 </div>
               </div>
 
-              {filteredTracks.length === 0 ? (
-                <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-12 text-center">
-                  <p className="text-base font-semibold text-[var(--text-primary)]">
-                    This playlist is empty
-                  </p>
-                  <p className="mt-1.5 text-sm text-[var(--text-secondary)]">
-                    Open your Library and use the track menu or Select mode to add songs here.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => navigate('/')}
-                    className="mt-5 rounded-full bg-[var(--btn-contrast-bg)] px-6 py-2.5 text-sm font-bold text-[var(--btn-contrast-text)] hover:scale-105 transition-transform"
-                  >
-                    Browse Library
-                  </button>
-                </div>
-              ) : (
-                <TrackTable
-                  tracks={filteredTracks}
-                  playlists={playlists}
-                  playlistId={activePlaylist.id}
-                  selectionMode={selectionMode}
-                  selectedIds={selectedIds}
-                  onToggleSelect={toggleSelectTrack}
-                  onEnterSelectionMode={enterSelectionModeWithTrack}
-                  onArtistClick={handleArtistClick}
-                  onRemovedFromPlaylist={(trackId) =>
-                    setTracks((prev) => prev.filter((t) => t.id !== trackId))
-                  }
-                  onTrackDeleted={(trackId) => {
-                    setTracks((prev) => prev.filter((t) => t.id !== trackId));
-                    bumpLibraryRefresh();
-                  }}
-                  onLikeToggled={(trackId, liked) =>
-                    setTracks((prev) =>
-                      prev.map((t) => (t.id === trackId ? {...t, liked} : t))
-                    )
-                  }
-                />
-              )}
+              {(() => {
+                const pendingDownloadingItems =
+                  activePlaylistServerJob?.state === 'running'
+                    ? (
+                        activeJobDetail?.id === activePlaylistServerJob.id
+                          ? activeJobDetail.items || []
+                          : activePlaylistServerJob.items || []
+                      ).filter((item) => {
+                        if (item.status !== 'downloading' && item.status !== 'pending') {
+                          return false;
+                        }
+                        if (!searchQuery.trim()) return true;
+                        const q = searchQuery.toLowerCase();
+                        return (
+                          item.title.toLowerCase().includes(q) ||
+                          item.artist.toLowerCase().includes(q)
+                        );
+                      })
+                    : [];
+
+                if (filteredTracks.length === 0 && pendingDownloadingItems.length === 0) {
+                  return (
+                    <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-12 text-center">
+                      <p className="text-base font-semibold text-[var(--text-primary)]">
+                        This playlist is empty
+                      </p>
+                      <p className="mt-1.5 text-sm text-[var(--text-secondary)]">
+                        Open your Library and use the track menu or Select mode to add songs here.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => navigate('/')}
+                        className="mt-5 rounded-full bg-[var(--btn-contrast-bg)] px-6 py-2.5 text-sm font-bold text-[var(--btn-contrast-text)] hover:scale-105 transition-transform"
+                      >
+                        Browse Library
+                      </button>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-4">
+                    {filteredTracks.length > 0 && (
+                      <TrackTable
+                        tracks={filteredTracks}
+                        playlists={playlists}
+                        playlistId={activePlaylist.id}
+                        selectionMode={selectionMode}
+                        selectedIds={selectedIds}
+                        onToggleSelect={toggleSelectTrack}
+                        onEnterSelectionMode={enterSelectionModeWithTrack}
+                        onArtistClick={handleArtistClick}
+                        onRemovedFromPlaylist={(trackId) =>
+                          setTracks((prev) => prev.filter((t) => t.id !== trackId))
+                        }
+                        onTrackDeleted={(trackId) => {
+                          setTracks((prev) => prev.filter((t) => t.id !== trackId));
+                          bumpLibraryRefresh();
+                        }}
+                        onLikeToggled={(trackId, liked) =>
+                          setTracks((prev) =>
+                            prev.map((t) => (t.id === trackId ? {...t, liked} : t))
+                          )
+                        }
+                      />
+                    )}
+
+                    {pendingDownloadingItems.length > 0 && (
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)]/55 overflow-hidden">
+                        <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--border-subtle)] text-xs font-semibold text-[var(--text-secondary)]">
+                          <span className="inline-flex items-center gap-2">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                            Downloading ({pendingDownloadingItems.length} remaining)
+                          </span>
+                          {activePlaylistServerJob && (
+                            <span className="font-mono tabular-nums text-[var(--text-muted)]">
+                              {activePlaylistServerJob.done}/{activePlaylistServerJob.total} ready
+                            </span>
+                          )}
+                        </div>
+                        <div className="divide-y divide-[var(--border-subtle)]/60">
+                          {pendingDownloadingItems.map((item) => (
+                            <div
+                              key={`${item.videoId}-${item.position}`}
+                              className="flex items-center gap-3 px-4 py-2.5 opacity-75"
+                            >
+                              <span className="w-7 text-right font-mono text-xs tabular-nums text-[var(--text-muted)] shrink-0">
+                                {item.position + 1}
+                              </span>
+                              <div className="w-10 h-10 rounded overflow-hidden bg-[var(--bg-elevated)] shrink-0">
+                                {item.thumbnail ? (
+                                  <img
+                                    src={getYouTubeThumbProxyUrl(item.thumbnail)}
+                                    alt={item.title}
+                                    loading="lazy"
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : null}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-[var(--text-primary)] truncate">
+                                  {item.title}
+                                </p>
+                                <p className="text-xs text-[var(--text-secondary)] truncate">
+                                  {item.artist || item.channel}
+                                </p>
+                              </div>
+                              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/80 px-2.5 py-1 text-[11px] font-medium text-[var(--text-secondary)] shrink-0">
+                                {item.status === 'downloading' ? (
+                                  <Loader2 className="w-3 h-3 animate-spin text-[var(--accent)]" />
+                                ) : (
+                                  <Clock className="w-3 h-3 text-[var(--text-muted)]" />
+                                )}
+                                <span>Downloading</span>
+                              </span>
+                              {item.duration > 0 && (
+                                <span className="hidden sm:inline font-mono text-xs tabular-nums text-[var(--text-muted)] w-11 text-right shrink-0">
+                                  {formatDuration(item.duration)}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           )}
         </div>
@@ -1599,6 +1796,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               offline={offline}
               loading={loading}
               exportingPlaylistId={exportingPlaylistId}
+              playlistDownloadJobs={playlistDownloadJobsByPlaylistId}
               onOpenPlaylist={(id) => navigate(`/playlists/${id}`)}
               onPlayPlaylist={handlePlayPlaylistById}
               onPlayTracks={handlePlayTrackCollection}

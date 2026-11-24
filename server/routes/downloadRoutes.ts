@@ -16,6 +16,13 @@ import {
   type AutoplayContextTrackInput,
 } from '../autoplayService.ts';
 import {
+  cancelPlaylistDownloadJobForUser,
+  getPlaylistDownloadJobForUser,
+  isValidPlaylistJobId,
+  listPlaylistDownloadJobsForUser,
+  startYouTubePlaylistDownload,
+} from '../playlistDownloadService.ts';
+import {
   cancelDownloadJob,
   downloadEvents,
   downloadTrackToNas,
@@ -160,6 +167,85 @@ discoverRouter.get('/youtube/playlist/:id', requireAuth, async (req: AuthRequest
     console.error('[youtube-playlist]', playlistId, msg);
     res.status(502).json({error: msg});
   }
+});
+
+discoverRouter.post(
+  '/youtube/playlist/:id/download',
+  requireDownloadPermission,
+  async (req: AuthRequest, res) => {
+    const playlistId = String(req.params.id || '').trim();
+    if (!isValidYouTubePlaylistId(playlistId)) {
+      res.status(400).json({error: 'Invalid playlist ID'});
+      return;
+    }
+
+    const rawName = typeof req.body?.name === 'string' ? req.body.name : '';
+    const cleanName = rawName.replace(/[\r\n]/g, '').trim();
+    if (!cleanName) {
+      res.status(400).json({error: 'Playlist name is required'});
+      return;
+    }
+    if (cleanName.length > 100) {
+      res.status(400).json({error: 'Playlist name must be 100 characters or fewer'});
+      return;
+    }
+
+    try {
+      const result = await startYouTubePlaylistDownload({
+        userId: req.user!.id,
+        youtubePlaylistId: playlistId,
+        name: cleanName,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to start playlist download';
+      console.error('[youtube-playlist-download]', playlistId, msg);
+      res.status(502).json({error: msg});
+    }
+  }
+);
+
+discoverRouter.get('/youtube/playlist-jobs', requireAuth, (req: AuthRequest, res) => {
+  const jobs = listPlaylistDownloadJobsForUser(req.user!.id, req.user!.role);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({jobs});
+});
+
+discoverRouter.get('/youtube/playlist-jobs/:jobId', requireAuth, (req: AuthRequest, res) => {
+  const jobId = String(req.params.jobId || '').trim();
+  if (!isValidPlaylistJobId(jobId)) {
+    res.status(400).json({error: 'Invalid job ID'});
+    return;
+  }
+  const outcome = getPlaylistDownloadJobForUser(jobId, req.user!.id, req.user!.role, true);
+  if (outcome.status === 'not_found') {
+    res.status(404).json({error: 'Playlist download job not found'});
+    return;
+  }
+  if (outcome.status === 'forbidden') {
+    res.status(403).json({error: 'Not allowed to access this download job'});
+    return;
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(outcome.job);
+});
+
+discoverRouter.post('/youtube/playlist-jobs/:jobId/cancel', requireAuth, (req: AuthRequest, res) => {
+  const jobId = String(req.params.jobId || '').trim();
+  if (!isValidPlaylistJobId(jobId)) {
+    res.status(400).json({error: 'Invalid job ID'});
+    return;
+  }
+  const outcome = cancelPlaylistDownloadJobForUser(jobId, req.user!.id, req.user!.role);
+  if (outcome.status === 'not_found') {
+    res.status(404).json({error: 'Playlist download job not found'});
+    return;
+  }
+  if (outcome.status === 'forbidden') {
+    res.status(403).json({error: 'Not allowed to cancel this download job'});
+    return;
+  }
+  res.json(outcome.job);
 });
 
 discoverRouter.get('/discover/album/:id', requireAuth, async (req: AuthRequest, res) => {

@@ -232,6 +232,47 @@ export interface YouTubePlaylistDetail {
   tracks: YouTubePlaylistTrackItem[];
 }
 
+export type YouTubePlaylistJobState = 'running' | 'completed' | 'cancelled' | 'failed';
+export type YouTubePlaylistJobItemStatus = 'pending' | 'downloading' | 'done' | 'failed' | 'cancelled';
+
+export interface YouTubePlaylistJobFailedTrack {
+  position: number;
+  videoId: string;
+  title: string;
+  artist: string;
+  error: string;
+}
+
+export interface YouTubePlaylistJobItem {
+  position: number;
+  videoId: string;
+  title: string;
+  artist: string;
+  channel: string;
+  duration: number;
+  thumbnail: string;
+  status: YouTubePlaylistJobItemStatus;
+  trackId: number | null;
+  error: string;
+}
+
+export interface YouTubePlaylistJob {
+  id: string;
+  jobId: string;
+  userId: number;
+  playlistId: number;
+  youtubePlaylistId: string;
+  playlistName: string;
+  state: YouTubePlaylistJobState;
+  total: number;
+  done: number;
+  failed: number;
+  failedTracks: YouTubePlaylistJobFailedTrack[];
+  items?: YouTubePlaylistJobItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DiscoverSearchResponse {
   query: string;
   cached: boolean;

@@ -221,6 +221,48 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_listening_events_user_time
     ON listening_events(user_id, created_at DESC, id DESC);
+
+  CREATE TABLE IF NOT EXISTS youtube_playlist_jobs (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    playlist_id INTEGER NOT NULL,
+    youtube_playlist_id TEXT NOT NULL,
+    playlist_name TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('running', 'completed', 'cancelled', 'failed')) DEFAULT 'running',
+    total INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_yt_pl_jobs_user
+    ON youtube_playlist_jobs(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_yt_pl_jobs_playlist
+    ON youtube_playlist_jobs(playlist_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS youtube_playlist_job_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    video_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT '',
+    duration REAL NOT NULL DEFAULT 0,
+    thumbnail TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('pending', 'downloading', 'done', 'failed', 'cancelled')) DEFAULT 'pending',
+    track_id INTEGER,
+    error TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (job_id) REFERENCES youtube_playlist_jobs(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_yt_pl_job_items_job
+    ON youtube_playlist_job_items(job_id, position ASC);
 `);
 
 // Safe incremental migrations for existing databases
@@ -243,6 +285,12 @@ if (!trackColNames.has('file_hash')) {
 }
 db.exec(
   'CREATE INDEX IF NOT EXISTS idx_tracks_file_hash ON tracks(file_hash) WHERE file_hash IS NOT NULL'
+);
+if (!trackColNames.has('youtube_video_id')) {
+  db.exec('ALTER TABLE tracks ADD COLUMN youtube_video_id TEXT');
+}
+db.exec(
+  'CREATE INDEX IF NOT EXISTS idx_tracks_youtube_video_id ON tracks(youtube_video_id) WHERE youtube_video_id IS NOT NULL'
 );
 
 const downloadJobColumns = db
