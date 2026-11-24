@@ -1627,6 +1627,23 @@ export const SettingsPage: React.FC = () => {
             </button>
           </div>
 
+          <div className="flex items-start gap-2.5 rounded-lg bg-[var(--warn-bg)] border border-[var(--warn-border)] px-3.5 py-2.5 text-xs text-[var(--warn-text)]">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              {sysStatus && (
+                <p className="font-mono font-semibold">
+                  Current version:{' '}
+                  {sysStatus.ytdlp.installed
+                    ? `v${sysStatus.ytdlp.version}`
+                    : 'Not installed on host'}
+                </p>
+              )}
+              <p>
+                Updating can bring back slow starts (YouTube ad gate). Recommended version: 2026.08.19.
+              </p>
+            </div>
+          </div>
+
           {/* Installed Binaries Banner */}
           {sysStatus && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -127,9 +127,10 @@ sudo apt-get install -y curl ca-certificates git build-essential python3 ffmpeg
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
-# Latest official yt-dlp binary
-sudo curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+# Pinned official yt-dlp binary (recommended version to avoid YouTube ad-gate slow starts)
+sudo curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp -o /usr/local/bin/yt-dlp
 sudo chmod a+rx /usr/local/bin/yt-dlp
+printf '%s\n' '--js-runtimes node' '--no-update' | sudo tee /etc/yt-dlp.conf > /dev/null
 ```
 
 ### 2. Clone, Build & Configure
@@ -214,6 +215,7 @@ sudo systemctl status xlabplayer
 | `YT_AD_GATE_MAX_WAIT_MS` | `12000` | `12000` | Max TV ad-gate polling window in ms for interactive playback. |
 | `YT_AD_GATE_MAX_WAIT_PREFETCH_MS` | `25000` | `25000` | Max TV ad-gate polling window in ms for background prefetch (clamped `1000-120000`). |
 | `MUSIC_DIR` | `/music` | `./music_library` | Initial music library path seeded into the database on first boot (can later be changed in **Settings**). |
+| `YTDLP_VERSION` | `2026.08.19` | *(Docker build arg)* | Pinned `yt-dlp` release tag installed in the Docker image. Override to test a newer release. |
 | `YTDLP_PATH` | `/usr/local/bin/yt-dlp` | `yt-dlp` | Path or command name for the `yt-dlp` binary seeded on first boot. |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffmpeg` | Path or command name for the `ffmpeg` binary seeded on first boot. |
 | `PUID` | `1000` | *(Docker only)* | Numeric user ID used by `docker-entrypoint.sh` when dropping privileges via `gosu`. |
@@ -251,20 +253,29 @@ npm ci && npm run build
 sudo systemctl restart xlabplayer
 ```
 
-### Updating `yt-dlp`
+### `yt-dlp` Version Pin & Testing Newer Versions
 
-Because YouTube extractors change frequently, keep `yt-dlp` up to date:
+Docker builds pin `yt-dlp` to **`2026.08.19`** (with `--no-update` in `/etc/yt-dlp.conf`) because newer releases can reintroduce slow playback starts triggered by YouTube's ad gate.
 
-- **In-place inside Docker (immediate until container recreate):**
-  ```bash
-  docker compose exec -u root xlabplayer /usr/local/bin/yt-dlp -U
-  ```
-- **Permanent Docker update (rebuilds the image with the latest release):**
+If YouTube extractor changes break playback or you want to test a newer release:
+
+- **Override via `.env` and rebuild (Docker Compose):**
+  Set `YTDLP_VERSION=<release-tag>` (for example `YTDLP_VERSION=2026.09.01`) in `.env`, then run:
   ```bash
   docker compose build --no-cache && docker compose up -d
   ```
-- **Bare-Metal Linux:**
+- **One-off build argument override (Docker Compose):**
   ```bash
-  sudo /usr/local/bin/yt-dlp -U
+  docker compose build --build-arg YTDLP_VERSION=<release-tag> --no-cache && docker compose up -d
   ```
-  *(You can also trigger updates directly from the **Settings** page when running bare-metal with write permissions to the binary.)*
+- **Temporary in-place update inside a running container (resets on recreate):**
+  ```bash
+  docker compose exec -u root xlabplayer /usr/local/bin/yt-dlp -U
+  ```
+- **Bare-Metal Linux:**
+  Download a specific release tag directly (recommended so you can easily roll back to `2026.08.19`):
+  ```bash
+  sudo curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/download/<release-tag>/yt-dlp -o /usr/local/bin/yt-dlp
+  sudo chmod a+rx /usr/local/bin/yt-dlp
+  ```
+  *(You can also run `yt-dlp -U` from the **Settings** page when running bare-metal with write permissions to the binary.)*
