@@ -42,6 +42,7 @@ export type RepeatMode = 'off' | 'all' | 'one';
 export interface RemoteTrackState {
   id: string | number;
   videoId?: string | null;
+  deezerTrackId?: string | null;
   title: string;
   artist: string;
   album: string;
@@ -106,7 +107,27 @@ interface PendingCommand {
 
 const DEVICE_ID_RE = /^[A-Za-z0-9._-]{8,64}$/;
 const COMMAND_ID_RE = /^[A-Za-z0-9._:-]{4,80}$/;
+const DEEZER_TRACK_ID_RE = /^dz-track-(\d{1,15})$/;
+const DEEZER_DIGITS_RE = /^\d{1,15}$/;
 const ALLOWED_REPEAT_MODES = new Set<RepeatMode>(['off', 'all', 'one']);
+
+function sanitizeRemoteCoverUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().slice(0, 500);
+  if (!trimmed) return null;
+  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return trimmed;
+    }
+  } catch {
+    // reject malformed or unsafe URL schemes
+  }
+  return null;
+}
 
 export function isValidDeviceId(value: unknown): value is string {
   return typeof value === 'string' && DEVICE_ID_RE.test(value.trim());
@@ -131,6 +152,7 @@ export function sanitizeRemoteTrack(
   const rec = raw as Record<string, unknown>;
 
   let id: string | number;
+  let derivedDeezerId: string | null = null;
   if (typeof rec.id === 'number') {
     if (!Number.isSafeInteger(rec.id) || rec.id <= 0) {
       return {ok: false, error: 'Invalid numeric track id'};
@@ -143,6 +165,12 @@ export function sanitizeRemoteTrack(
       if (!isValidYouTubeVideoId(vid)) {
         return {ok: false, error: 'Invalid YouTube track id'};
       }
+    } else if (trimmed.startsWith('dz-track-')) {
+      const dzMatch = DEEZER_TRACK_ID_RE.exec(trimmed);
+      if (!dzMatch) {
+        return {ok: false, error: 'Invalid Deezer track id'};
+      }
+      derivedDeezerId = dzMatch[1];
     }
     id = trimmed;
   } else {
@@ -157,13 +185,24 @@ export function sanitizeRemoteTrack(
     videoId = rec.videoId.trim();
   }
 
+  let deezerTrackId: string | null = derivedDeezerId;
+  if (rec.deezerTrackId !== undefined && rec.deezerTrackId !== null && rec.deezerTrackId !== '') {
+    const rawDz =
+      typeof rec.deezerTrackId === 'string'
+        ? rec.deezerTrackId.trim()
+        : typeof rec.deezerTrackId === 'number' && Number.isSafeInteger(rec.deezerTrackId)
+          ? String(rec.deezerTrackId)
+          : '';
+    if (!DEEZER_DIGITS_RE.test(rawDz)) {
+      return {ok: false, error: 'Invalid track deezerTrackId'};
+    }
+    deezerTrackId = rawDz;
+  }
+
   const title = typeof rec.title === 'string' ? rec.title.trim().slice(0, 200) : '';
   const artist = typeof rec.artist === 'string' ? rec.artist.trim().slice(0, 200) : '';
   const album = typeof rec.album === 'string' ? rec.album.trim().slice(0, 200) : '';
-  const cover =
-    typeof rec.cover === 'string' && rec.cover.trim()
-      ? rec.cover.trim().slice(0, 500)
-      : null;
+  const cover = sanitizeRemoteCoverUrl(rec.cover);
   const coverFile =
     typeof rec.cover_file === 'string' && rec.cover_file.trim()
       ? rec.cover_file.trim().slice(0, 200)
@@ -184,13 +223,14 @@ export function sanitizeRemoteTrack(
     value: {
       id,
       videoId,
+      ...(deezerTrackId ? {deezerTrackId} : {}),
       title: title || 'Untitled',
       artist: artist || 'Unknown Artist',
       album,
       cover,
       cover_file: coverFile,
       duration,
-      isYouTubeStream: Boolean(rec.isYouTubeStream || videoId),
+      isYouTubeStream: Boolean(rec.isYouTubeStream || videoId || deezerTrackId),
       dominant_color: dominantColor,
     },
   };
@@ -720,7 +760,7 @@ export class DeviceHub {
     const fromDeviceName = fromRecord?.name || 'Another device';
 
     const ackKey = `${userId}:${targetDeviceId}:${commandId}`;
-    const timeoutMs = Math.max(200, Math.min(10_000, params.timeoutMs ?? COMMAND_ACK_TIMEOUT_MS));
+    const timeoutMs = Math.max(200, Math.min(15_000, params.timeoutMs ?? COMMAND_ACK_TIMEOUT_MS));
 
     return new Promise<RemoteCommandAck>((resolve) => {
       const existing = this.pendingAcks.get(ackKey);

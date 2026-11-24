@@ -82,14 +82,13 @@ export const DeviceSheet: React.FC<DeviceSheetProps> = ({open, onClose}) => {
             : 0,
           isPlaying,
         },
-        device.deviceId
+        device.deviceId,
+        {onRetry: () => void handleSendToDevice(device)}
       );
-      if (ack.status === 'applied' || ack.reason === 'needs_gesture') {
+      if (ack.status === 'applied') {
         remoteHostApi.pauseLocal();
         selectTarget(device.deviceId);
-        if (ack.status === 'applied') {
-          showToast(`Sent playback to ${device.name}`);
-        }
+        showToast(`Sent playback to ${device.name}`);
         onClose();
       }
     } finally {
@@ -110,13 +109,14 @@ export const DeviceSheet: React.FC<DeviceSheetProps> = ({open, onClose}) => {
       const ack = await send(
         'transfer',
         {direction: 'pull', toDeviceId: selfDeviceId},
-        targetDeviceId
+        targetDeviceId,
+        {onRetry: () => void handlePlayHere()}
       );
-      selectTarget(null);
       if (ack.status === 'applied') {
+        selectTarget(null);
         showToast(`Playing on ${selfDeviceName}`);
+        onClose();
       }
-      onClose();
     } finally {
       setBusyDeviceId(null);
     }

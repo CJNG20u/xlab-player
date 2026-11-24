@@ -1005,12 +1005,30 @@ export const AppShell: React.FC = () => {
               void remoteHostApi.playLocal();
               remote.dismissToast();
             }}
-            className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate hover:opacity-95 active:scale-95 transition-transform"
+            className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-[60] rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate hover:opacity-95 active:scale-95 transition-transform"
           >
             {remote.toast.message}
           </button>
+        ) : remote.toast?.action === 'retry' && remote.toast.onRetry ? (
+          <div
+            role="status"
+            className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-[60] flex items-center gap-2.5 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-strong)] pl-4 pr-2 py-1.5 text-sm font-medium text-[var(--text-primary)] shadow-2xl max-w-[92vw]"
+          >
+            <span className="truncate">{remote.toast.message}</span>
+            <button
+              type="button"
+              onClick={() => {
+                const retry = remote.toast?.onRetry;
+                remote.dismissToast();
+                retry?.();
+              }}
+              className="shrink-0 rounded-full bg-[var(--accent)] px-3 py-1 text-xs font-bold text-[var(--accent-contrast)] hover:opacity-95 active:scale-95 transition-transform"
+            >
+              Retry
+            </button>
+          </div>
         ) : (
-          <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
+          <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-[60] rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
             {remote.toast?.message || shellToast}
           </div>
         )

@@ -157,6 +157,9 @@ deviceRouter.post('/devices/:id/command', requireAuth, async (req: AuthRequest, 
     return;
   }
 
+  const commandTimeoutMs =
+    parsed.cmd === 'transfer' || parsed.cmd === 'playTrack' ? 12_000 : undefined;
+
   const ack = await deviceHub.sendCommand({
     userId,
     targetDeviceId,
@@ -164,6 +167,7 @@ deviceRouter.post('/devices/:id/command', requireAuth, async (req: AuthRequest, 
     cmd: parsed.cmd,
     args: parsed.args,
     commandId: parsed.commandId,
+    timeoutMs: commandTimeoutMs,
   });
 
   res.setHeader('Cache-Control', 'no-store');

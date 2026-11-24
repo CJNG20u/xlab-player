@@ -2,14 +2,11 @@ import {useEffect, useRef} from 'react';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useOnlineStatus} from './useOnlineStatus';
-import {
-  apiFetch,
-  getYouTubeThumbProxyUrl,
-  isValidYouTubeVideoId,
-} from '../lib/api';
 import {playbackClock} from '../lib/playbackClock';
 import {
+  buildImmediateRemoteTrack,
   buildTransferQueueSlice,
+  hydrateRemoteTrack,
   remoteControl,
   serializeTrackForRemote,
   type RemoteCommandEvent,
@@ -20,68 +17,7 @@ import type {RepeatMode, Track} from '../types';
 const STATE_DEBOUNCE_MS = 250;
 const PLAYING_HEARTBEAT_MS = 5_000;
 
-async function hydrateRemoteTrack(raw: RemoteTrackState): Promise<Track | null> {
-  const videoId =
-    raw.videoId && isValidYouTubeVideoId(raw.videoId)
-      ? raw.videoId
-      : typeof raw.id === 'string' && raw.id.startsWith('yt-') && isValidYouTubeVideoId(raw.id.slice(3))
-        ? raw.id.slice(3)
-        : null;
-
-  if (!raw.isYouTubeStream && !videoId && typeof raw.id === 'number' && raw.id > 0) {
-    try {
-      const res = await apiFetch<{track: Track}>(`/api/tracks/${raw.id}`);
-      if (res.track) return res.track;
-    } catch {
-      // Fall back to lightweight track object if detail fetch fails
-    }
-    return {
-      id: raw.id,
-      rel_path: '',
-      title: raw.title || 'Untitled',
-      artist: raw.artist || 'Unknown Artist',
-      album: raw.album || '',
-      track_number: null,
-      year: null,
-      duration: raw.duration || 0,
-      format: 'AUDIO',
-      bitrate: 0,
-      size_bytes: 0,
-      cover_file: raw.cover_file ?? null,
-      coverUrl: raw.cover || undefined,
-      dominant_color: raw.dominant_color || '#1f3a2e',
-      added_at: '',
-      liked: false,
-      isYouTubeStream: false,
-    };
-  }
-
-  if (videoId) {
-    return {
-      id: `yt-${videoId}`,
-      rel_path: '',
-      title: raw.title || 'Untitled',
-      artist: raw.artist || 'Unknown Artist',
-      album: raw.album || 'Online Stream',
-      track_number: null,
-      year: null,
-      duration: raw.duration || 0,
-      format: 'm4a',
-      bitrate: 0,
-      size_bytes: 0,
-      cover_file: null,
-      dominant_color: raw.dominant_color || '#1f2937',
-      added_at: '',
-      liked: false,
-      coverUrl: raw.cover || getYouTubeThumbProxyUrl(videoId),
-      streamUrl: `/api/yt-stream/${encodeURIComponent(videoId)}`,
-      isYouTubeStream: true,
-      youtubeUrl: `https://www.youtube.com/watch?v=${videoId}`,
-    };
-  }
-
-  return null;
-}
+export {hydrateRemoteTrack};
 
 /**
  * Connects this device to the multi-device SSE hub, executes incoming remote commands
@@ -182,6 +118,9 @@ export function useRemoteHost(): void {
       remoteControl.disconnect();
     };
   }, [user, offline]);
+
+  // Token to cancel any prior background queue hydration loop when a new transfer arrives
+  const bgHydrationTokenRef = useRef(0);
 
   // 2. Execute incoming remote commands against PlayerContext actions & ack
   useEffect(() => {
@@ -334,7 +273,7 @@ export function useRemoteHost(): void {
           }
 
           case 'transfer': {
-            // Pull transfer requested by another device ("Play here"): pause here and push our queue back
+            // Pull transfer requested by another device ("Play here"): push queue and only pause after target acks 'applied'
             if (args.direction === 'pull' && typeof args.toDeviceId === 'string') {
               const slice = buildTransferQueueSlice(
                 api.queue,
@@ -347,9 +286,7 @@ export function useRemoteHost(): void {
               }
               const rawPos = playbackClock.getTime();
               const pos = Number.isFinite(rawPos) ? Math.max(0, rawPos) : 0;
-              api.remoteHostApi.pauseLocal();
-              await remoteControl.ackCommand(commandId, 'applied');
-              void remoteControl.send(
+              const pushAck = await remoteControl.send(
                 'transfer',
                 {
                   track: slice.track,
@@ -358,8 +295,17 @@ export function useRemoteHost(): void {
                   positionSec: pos,
                   isPlaying: true,
                 },
-                args.toDeviceId
+                args.toDeviceId,
+                {suppressToast: true}
               );
+              if (pushAck.status === 'applied') {
+                api.remoteHostApi.pauseLocal();
+                await remoteControl.ackCommand(commandId, 'applied');
+              } else {
+                const reason =
+                  pushAck.reason || (pushAck.status === 'timeout' ? 'timeout' : 'unresolvable_track');
+                await remoteControl.ackCommand(commandId, 'rejected', reason);
+              }
               break;
             }
 
@@ -377,26 +323,47 @@ export function useRemoteHost(): void {
               0,
               Math.min(rawQueue.length - 1, Math.floor(Number(args.index ?? 0)))
             );
-            const hydratedList: Track[] = [];
-            let adjustedIndex = 0;
 
-            for (let i = 0; i < rawQueue.length; i += 1) {
-              const item = await hydrateRemoteTrack(rawQueue[i]);
-              if (item) {
-                if (i === rawIndex) adjustedIndex = hydratedList.length;
-                hydratedList.push(item);
-              }
+            // Resolve the current track first so playback starts quickly without waiting on the whole queue
+            const currentHydrated = await hydrateRemoteTrack(rawQueue[rawIndex]);
+            if (!currentHydrated) {
+              await remoteControl.ackCommand(commandId, 'rejected', 'unresolvable_track');
+              return;
             }
 
-            if (hydratedList.length === 0) {
-              await remoteControl.ackCommand(commandId, 'rejected', 'unresolvable_transfer');
-              return;
+            const hydratedList: Track[] = [];
+            let adjustedIndex = 0;
+            const pendingBackground: Array<{
+              queueOffset: number;
+              raw: RemoteTrackState;
+              placeholderId: Track['id'];
+            }> = [];
+
+            for (let i = 0; i < rawQueue.length; i += 1) {
+              if (i === rawIndex) {
+                adjustedIndex = hydratedList.length;
+                hydratedList.push(currentHydrated);
+                continue;
+              }
+              const immediate = buildImmediateRemoteTrack(rawQueue[i], i);
+              if (!immediate) continue;
+              const queueOffset = hydratedList.length;
+              hydratedList.push(immediate.track);
+              if (immediate.needsBackgroundHydration) {
+                pendingBackground.push({
+                  queueOffset,
+                  raw: rawQueue[i],
+                  placeholderId: immediate.track.id,
+                });
+              }
             }
 
             const positionSec = Number.isFinite(Number(args.positionSec))
               ? Math.max(0, Number(args.positionSec))
               : 0;
             const shouldPlay = Boolean(args.isPlaying);
+
+            const myBgToken = ++bgHydrationTokenRef.current;
 
             const result = await api.remoteHostApi.applyTransfer({
               queue: hydratedList,
@@ -414,6 +381,27 @@ export function useRemoteHost(): void {
               );
               await remoteControl.ackCommand(commandId, 'rejected', 'needs_gesture');
             }
+
+            // Lazily resolve the rest of the queue in background, prioritizing upcoming tracks after adjustedIndex
+            if (pendingBackground.length > 0) {
+              const orderedPending = [
+                ...pendingBackground.filter((p) => p.queueOffset > adjustedIndex),
+                ...pendingBackground.filter((p) => p.queueOffset < adjustedIndex),
+              ];
+              void (async () => {
+                for (const entry of orderedPending) {
+                  if (bgHydrationTokenRef.current !== myBgToken) return;
+                  const resolved = await hydrateRemoteTrack(entry.raw);
+                  if (bgHydrationTokenRef.current !== myBgToken) return;
+                  if (resolved) {
+                    latestRef.current.remoteHostApi.replaceQueueTrack(
+                      entry.placeholderId,
+                      resolved
+                    );
+                  }
+                }
+              })();
+            }
             break;
           }
         }
@@ -425,9 +413,13 @@ export function useRemoteHost(): void {
       }
     };
 
-    return remoteControl.onCommand((event) => {
+    const unsubCommand = remoteControl.onCommand((event) => {
       void handleCommand(event);
     });
+    return () => {
+      bgHydrationTokenRef.current += 1;
+      unsubCommand();
+    };
   }, [user, offline]);
 
   // 3. Debounced (250ms) state publication on playback changes (and on seek jumps)

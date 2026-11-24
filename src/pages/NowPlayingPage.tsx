@@ -406,10 +406,11 @@ export const NowPlayingPage: React.FC = () => {
     const ack = await remote.send(
       'transfer',
       {direction: 'pull', toDeviceId: remote.selfDeviceId},
-      remote.targetDeviceId
+      remote.targetDeviceId,
+      {onRetry: () => void handlePlayHereQuick()}
     );
-    remote.selectTarget(null);
     if (ack.status === 'applied') {
+      remote.selectTarget(null);
       flashToast(`Playing on ${remote.selfDeviceName}`);
     }
   }, [flashToast, remote, remoteHostApi]);

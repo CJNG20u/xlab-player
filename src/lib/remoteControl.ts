@@ -2,10 +2,12 @@ import {useEffect, useState, useSyncExternalStore} from 'react';
 import type {RepeatMode, Track} from '../types';
 import {
   apiFetch,
+  getCatalogMatchStreamUrl,
   getSSEUrl,
   getTrackCoverUrl,
   getYouTubeThumbProxyUrl,
   getYouTubeVideoId,
+  isValidYouTubeVideoId,
 } from './api';
 import {
   detectDevicePlatform,
@@ -31,6 +33,7 @@ export type RemoteCommandName =
 export interface RemoteTrackState {
   id: string | number;
   videoId?: string | null;
+  deezerTrackId?: string | null;
   title: string;
   artist: string;
   album: string;
@@ -82,7 +85,8 @@ export interface RemoteCommandAckResponse {
 export interface RemoteToastState {
   id: number;
   message: string;
-  action?: 'resume_local';
+  action?: 'resume_local' | 'retry';
+  onRetry?: () => void;
 }
 
 export interface HeldRemoteState {
@@ -108,7 +112,26 @@ export interface RemoteControlSnapshot {
 const TARGET_STORAGE_PREFIX = 'xlabplayer_remote_target_v1';
 const MAX_TRANSFER_QUEUE_ITEMS = 100;
 const PENDING_TIMEOUT_MS = 3_000;
+const TRANSFER_PENDING_TIMEOUT_MS = 12_000;
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
+
+export const DEEZER_TRACK_ID_RE = /^dz-track-(\d{1,15})$/;
+export const DEEZER_DIGITS_RE = /^\d{1,15}$/;
+
+export function extractDeezerTrackId(
+  track: Pick<Track, 'id' | 'deezerTrackId'> | Pick<RemoteTrackState, 'id' | 'deezerTrackId'> | null | undefined
+): string | null {
+  if (!track) return null;
+  if (typeof track.deezerTrackId === 'string') {
+    const trimmed = track.deezerTrackId.trim();
+    if (DEEZER_DIGITS_RE.test(trimmed)) return trimmed;
+  }
+  if (typeof track.id === 'string') {
+    const match = DEEZER_TRACK_ID_RE.exec(track.id.trim());
+    if (match) return match[1];
+  }
+  return null;
+}
 
 /**
  * Pure position extrapolation for a playing remote device:
@@ -140,20 +163,310 @@ export function extrapolateRemotePosition(
 
 export function serializeTrackForRemote(track: Track): RemoteTrackState {
   const videoId = getYouTubeVideoId(track);
+  const deezerTrackId = extractDeezerTrackId(track);
   const cover =
     getTrackCoverUrl(track) || (videoId ? getYouTubeThumbProxyUrl(videoId) : null);
+
+  let id: string | number = track.id;
+  if (
+    typeof track.id === 'string' &&
+    track.id.startsWith('dz-track-') &&
+    !DEEZER_TRACK_ID_RE.test(track.id)
+  ) {
+    id = deezerTrackId ? `dz-track-${deezerTrackId}` : `web-${track.id.slice(9)}`.slice(0, 80);
+  }
+
   return {
-    id: track.id,
+    id,
     videoId,
+    ...(deezerTrackId ? {deezerTrackId} : {}),
     title: track.title || 'Untitled',
     artist: track.artist || 'Unknown Artist',
     album: track.album || '',
     cover,
     cover_file: track.cover_file ?? null,
     duration: Number.isFinite(track.duration) ? Math.max(0, track.duration) : 0,
-    isYouTubeStream: Boolean(track.isYouTubeStream || videoId),
+    isYouTubeStream: Boolean(track.isYouTubeStream || videoId || deezerTrackId),
     dominant_color: track.dominant_color || '#1f3a2e',
   };
+}
+
+export interface HydrateRemoteTrackDeps {
+  fetchLibraryTrack?: (id: number) => Promise<Track | null>;
+  resolveTrack?: (input: {
+    artist: string;
+    title: string;
+    duration: number;
+  }) => Promise<{videoId: string; streamUrl?: string; matchedDuration?: number} | null>;
+}
+
+const defaultHydrateDeps: Required<HydrateRemoteTrackDeps> = {
+  fetchLibraryTrack: async (id: number) => {
+    try {
+      const res = await apiFetch<{track?: Track}>(`/api/tracks/${id}`);
+      return res.track ?? null;
+    } catch {
+      return null;
+    }
+  },
+  resolveTrack: async (input) => {
+    try {
+      const res = await apiFetch<{
+        videoId?: string;
+        streamUrl?: string;
+        matchedDuration?: number;
+      }>('/api/yt-stream/resolve', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      if (!res?.videoId || !isValidYouTubeVideoId(res.videoId)) return null;
+      return {
+        videoId: res.videoId,
+        streamUrl: res.streamUrl,
+        matchedDuration: res.matchedDuration,
+      };
+    } catch {
+      return null;
+    }
+  },
+};
+
+function getRemoteVideoId(raw: RemoteTrackState): string | null {
+  if (raw.videoId && isValidYouTubeVideoId(raw.videoId)) {
+    return raw.videoId;
+  }
+  if (typeof raw.id === 'string' && raw.id.startsWith('yt-')) {
+    const vid = raw.id.slice(3);
+    if (isValidYouTubeVideoId(vid)) return vid;
+  }
+  return null;
+}
+
+function buildYouTubeStreamTrack(
+  raw: RemoteTrackState,
+  videoId: string,
+  resolvedDuration?: number
+): Track {
+  const deezerTrackId = extractDeezerTrackId(raw);
+  const duration =
+    Number.isFinite(raw.duration) && raw.duration > 0
+      ? raw.duration
+      : resolvedDuration && Number.isFinite(resolvedDuration) && resolvedDuration > 0
+        ? resolvedDuration
+        : 0;
+  return {
+    id: `yt-${videoId}`,
+    rel_path: '',
+    title: raw.title || 'Untitled',
+    artist: raw.artist || 'Unknown Artist',
+    album: raw.album || 'Online Stream',
+    track_number: null,
+    year: null,
+    duration,
+    format: 'm4a',
+    bitrate: 0,
+    size_bytes: 0,
+    cover_file: null,
+    dominant_color: raw.dominant_color || '#1f2937',
+    added_at: '',
+    liked: false,
+    coverUrl: raw.cover || getYouTubeThumbProxyUrl(videoId),
+    streamUrl: `/api/yt-stream/${encodeURIComponent(videoId)}`,
+    isYouTubeStream: true,
+    youtubeUrl: `https://www.youtube.com/watch?v=${videoId}`,
+    ...(deezerTrackId ? {deezerTrackId} : {}),
+  };
+}
+
+function buildLightweightLibraryTrack(raw: RemoteTrackState, numericId: number): Track {
+  return {
+    id: numericId,
+    rel_path: '',
+    title: raw.title || 'Untitled',
+    artist: raw.artist || 'Unknown Artist',
+    album: raw.album || '',
+    track_number: null,
+    year: null,
+    duration: raw.duration || 0,
+    format: 'AUDIO',
+    bitrate: 0,
+    size_bytes: 0,
+    cover_file: raw.cover_file ?? null,
+    coverUrl: raw.cover || undefined,
+    dominant_color: raw.dominant_color || '#1f3a2e',
+    added_at: '',
+    liked: false,
+    isYouTubeStream: false,
+  };
+}
+
+function isLibraryRemoteTrack(raw: RemoteTrackState, videoId: string | null, deezerTrackId: string | null): boolean {
+  return (
+    !raw.isYouTubeStream &&
+    !videoId &&
+    !deezerTrackId &&
+    typeof raw.id === 'number' &&
+    Number.isSafeInteger(raw.id) &&
+    raw.id > 0
+  );
+}
+
+function canResolveByMetadata(raw: RemoteTrackState, deezerTrackId: string | null): boolean {
+  const title = (raw.title || '').trim();
+  const artist = (raw.artist || '').trim();
+  const hasRealTitle = Boolean(title && title !== 'Untitled');
+  const hasRealArtist = Boolean(artist && artist !== 'Unknown Artist');
+  if (deezerTrackId) {
+    return hasRealTitle;
+  }
+  return hasRealTitle && hasRealArtist;
+}
+
+/**
+ * Hydrates a serialized remote track on the host device into a playable Track.
+ * - Library tracks: fetched from /api/tracks/:id (with lightweight fallback).
+ * - YouTube tracks: built directly from videoId.
+ * - Catalog (dz-track-<digits>) or artist+title web tracks: resolved via the same
+ *   /api/yt-stream/resolve (resolveTrackToVideoId) resolver used for local playback.
+ */
+export async function hydrateRemoteTrack(
+  raw: RemoteTrackState,
+  deps: HydrateRemoteTrackDeps = {}
+): Promise<Track | null> {
+  const videoId = getRemoteVideoId(raw);
+  const deezerTrackId = extractDeezerTrackId(raw);
+
+  if (videoId) {
+    return buildYouTubeStreamTrack(raw, videoId);
+  }
+
+  if (isLibraryRemoteTrack(raw, videoId, deezerTrackId)) {
+    const numericId = raw.id as number;
+    const fetcher = deps.fetchLibraryTrack ?? defaultHydrateDeps.fetchLibraryTrack;
+    const fetched = await fetcher(numericId);
+    if (fetched) return fetched;
+    return buildLightweightLibraryTrack(raw, numericId);
+  }
+
+  if (canResolveByMetadata(raw, deezerTrackId)) {
+    const title = (raw.title || '').trim();
+    const rawArtist = (raw.artist || '').trim();
+    const artist = rawArtist === 'Unknown Artist' ? '' : rawArtist;
+    const resolver = deps.resolveTrack ?? defaultHydrateDeps.resolveTrack;
+    const resolved = await resolver({
+      artist,
+      title,
+      duration: Number.isFinite(raw.duration) ? Math.max(0, raw.duration) : 0,
+    });
+    if (resolved && isValidYouTubeVideoId(resolved.videoId)) {
+      return buildYouTubeStreamTrack(raw, resolved.videoId, resolved.matchedDuration);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Synchronously builds a queue entry for non-current items in a transfer so the current
+ * track starts immediately while remaining catalog/library tracks hydrate lazily in the background.
+ */
+export function buildImmediateRemoteTrack(
+  raw: RemoteTrackState,
+  fallbackIndex: number
+): {track: Track; needsBackgroundHydration: boolean} | null {
+  const videoId = getRemoteVideoId(raw);
+  const deezerTrackId = extractDeezerTrackId(raw);
+
+  if (videoId) {
+    return {
+      track: buildYouTubeStreamTrack(raw, videoId),
+      needsBackgroundHydration: false,
+    };
+  }
+
+  if (isLibraryRemoteTrack(raw, videoId, deezerTrackId)) {
+    return {
+      track: buildLightweightLibraryTrack(raw, raw.id as number),
+      needsBackgroundHydration: true,
+    };
+  }
+
+  if (canResolveByMetadata(raw, deezerTrackId)) {
+    const title = (raw.title || '').trim();
+    const rawArtist = (raw.artist || '').trim();
+    const artist = rawArtist === 'Unknown Artist' ? '' : rawArtist;
+    const placeholderId =
+      typeof raw.id === 'string' && raw.id.trim()
+        ? raw.id.trim()
+        : deezerTrackId
+          ? `dz-track-${deezerTrackId}`
+          : `remote-web-${fallbackIndex}-${title.slice(0, 24)}`;
+    return {
+      track: {
+        id: placeholderId,
+        rel_path: '',
+        title: raw.title || 'Untitled',
+        artist: raw.artist || 'Unknown Artist',
+        album: raw.album || 'Online Stream',
+        track_number: null,
+        year: null,
+        duration: Number.isFinite(raw.duration) ? Math.max(0, raw.duration) : 0,
+        format: 'm4a',
+        bitrate: 0,
+        size_bytes: 0,
+        cover_file: null,
+        dominant_color: raw.dominant_color || '#1f2937',
+        added_at: '',
+        liked: false,
+        coverUrl: raw.cover || undefined,
+        streamUrl: getCatalogMatchStreamUrl({
+          artist,
+          title,
+          duration: raw.duration,
+        }),
+        isYouTubeStream: true,
+        ...(deezerTrackId ? {deezerTrackId} : {}),
+      },
+      needsBackgroundHydration: true,
+    };
+  }
+
+  return null;
+}
+
+export function formatRemoteAckError(
+  ack: RemoteCommandAckResponse,
+  deviceName: string
+): string | null {
+  if (ack.status === 'applied') return null;
+  const name = deviceName.trim() || 'Target device';
+
+  if (
+    ack.status === 'timeout' ||
+    ack.reason === 'timeout' ||
+    ack.reason === 'device_timeout' ||
+    ack.reason === 'network_error'
+  ) {
+    return `${name} didn't respond`;
+  }
+
+  switch (ack.reason) {
+    case 'device_offline':
+      return `${name} is offline`;
+    case 'needs_gesture':
+      return `Tap ${name} to start playback`;
+    case 'unresolvable_track':
+    case 'unresolvable_transfer':
+      return `Couldn't find that track on ${name}`;
+    case 'invalid_track':
+      return `Track couldn't be sent to ${name}`;
+    case 'empty_transfer':
+      return `Nothing to transfer to ${name}`;
+    case 'no_track':
+      return `No track is loaded on ${name}`;
+    default:
+      return `Couldn't complete action on ${name}`;
+  }
 }
 
 export function buildTransferQueueSlice(
@@ -310,13 +623,18 @@ class RemoteControlController {
     return this.snapshotCache;
   };
 
-  showToast(message: string, action?: 'resume_local', durationMs = 3600): void {
+  showToast(
+    message: string,
+    action?: 'resume_local' | 'retry',
+    durationMs = 3600,
+    onRetry?: () => void
+  ): void {
     if (this.toastTimer) {
       clearTimeout(this.toastTimer);
       this.toastTimer = null;
     }
     this.toastCounter += 1;
-    this.toast = {id: this.toastCounter, message, action};
+    this.toast = {id: this.toastCounter, message, action, onRetry};
     this.notify();
     this.toastTimer = setTimeout(() => {
       this.toast = null;
@@ -590,12 +908,16 @@ class RemoteControlController {
   async send(
     cmd: RemoteCommandName,
     args: Record<string, unknown> = {},
-    explicitTargetId?: string
+    explicitTargetId?: string,
+    options?: {onRetry?: () => void; suppressToast?: boolean}
   ): Promise<RemoteCommandAckResponse> {
     const targetId = explicitTargetId ?? this.targetDeviceId;
     if (!targetId || targetId === this.selfDeviceId) {
       return {status: 'rejected', reason: 'no_target'};
     }
+
+    const targetName =
+      this.devices.find((d) => d.deviceId === targetId)?.name || 'Target device';
 
     this.commandCounter += 1;
     const commandId = `${this.selfDeviceId.slice(0, 8)}-${Date.now()}-${this.commandCounter}`;
@@ -603,13 +925,21 @@ class RemoteControlController {
     this.pendingCommand = {commandId, cmd, startedAtMs: Date.now()};
     this.notify();
 
+    const pendingTimeoutMs =
+      cmd === 'transfer' || cmd === 'playTrack' ? TRANSFER_PENDING_TIMEOUT_MS : PENDING_TIMEOUT_MS;
     this.pendingTimer = setTimeout(() => {
       if (this.pendingCommand?.commandId === commandId) {
         this.pendingCommand = null;
         this.pendingTimer = null;
         this.notify();
       }
-    }, PENDING_TIMEOUT_MS);
+    }, pendingTimeoutMs);
+
+    const retryAction =
+      options?.onRetry ??
+      (() => {
+        void this.send(cmd, args, targetId, options);
+      });
 
     try {
       const res = await apiFetch<RemoteCommandAckResponse>(
@@ -625,23 +955,28 @@ class RemoteControlController {
         }
       );
 
-      if (res.status === 'rejected' && res.reason === 'device_offline') {
-        if (targetId === this.targetDeviceId) {
-          this.fallbackTargetOffline('Device went offline');
-        } else {
-          this.showToast('Device went offline');
+      if (res.status !== 'applied') {
+        const msg = formatRemoteAckError(res, targetName);
+        if (res.status === 'rejected' && res.reason === 'device_offline') {
+          if (targetId === this.targetDeviceId) {
+            this.targetDeviceId = null;
+            this.persistRememberedTarget(this.activeUserId, null);
+            this.clearPendingCommand();
+          }
         }
-      } else if (res.status === 'rejected' && res.reason === 'needs_gesture') {
-        const targetName =
-          this.devices.find((d) => d.deviceId === targetId)?.name || 'Target device';
-        this.showToast(`Tap ${targetName} to start playback`);
-      } else if (res.status === 'timeout') {
-        this.showToast('Device did not respond');
+        if (msg && !options?.suppressToast) {
+          this.showToast(msg, 'retry', 6000, retryAction);
+        }
       }
 
       return res;
     } catch {
-      return {status: 'timeout', reason: 'network_error'};
+      const fallbackAck: RemoteCommandAckResponse = {status: 'timeout', reason: 'network_error'};
+      const msg = formatRemoteAckError(fallbackAck, targetName);
+      if (msg && !options?.suppressToast) {
+        this.showToast(msg, 'retry', 6000, retryAction);
+      }
+      return fallbackAck;
     } finally {
       if (this.pendingCommand?.commandId === commandId) {
         this.clearPendingCommand();

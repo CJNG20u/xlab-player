@@ -8,8 +8,16 @@ import {
   MAX_TRANSFER_QUEUE_ITEMS,
   sanitizeCommandRequest,
   sanitizeDeviceStatePayload,
+  sanitizeRemoteTrack,
 } from './deviceHub.ts';
-import {extrapolateRemotePosition} from '../src/lib/remoteControl.ts';
+import {
+  buildImmediateRemoteTrack,
+  extrapolateRemotePosition,
+  formatRemoteAckError,
+  hydrateRemoteTrack,
+  serializeTrackForRemote,
+} from '../src/lib/remoteControl.ts';
+import type {Track} from '../src/types.ts';
 
 interface FakeSse {
   res: Response;
@@ -348,4 +356,366 @@ test('extrapolateRemotePosition advances smoothly while playing and clamps to du
   // Does not advance when paused
   const posPaused = extrapolateRemotePosition({...baseState, isPlaying: false}, 10_200, 25_000);
   assert.equal(posPaused, 30);
+});
+
+test('sanitizeRemoteTrack validates dz-track-<digits>, deezerTrackId, yt-, library tracks, and limits', () => {
+  // Valid Deezer catalog track
+  const dzOk = sanitizeRemoteTrack({
+    id: 'dz-track-3135556',
+    deezerTrackId: '3135556',
+    title: 'Harder, Better, Faster, Stronger',
+    artist: 'Daft Punk',
+    album: 'Discovery',
+    duration: 224,
+    cover: 'https://e-cdns-images.dzcdn.net/images/cover/abc/500x500.jpg',
+  });
+  assert.equal(dzOk.ok, true);
+  if (dzOk.ok) {
+    assert.equal(dzOk.value.id, 'dz-track-3135556');
+    assert.equal(dzOk.value.deezerTrackId, '3135556');
+    assert.equal(dzOk.value.videoId, null);
+    assert.equal(dzOk.value.artist, 'Daft Punk');
+    assert.equal(dzOk.value.title, 'Harder, Better, Faster, Stronger');
+    assert.equal(dzOk.value.album, 'Discovery');
+    assert.equal(dzOk.value.duration, 224);
+    assert.equal(dzOk.value.cover, 'https://e-cdns-images.dzcdn.net/images/cover/abc/500x500.jpg');
+    assert.equal(dzOk.value.isYouTubeStream, true);
+  }
+
+  // Derives deezerTrackId from dz-track-<digits> when omitted
+  const dzDerived = sanitizeRemoteTrack({
+    id: 'dz-track-987654321012345',
+    title: 'Aerodynamic',
+    artist: 'Daft Punk',
+    album: 'Discovery',
+    duration: 207,
+  });
+  assert.equal(dzDerived.ok, true);
+  if (dzDerived.ok) {
+    assert.equal(dzDerived.value.deezerTrackId, '987654321012345');
+  }
+
+  // Rejects invalid dz-track id formats (non-digits, empty, >15 digits)
+  for (const badId of ['dz-track-', 'dz-track-abc', 'dz-track-1234567890123456', 'dz-track-123/../../x']) {
+    const res = sanitizeRemoteTrack({
+      id: badId,
+      title: 'Song',
+      artist: 'Artist',
+      album: '',
+      duration: 120,
+    });
+    assert.equal(res.ok, false, `Expected ${badId} to be rejected`);
+  }
+
+  // Rejects invalid deezerTrackId field
+  const badDzField = sanitizeRemoteTrack({
+    id: 'dz-track-12345',
+    deezerTrackId: 'not-digits',
+    title: 'Song',
+    artist: 'Artist',
+    album: '',
+    duration: 120,
+  });
+  assert.equal(badDzField.ok, false);
+
+  // Rejects unsafe cover URL schemes while keeping safe http(s) and relative paths
+  const unsafeCover = sanitizeRemoteTrack({
+    id: 'dz-track-12345',
+    title: 'Song',
+    artist: 'Artist',
+    album: '',
+    duration: 120,
+    cover: 'javascript:alert(1)',
+  });
+  assert.equal(unsafeCover.ok, true);
+  if (unsafeCover.ok) {
+    assert.equal(unsafeCover.value.cover, null);
+  }
+
+  // Enforces existing field length limits
+  const longFields = sanitizeRemoteTrack({
+    id: 'dz-track-42',
+    title: 'T'.repeat(300),
+    artist: 'A'.repeat(300),
+    album: 'B'.repeat(300),
+    duration: 999_999,
+  });
+  assert.equal(longFields.ok, true);
+  if (longFields.ok) {
+    assert.equal(longFields.value.title.length, 200);
+    assert.equal(longFields.value.artist.length, 200);
+    assert.equal(longFields.value.album.length, 200);
+    assert.equal(longFields.value.duration, 86_400);
+  }
+});
+
+test('serializeTrackForRemote preserves dz-track, yt-, and library tracks', () => {
+  const dzTrack: Track = {
+    id: 'dz-track-3135556',
+    rel_path: '',
+    title: 'Digital Love',
+    artist: 'Daft Punk',
+    album: 'Discovery',
+    track_number: 3,
+    year: 2001,
+    duration: 298,
+    format: 'm4a',
+    bitrate: 0,
+    size_bytes: 0,
+    cover_file: null,
+    dominant_color: '#1f2937',
+    added_at: '',
+    liked: false,
+    coverUrl: 'https://e-cdns-images.dzcdn.net/images/cover/xyz/500x500.jpg',
+    streamUrl: '/api/yt-stream/match?artist=Daft+Punk&title=Digital+Love&duration=298',
+    isYouTubeStream: true,
+    deezerTrackId: '3135556',
+  };
+  const serializedDz = serializeTrackForRemote(dzTrack);
+  assert.equal(serializedDz.id, 'dz-track-3135556');
+  assert.equal(serializedDz.deezerTrackId, '3135556');
+  assert.equal(serializedDz.videoId, null);
+  assert.equal(serializedDz.artist, 'Daft Punk');
+  assert.equal(serializedDz.title, 'Digital Love');
+  assert.equal(serializedDz.album, 'Discovery');
+  assert.equal(serializedDz.duration, 298);
+  assert.equal(serializedDz.cover, 'https://e-cdns-images.dzcdn.net/images/cover/xyz/500x500.jpg');
+  assert.equal(sanitizeRemoteTrack(serializedDz).ok, true);
+
+  const ytTrack: Track = {
+    ...dzTrack,
+    id: 'yt-dQw4w9WgXcQ',
+    deezerTrackId: undefined,
+    streamUrl: '/api/yt-stream/dQw4w9WgXcQ',
+    youtubeUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    coverUrl: undefined,
+  };
+  const serializedYt = serializeTrackForRemote(ytTrack);
+  assert.equal(serializedYt.id, 'yt-dQw4w9WgXcQ');
+  assert.equal(serializedYt.videoId, 'dQw4w9WgXcQ');
+  assert.equal(serializedYt.deezerTrackId, undefined);
+  assert.equal(serializedYt.cover, '/api/yt-thumb/dQw4w9WgXcQ');
+  assert.equal(sanitizeRemoteTrack(serializedYt).ok, true);
+
+  const libTrack: Track = {
+    id: 42,
+    rel_path: 'Daft Punk/Discovery/01 One More Time.flac',
+    title: 'One More Time',
+    artist: 'Daft Punk',
+    album: 'Discovery',
+    track_number: 1,
+    year: 2001,
+    duration: 320,
+    format: 'FLAC',
+    bitrate: 1000,
+    size_bytes: 35_000_000,
+    cover_file: 'cover_42.jpg',
+    dominant_color: '#123456',
+    added_at: '2026-01-01',
+    liked: true,
+    isYouTubeStream: false,
+  };
+  const serializedLib = serializeTrackForRemote(libTrack);
+  assert.equal(serializedLib.id, 42);
+  assert.equal(serializedLib.videoId, null);
+  assert.equal(serializedLib.cover_file, 'cover_42.jpg');
+  assert.equal(serializedLib.cover, '/api/covers/cover_42.jpg');
+  assert.equal(serializedLib.isYouTubeStream, false);
+  assert.equal(sanitizeRemoteTrack(serializedLib).ok, true);
+});
+
+test('hydrateRemoteTrack resolves dz-track and artist+title web tracks, keeps yt- and library tracks', async () => {
+  // 1. Catalog dz-track resolves via resolver into a normal YouTube-stream Track
+  let resolveCalls = 0;
+  const hydratedDz = await hydrateRemoteTrack(
+    {
+      id: 'dz-track-3135556',
+      deezerTrackId: '3135556',
+      title: 'Digital Love',
+      artist: 'Daft Punk',
+      album: 'Discovery',
+      duration: 298,
+      cover: 'https://e-cdns-images.dzcdn.net/images/cover/xyz/500x500.jpg',
+      isYouTubeStream: true,
+    },
+    {
+      resolveTrack: async (input) => {
+        resolveCalls += 1;
+        assert.equal(input.artist, 'Daft Punk');
+        assert.equal(input.title, 'Digital Love');
+        assert.equal(input.duration, 298);
+        return {videoId: 'FGBhQbmPwH8', streamUrl: '/api/yt-stream/FGBhQbmPwH8', matchedDuration: 300};
+      },
+    }
+  );
+  assert.equal(resolveCalls, 1);
+  assert.ok(hydratedDz);
+  assert.equal(hydratedDz.id, 'yt-FGBhQbmPwH8');
+  assert.equal(hydratedDz.streamUrl, '/api/yt-stream/FGBhQbmPwH8');
+  assert.equal(hydratedDz.coverUrl, 'https://e-cdns-images.dzcdn.net/images/cover/xyz/500x500.jpg');
+  assert.equal(hydratedDz.isYouTubeStream, true);
+  assert.equal(hydratedDz.deezerTrackId, '3135556');
+
+  // 2. Artist+title-only web track (no videoId, no deezerTrackId) also resolves and falls back to YT thumb cover
+  const hydratedWeb = await hydrateRemoteTrack(
+    {
+      id: 'web-custom-1',
+      title: 'Midnight City',
+      artist: 'M83',
+      album: "Hurry Up, We're Dreaming",
+      duration: 243,
+      isYouTubeStream: true,
+    },
+    {
+      resolveTrack: async () => ({videoId: 'dX3k_QDnzHE'}),
+    }
+  );
+  assert.ok(hydratedWeb);
+  assert.equal(hydratedWeb.id, 'yt-dX3k_QDnzHE');
+  assert.equal(hydratedWeb.streamUrl, '/api/yt-stream/dX3k_QDnzHE');
+  assert.equal(hydratedWeb.coverUrl, '/api/yt-thumb/dX3k_QDnzHE');
+
+  // 3. Unresolvable dz-track returns null so host rejects with unresolvable_track
+  const failedDz = await hydrateRemoteTrack(
+    {
+      id: 'dz-track-999999',
+      deezerTrackId: '999999',
+      title: 'Nonexistent Obscure Track',
+      artist: 'Nobody',
+      album: '',
+      duration: 180,
+      isYouTubeStream: true,
+    },
+    {
+      resolveTrack: async () => null,
+    }
+  );
+  assert.equal(failedDz, null);
+
+  // 4. YouTube track hydrates directly without invoking resolver
+  let unexpectedResolve = false;
+  const hydratedYt = await hydrateRemoteTrack(
+    {
+      id: 'yt-dQw4w9WgXcQ',
+      videoId: 'dQw4w9WgXcQ',
+      title: 'Never Gonna Give You Up',
+      artist: 'Rick Astley',
+      album: 'Whenever You Need Somebody',
+      duration: 213,
+      isYouTubeStream: true,
+    },
+    {
+      resolveTrack: async () => {
+        unexpectedResolve = true;
+        return null;
+      },
+    }
+  );
+  assert.equal(unexpectedResolve, false);
+  assert.ok(hydratedYt);
+  assert.equal(hydratedYt.id, 'yt-dQw4w9WgXcQ');
+  assert.equal(hydratedYt.streamUrl, '/api/yt-stream/dQw4w9WgXcQ');
+
+  // 5. Library track hydrates via fetchLibraryTrack (and falls back cleanly if fetch returns null)
+  const fullLib: Track = {
+    id: 77,
+    rel_path: 'Artist/Album/Track.flac',
+    title: 'Local Track',
+    artist: 'Local Artist',
+    album: 'Local Album',
+    track_number: 1,
+    year: 2024,
+    duration: 200,
+    format: 'FLAC',
+    bitrate: 900,
+    size_bytes: 20_000_000,
+    cover_file: 'c77.jpg',
+    dominant_color: '#112233',
+    added_at: '2026-01-01',
+    liked: true,
+    isYouTubeStream: false,
+  };
+  const hydratedLib = await hydrateRemoteTrack(
+    {
+      id: 77,
+      title: 'Local Track',
+      artist: 'Local Artist',
+      album: 'Local Album',
+      duration: 200,
+      cover_file: 'c77.jpg',
+      isYouTubeStream: false,
+    },
+    {
+      fetchLibraryTrack: async (id) => (id === 77 ? fullLib : null),
+    }
+  );
+  assert.deepEqual(hydratedLib, fullLib);
+
+  const hydratedLibFallback = await hydrateRemoteTrack(
+    {
+      id: 78,
+      title: 'Fallback Track',
+      artist: 'Fallback Artist',
+      album: 'Album',
+      duration: 150,
+      isYouTubeStream: false,
+    },
+    {
+      fetchLibraryTrack: async () => null,
+    }
+  );
+  assert.ok(hydratedLibFallback);
+  assert.equal(hydratedLibFallback.id, 78);
+  assert.equal(hydratedLibFallback.isYouTubeStream, false);
+
+  // 6. buildImmediateRemoteTrack creates a playable match placeholder for background queue resolution
+  const immediateDz = buildImmediateRemoteTrack(
+    {
+      id: 'dz-track-3135556',
+      deezerTrackId: '3135556',
+      title: 'Digital Love',
+      artist: 'Daft Punk',
+      album: 'Discovery',
+      duration: 298,
+      cover: 'https://e-cdns-images.dzcdn.net/images/cover/xyz/500x500.jpg',
+      isYouTubeStream: true,
+    },
+    1
+  );
+  assert.ok(immediateDz);
+  assert.equal(immediateDz.needsBackgroundHydration, true);
+  assert.equal(immediateDz.track.id, 'dz-track-3135556');
+  assert.ok(immediateDz.track.streamUrl?.startsWith('/api/yt-stream/match?'));
+});
+
+test('formatRemoteAckError maps all remote ack failure reasons to user-friendly messages', () => {
+  assert.equal(formatRemoteAckError({status: 'applied'}, 'Living Room'), null);
+  assert.equal(
+    formatRemoteAckError({status: 'rejected', reason: 'unresolvable_track'}, 'Living Room'),
+    "Couldn't find that track on Living Room"
+  );
+  assert.equal(
+    formatRemoteAckError({status: 'rejected', reason: 'device_offline'}, 'Living Room'),
+    'Living Room is offline'
+  );
+  assert.equal(
+    formatRemoteAckError({status: 'timeout', reason: 'device_timeout'}, 'Living Room'),
+    "Living Room didn't respond"
+  );
+  assert.equal(
+    formatRemoteAckError({status: 'rejected', reason: 'needs_gesture'}, 'Living Room'),
+    'Tap Living Room to start playback'
+  );
+  assert.equal(
+    formatRemoteAckError({status: 'rejected', reason: 'invalid_track'}, 'Living Room'),
+    "Track couldn't be sent to Living Room"
+  );
+  assert.equal(
+    formatRemoteAckError({status: 'rejected', reason: 'empty_transfer'}, 'Living Room'),
+    'Nothing to transfer to Living Room'
+  );
+  assert.equal(
+    formatRemoteAckError({status: 'rejected', reason: 'no_track'}, 'Living Room'),
+    'No track is loaded on Living Room'
+  );
 });

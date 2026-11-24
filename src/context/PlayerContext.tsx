@@ -122,6 +122,7 @@ interface PlayerContextValue {
       positionSec: number;
       isPlaying: boolean;
     }) => Promise<'applied' | 'needs_gesture'>;
+    replaceQueueTrack: (matchId: TrackId, resolved: Track) => void;
     unlockAudio: () => void;
   };
 }
@@ -2667,6 +2668,25 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     ]
   );
 
+  const remoteReplaceQueueTrack = useCallback((matchId: TrackId, resolved: Track) => {
+    const targetKey = String(matchId);
+    setQueue((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (String(item.id) !== targetKey) return item;
+        if (stateRef.current.currentTrack && String(stateRef.current.currentTrack.id) === targetKey) {
+          return item;
+        }
+        changed = true;
+        return resolved;
+      });
+      if (changed) {
+        stateRef.current.queue = next;
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
   const remoteUnlockAudio = useCallback(() => {
     unlockPersistentAudioElement(audioRef.current ?? getPersistentAudioElement(), false);
   }, []);
@@ -2679,12 +2699,14 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setShuffle: remoteSetShuffle,
       setRepeat: remoteSetRepeat,
       applyTransfer: remoteApplyTransfer,
+      replaceQueueTrack: remoteReplaceQueueTrack,
       unlockAudio: remoteUnlockAudio,
     }),
     [
       remoteApplyTransfer,
       remotePauseLocal,
       remotePlayLocal,
+      remoteReplaceQueueTrack,
       remoteSetRepeat,
       remoteSetShuffle,
       remoteUnlockAudio,
