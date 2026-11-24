@@ -21,6 +21,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {useSearchParams} from 'react-router-dom';
 import {AlbumArt} from '../components/AlbumArt';
 import {
   CatalogDetailView,
@@ -40,6 +41,7 @@ import {
   isValidYouTubeVideoId,
   prefetchYouTubeStreams,
 } from '../lib/api';
+import {useBackClose} from '../lib/backStack';
 import {useScrollReady} from '../lib/scrollHistory';
 import {scrollMainToTop} from '../lib/tabMemory';
 import type {
@@ -53,6 +55,7 @@ import type {
   DownloadQuality,
   MetadataPreviewItem,
   Track,
+  YouTubePlaylistSearchItem,
 } from '../types';
 
 interface EditablePreviewItem extends MetadataPreviewItem {
@@ -60,6 +63,16 @@ interface EditablePreviewItem extends MetadataPreviewItem {
   format: 'm4a' | 'opus' | 'mp3';
   quality: DownloadQuality;
 }
+
+interface CatalogStackFrame {
+  route: CatalogRoute;
+  savedScrollTop: number;
+}
+
+const CatalogBackGuard: React.FC<{onClose: () => void}> = ({onClose}) => {
+  useBackClose(true, onClose);
+  return null;
+};
 
 const SEARCH_DEBOUNCE_MS = 450;
 const DEFAULT_DOWNLOAD_FORMAT: 'm4a' = 'm4a';
@@ -71,6 +84,13 @@ let sessionDiscoverCache: {
   userId: number;
   seedArtistKey: string;
   feed: DiscoverFeedResponse;
+} | null = null;
+
+// Client-side cache of the most recent Discover search so returning from detail views
+// or switching tabs restores results immediately without a loading flash.
+let sessionSearchCache: {
+  term: string;
+  result: DiscoverSearchResponse;
 } | null = null;
 
 const GENERIC_ARTIST_LABELS = new Set([
@@ -356,12 +376,14 @@ const DiscoverArtwork: React.FC<DiscoverArtworkProps> = ({
 interface ResponsiveDiscoverShelfProps {
   title: string;
   variant: 'square' | 'circle';
+  horizontalOnly?: boolean;
   children: React.ReactNode;
 }
 
 const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
   title,
   variant,
+  horizontalOnly = false,
   children,
 }) => {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -376,8 +398,9 @@ const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
     });
   };
 
-  const desktopGridClasses =
-    variant === 'circle'
+  const desktopGridClasses = horizontalOnly
+    ? ''
+    : variant === 'circle'
       ? 'lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0'
       : 'lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 min-[1720px]:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0';
 
@@ -387,7 +410,9 @@ const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
         <h2 className="font-display text-lg sm:text-xl font-bold tracking-tight text-[var(--text-primary)]">
           {title}
         </h2>
-        <div className="hidden sm:flex lg:hidden items-center gap-1.5 shrink-0">
+        <div
+          className={`hidden sm:flex ${horizontalOnly ? '' : 'lg:hidden'} items-center gap-1.5 shrink-0`}
+        >
           <button
             type="button"
             onClick={() => scrollShelf('left')}
@@ -562,6 +587,58 @@ const DiscoverAlbumCard: React.FC<DiscoverAlbumCardProps> = ({
   </div>
 );
 
+interface DiscoverYouTubePlaylistCardProps {
+  playlist: YouTubePlaylistSearchItem;
+  onOpen: (playlist: YouTubePlaylistSearchItem) => void;
+}
+
+const DiscoverYouTubePlaylistCard: React.FC<DiscoverYouTubePlaylistCardProps> = ({
+  playlist,
+  onOpen,
+}) => {
+  const countLabel =
+    playlist.videoCount != null && playlist.videoCount > 0
+      ? `${playlist.videoCount} ${playlist.videoCount === 1 ? 'song' : 'songs'}`
+      : 'Playlist';
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(playlist)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen(playlist);
+        }
+      }}
+      className="group w-[144px] sm:w-[164px] shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+    >
+      <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
+        <DiscoverArtwork
+          directUrl={playlist.thumbnail}
+          alt={playlist.title}
+          shape="square"
+          labelForFallback={playlist.title}
+          className="transition-transform duration-200 group-hover:scale-[1.03]"
+        />
+      </div>
+
+      <div className="mt-2.5 min-w-0 space-y-0.5">
+        <p className="text-sm font-semibold text-[var(--text-primary)] truncate">
+          {playlist.title}
+        </p>
+        {playlist.channel && (
+          <p className="text-xs font-medium text-[var(--text-secondary)] truncate">
+            {playlist.channel}
+          </p>
+        )}
+        <p className="text-[11px] text-[var(--text-muted)] truncate tabular-nums">{countLabel}</p>
+      </div>
+    </div>
+  );
+};
+
 const DiscoverSearchSkeleton: React.FC = () => (
   <div className="space-y-8" aria-label="Searching catalog">
     {/* Artists skeleton */}
@@ -635,14 +712,21 @@ export const DiscoverPage: React.FC = () => {
   const offline = !isOnline || isOfflineMode;
   const canDownload = Boolean(user?.can_download || user?.role === 'admin');
 
-  const [query, setQuery] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialQueryFromUrl = searchParams.get('q') || '';
+  const initialTrimmedUrlQuery = initialQueryFromUrl.trim();
+  const hasCachedInitialSearch = Boolean(
+    initialTrimmedUrlQuery && sessionSearchCache?.term === initialTrimmedUrlQuery
+  );
+
+  const [query, setQuery] = useState(initialQueryFromUrl);
 
   const lastPlayedArtistKey = useMemo(
     () => normalizeArtistSeedKey(lastPlayed?.artist, lastPlayed?.title),
     [lastPlayed?.artist, lastPlayed?.title]
   );
 
-  // Personalized Discover feed + instant Album/Artist catalog drill-down stack
+  // Personalized Discover feed + instant Album/Artist/Playlist catalog drill-down stack
   const [discoverFeed, setDiscoverFeed] = useState<DiscoverFeedResponse | null>(() =>
     user &&
     sessionDiscoverCache?.userId === user.id &&
@@ -663,18 +747,22 @@ export const DiscoverPage: React.FC = () => {
   const {getElement: getMainScrollElement} = useMainScroll();
   const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
-  const [catalogStack, setCatalogStack] = useState<CatalogRoute[]>([]);
+  const [catalogStack, setCatalogStack] = useState<CatalogStackFrame[]>([]);
+  const catalogStackRef = useRef<CatalogStackFrame[]>([]);
+  catalogStackRef.current = catalogStack;
   const activeCatalogRoute =
-    catalogStack.length > 0 ? catalogStack[catalogStack.length - 1] : null;
-
-  useScrollReady(!discoverLoading || Boolean(discoverFeed));
+    catalogStack.length > 0 ? catalogStack[catalogStack.length - 1].route : null;
 
   const [fetchingMeta, setFetchingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
 
-  // Structured Deezer catalog search results state (Artists, Albums, Songs)
-  const [structuredSearch, setStructuredSearch] = useState<DiscoverSearchResponse | null>(null);
-  const [lastSearchTerm, setLastSearchTerm] = useState<string | null>(null);
+  // Structured catalog search results state (Artists, Albums, Songs, Playlists)
+  const [structuredSearch, setStructuredSearch] = useState<DiscoverSearchResponse | null>(() =>
+    hasCachedInitialSearch ? sessionSearchCache!.result : null
+  );
+  const [lastSearchTerm, setLastSearchTerm] = useState<string | null>(() =>
+    hasCachedInitialSearch ? initialTrimmedUrlQuery : null
+  );
 
   // Pasted-URL single-track / playlist metadata preview state
   const [previewItems, setPreviewItems] = useState<EditablePreviewItem[]>([]);
@@ -700,12 +788,34 @@ export const DiscoverPage: React.FC = () => {
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestIdRef = useRef(0);
   const inFlightTermRef = useRef<string | null>(null);
-  const skipNextDebounceTermRef = useRef<string | null>(null);
+  const skipNextDebounceTermRef = useRef<string | null>(
+    hasCachedInitialSearch ? initialTrimmedUrlQuery : null
+  );
+  const scrollRestoreCancelRef = useRef<(() => void) | null>(null);
   const [searchPinned, setSearchPinned] = useState(false);
 
   const trimmedQuery = query.trim();
   const isUrlInput = /^https?:\/\//i.test(trimmedQuery);
   const isDiscoverView = trimmedQuery.length === 0;
+
+  useScrollReady(
+    (!discoverLoading || Boolean(discoverFeed)) &&
+      (!trimmedQuery || Boolean(structuredSearch) || !fetchingMeta)
+  );
+
+  // Keep ?q= in sync with the search input so tabMemory and browser navigation preserve the query
+  useEffect(() => {
+    if (catalogStack.length > 0) return;
+    const currentParam = (searchParams.get('q') || '').trim();
+    if (currentParam === trimmedQuery) return;
+    const nextParams = new URLSearchParams(searchParams);
+    if (trimmedQuery) {
+      nextParams.set('q', trimmedQuery);
+    } else {
+      nextParams.delete('q');
+    }
+    setSearchParams(nextParams, {replace: true});
+  }, [catalogStack.length, searchParams, setSearchParams, trimmedQuery]);
 
   const flashToast = useCallback((msg: string) => {
     setActionToast(msg);
@@ -970,26 +1080,138 @@ export const DiscoverPage: React.FC = () => {
     [currentTrack?.deezerTrackId, currentTrack?.id, discoverFeed?.newReleases, playTrack, togglePlay]
   );
 
-  const handleOpenAlbumView = useCallback(
-    (album: {id: string; titleHint?: string; artistHint?: string; coverHint?: string}) => {
-      setCatalogStack((prev) => [...prev, {type: 'album', ...album}]);
+  const cancelPendingScrollRestore = useCallback(() => {
+    if (scrollRestoreCancelRef.current) {
+      scrollRestoreCancelRef.current();
+      scrollRestoreCancelRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cancelPendingScrollRestore();
+    };
+  }, [cancelPendingScrollRestore]);
+
+  const captureCurrentScrollTop = useCallback((): number => {
+    const mainEl = getMainScrollElement() ?? pageRootRef.current?.closest('main');
+    return mainEl ? Math.max(0, Math.round(mainEl.scrollTop)) : 0;
+  }, [getMainScrollElement]);
+
+  const restoreScrollTop = useCallback(
+    (targetTop: number) => {
+      cancelPendingScrollRestore();
+      const clamped = Math.max(0, Math.round(targetTop));
+      const mainEl = getMainScrollElement() ?? pageRootRef.current?.closest('main');
+      if (!mainEl) return;
+
+      if (clamped === 0) {
+        mainEl.scrollTop = 0;
+        return;
+      }
+
+      let cancelled = false;
+      let rafId: number | null = null;
+      const startedAt = performance.now();
+
+      const cleanupListeners = () => {
+        mainEl.removeEventListener('wheel', handleUserInput);
+        mainEl.removeEventListener('touchstart', handleUserInput);
+        mainEl.removeEventListener('pointerdown', handleUserInput);
+      };
+
+      const cancel = () => {
+        cancelled = true;
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        cleanupListeners();
+        if (scrollRestoreCancelRef.current === cancel) {
+          scrollRestoreCancelRef.current = null;
+        }
+      };
+
+      const handleUserInput = () => {
+        cancel();
+      };
+
+      mainEl.addEventListener('wheel', handleUserInput, {passive: true, once: true});
+      mainEl.addEventListener('touchstart', handleUserInput, {passive: true, once: true});
+      mainEl.addEventListener('pointerdown', handleUserInput, {passive: true, once: true});
+      scrollRestoreCancelRef.current = cancel;
+
+      const attempt = () => {
+        if (cancelled) return;
+        const maxScrollTop = Math.max(0, mainEl.scrollHeight - mainEl.clientHeight);
+        if (maxScrollTop >= clamped) {
+          mainEl.scrollTop = clamped;
+          cancel();
+          return;
+        }
+        if (maxScrollTop > 0) {
+          mainEl.scrollTop = maxScrollTop;
+        }
+        if (performance.now() - startedAt >= 500) {
+          cancel();
+          return;
+        }
+        rafId = window.requestAnimationFrame(attempt);
+      };
+
+      rafId = window.requestAnimationFrame(attempt);
+    },
+    [cancelPendingScrollRestore, getMainScrollElement]
+  );
+
+  const pushCatalogRoute = useCallback(
+    (route: CatalogRoute) => {
+      cancelPendingScrollRestore();
+      const savedScrollTop = captureCurrentScrollTop();
+      setCatalogStack((prev) => [...prev, {route, savedScrollTop}]);
       scrollStageToTop();
     },
-    [scrollStageToTop]
+    [cancelPendingScrollRestore, captureCurrentScrollTop, scrollStageToTop]
+  );
+
+  const handleOpenAlbumView = useCallback(
+    (album: {id: string; titleHint?: string; artistHint?: string; coverHint?: string}) => {
+      pushCatalogRoute({type: 'album', ...album});
+    },
+    [pushCatalogRoute]
   );
 
   const handleOpenArtistView = useCallback(
     (artist: {id: string; nameHint?: string; pictureHint?: string}) => {
-      setCatalogStack((prev) => [...prev, {type: 'artist', ...artist}]);
-      scrollStageToTop();
+      pushCatalogRoute({type: 'artist', ...artist});
     },
-    [scrollStageToTop]
+    [pushCatalogRoute]
+  );
+
+  const handleOpenPlaylistView = useCallback(
+    (playlist: YouTubePlaylistSearchItem) => {
+      pushCatalogRoute({
+        type: 'playlist',
+        id: playlist.playlistId,
+        titleHint: playlist.title,
+        channelHint: playlist.channel,
+        coverHint: playlist.thumbnail,
+        videoCountHint: playlist.videoCount,
+      });
+    },
+    [pushCatalogRoute]
   );
 
   const handlePopCatalogView = useCallback(() => {
+    const stack = catalogStackRef.current;
+    const popped = stack.length > 0 ? stack[stack.length - 1] : null;
     setCatalogStack((prev) => prev.slice(0, -1));
-    scrollStageToTop();
-  }, [scrollStageToTop]);
+    if (popped) {
+      restoreScrollTop(popped.savedScrollTop);
+    } else {
+      scrollStageToTop();
+    }
+  }, [restoreScrollTop, scrollStageToTop]);
 
   const handleOpenDiscoverRelease = useCallback(
     (item: DiscoverNewReleaseItem) => {
@@ -1125,12 +1347,18 @@ export const DiscoverPage: React.FC = () => {
             return;
           }
 
+          sessionSearchCache = {term, result: res};
           setStructuredSearch(res);
           setLastSearchTerm(term);
           const totalCount =
-            (res.artists?.length || 0) + (res.albums?.length || 0) + (res.tracks?.length || 0);
+            (res.artists?.length || 0) +
+            (res.albums?.length || 0) +
+            (res.tracks?.length || 0) +
+            (res.playlists?.length || 0);
           if (totalCount === 0) {
-            setMetaError(`No artists, albums, or songs found for "${term}". Try another search.`);
+            setMetaError(
+              `No artists, albums, songs, or playlists found for "${term}". Try another search.`
+            );
           }
         }
       } catch (err) {
@@ -1401,7 +1629,8 @@ export const DiscoverPage: React.FC = () => {
     structuredSearch &&
       (structuredSearch.artists.length > 0 ||
         structuredSearch.albums.length > 0 ||
-        structuredSearch.tracks.length > 0)
+        structuredSearch.tracks.length > 0 ||
+        (structuredSearch.playlists?.length || 0) > 0)
   );
 
   // Open Artist/Album detail views from both Discover home shelves AND Search Results
@@ -1447,6 +1676,13 @@ export const DiscoverPage: React.FC = () => {
         paddingBottom: 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
       }}
     >
+      {catalogStack.map((frame, idx) => (
+        <CatalogBackGuard
+          key={`${idx}:${frame.route.type}:${frame.route.id}`}
+          onClose={handlePopCatalogView}
+        />
+      ))}
+
       {actionToast && (
         <div className="fixed top-16 md:top-6 left-1/2 -translate-x-1/2 z-50 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--accent-contrast)] shadow-xl max-w-[90vw] truncate">
           {actionToast}
@@ -2063,6 +2299,19 @@ export const DiscoverPage: React.FC = () => {
                           })}
                         </div>
                       </section>
+                    )}
+
+                    {/* Section 4: Playlists */}
+                    {structuredSearch.playlists && structuredSearch.playlists.length > 0 && (
+                      <ResponsiveDiscoverShelf title="Playlists" variant="square" horizontalOnly>
+                        {structuredSearch.playlists.map((playlist) => (
+                          <DiscoverYouTubePlaylistCard
+                            key={playlist.playlistId}
+                            playlist={playlist}
+                            onOpen={handleOpenPlaylistView}
+                          />
+                        ))}
+                      </ResponsiveDiscoverShelf>
                     )}
                   </div>
                 )}

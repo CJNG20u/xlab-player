@@ -22,10 +22,13 @@ import {
   enqueueDownloadJob,
   fetchMetadataPreview,
   getDownloadJobs,
+  getYoutubePlaylistDetail,
+  isValidYouTubePlaylistId,
   isValidYouTubeVideoId,
   normalizeDownloadQuality,
   peekTrackMetadata,
   sanitizeNasSegment,
+  searchYoutubePlaylists,
   spawnAudioPreviewStream,
   type DownloadJobRow,
 } from '../downloader.ts';
@@ -33,6 +36,22 @@ import {AUDIO_EXTENSIONS, indexSingleFile} from '../scanner.ts';
 
 export const downloadRouter = Router();
 export const discoverRouter = Router();
+
+const PLAYLIST_SEARCH_ROUTE_TIMEOUT_MS = 5000;
+
+async function searchYoutubePlaylistsWithTimeout(query: string, limit = 8) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      searchYoutubePlaylists(query, limit).catch(() => []),
+      new Promise<Awaited<ReturnType<typeof searchYoutubePlaylists>>>((resolve) => {
+        timer = setTimeout(() => resolve([]), PLAYLIST_SEARCH_ROUTE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 discoverRouter.post('/discover/history', requireAuth, (req: AuthRequest, res) => {
   const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
@@ -111,12 +130,34 @@ discoverRouter.get('/discover/search', requireAuth, async (req: AuthRequest, res
   }
   const safeQuery = rawQuery.slice(0, 120);
   try {
-    const result = await searchCatalog(safeQuery);
+    const [result, playlists] = await Promise.all([
+      searchCatalog(safeQuery),
+      searchYoutubePlaylistsWithTimeout(safeQuery, 8),
+    ]);
     res.setHeader('Cache-Control', 'private, max-age=300');
-    res.json(result);
+    res.json({...result, playlists});
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to search catalog';
     console.error('[discover-search]', safeQuery, msg);
+    res.status(502).json({error: msg});
+  }
+});
+
+discoverRouter.get('/youtube/playlist/:id', requireAuth, async (req: AuthRequest, res) => {
+  const playlistId = String(req.params.id || '').trim();
+  if (!isValidYouTubePlaylistId(playlistId)) {
+    res.status(400).json({error: 'Invalid playlist ID'});
+    return;
+  }
+  try {
+    const refreshParam = String(req.query.refresh || '').trim().toLowerCase();
+    const forceRefresh = refreshParam === '1' || refreshParam === 'true';
+    const detail = await getYoutubePlaylistDetail(playlistId, {forceRefresh});
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    res.json(detail);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to load YouTube playlist';
+    console.error('[youtube-playlist]', playlistId, msg);
     res.status(502).json({error: msg});
   }
 });

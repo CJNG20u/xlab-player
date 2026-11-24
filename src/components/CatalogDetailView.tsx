@@ -1,21 +1,26 @@
+import {useVirtualizer} from '@tanstack/react-virtual';
 import {
   Check,
   ChevronLeft,
   ChevronRight,
   Disc3,
   Download,
+  ListPlus,
   Loader2,
   Pause,
   Play,
   RefreshCw,
+  Shuffle,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
+import {useMainScroll} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
 import {
   apiFetch,
   formatDuration,
   getCatalogMatchStreamUrl,
+  getYouTubeThumbProxyUrl,
   isValidYouTubeVideoId,
   prefetchYouTubeStreams,
 } from '../lib/api';
@@ -31,16 +36,28 @@ import type {
   DiscoverAlbumDetail,
   DiscoverAlbumTrack,
   DiscoverArtistDetail,
+  Playlist,
   Track,
+  YouTubePlaylistDetail,
+  YouTubePlaylistTrackItem,
 } from '../types';
 
 export type CatalogRoute =
   | {type: 'album'; id: string; titleHint?: string; artistHint?: string; coverHint?: string}
-  | {type: 'artist'; id: string; nameHint?: string; pictureHint?: string};
+  | {type: 'artist'; id: string; nameHint?: string; pictureHint?: string}
+  | {
+      type: 'playlist';
+      id: string;
+      titleHint?: string;
+      channelHint?: string;
+      coverHint?: string;
+      videoCountHint?: number | null;
+    };
 
-// Session-level client cache for instant back/forward navigation across albums & artists
+// Session-level client cache for instant back/forward navigation across albums, artists & playlists
 const albumDetailSessionCache = new Map<string, DiscoverAlbumDetail>();
 const artistDetailSessionCache = new Map<string, DiscoverArtistDetail>();
+const playlistDetailSessionCache = new Map<string, YouTubePlaylistDetail>();
 
 function formatFanCount(fans: number): string {
   if (!fans || fans <= 0) return '';
@@ -114,6 +131,278 @@ export function catalogTrackToPlayerTrack(
     recommendation: {source},
   };
 }
+
+export function youtubePlaylistTrackToPlayerTrack(
+  item: YouTubePlaylistTrackItem,
+  playlistTitle: string
+): Track {
+  const thumb = item.thumbnail || getYouTubeThumbProxyUrl(item.videoId);
+  return {
+    id: `yt-${item.videoId}`,
+    rel_path: '',
+    title: item.title,
+    artist: item.artist || item.channel || 'Online',
+    album: playlistTitle || 'YouTube Playlist',
+    track_number: null,
+    year: null,
+    duration: item.duration || 0,
+    format: 'm4a',
+    bitrate: 0,
+    size_bytes: 0,
+    cover_file: null,
+    dominant_color: '#1f2937',
+    added_at: '',
+    liked: false,
+    coverUrl: thumb,
+    streamUrl: `/api/yt-stream/${encodeURIComponent(item.videoId)}`,
+    isYouTubeStream: true,
+    youtubeUrl: `https://www.youtube.com/watch?v=${item.videoId}`,
+    recommendation: {source: 'search'},
+  };
+}
+
+function shuffleArray<T>(items: T[]): T[] {
+  const copy = items.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+interface VirtualizedYouTubePlaylistTracksProps {
+  tracks: YouTubePlaylistTrackItem[];
+  currentTrackId: string | number | null | undefined;
+  isPlaying: boolean;
+  isBuffering: boolean;
+  canDownload: boolean;
+  getYouTubeSaveStatus: (trackId: string | number) => 'idle' | 'saving' | 'saved';
+  onPlayTrack: (track: YouTubePlaylistTrackItem, index: number) => void;
+  onQueueTrack: (e: React.MouseEvent, track: YouTubePlaylistTrackItem) => void;
+  onDownloadTrack: (e: React.MouseEvent, track: YouTubePlaylistTrackItem) => void;
+}
+
+const VirtualizedYouTubePlaylistTracks: React.FC<VirtualizedYouTubePlaylistTracksProps> = ({
+  tracks,
+  currentTrackId,
+  isPlaying,
+  isBuffering,
+  canDownload,
+  getYouTubeSaveStatus,
+  onPlayTrack,
+  onQueueTrack,
+  onDownloadTrack,
+}) => {
+  const {element: mainScrollElement, getElement: getMainScrollElement} = useMainScroll();
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const lastViewportWidthRef = useRef<number>(
+    typeof window !== 'undefined' ? window.innerWidth : 0
+  );
+
+  const estimateSize = useCallback(() => 64, []);
+  const getItemKey = useCallback(
+    (index: number) => tracks[index]?.videoId ?? index,
+    [tracks]
+  );
+
+  const virtualizer = useVirtualizer({
+    count: tracks.length,
+    getScrollElement: getMainScrollElement,
+    estimateSize,
+    overscan: 8,
+    scrollMargin,
+    getItemKey,
+  });
+
+  useLayoutEffect(() => {
+    if (!mainScrollElement || !listRef.current) {
+      setScrollMargin(0);
+      return;
+    }
+
+    const computeScrollMargin = () => {
+      const listEl = listRef.current;
+      if (!listEl) return;
+      const listRect = listEl.getBoundingClientRect();
+      const scrollRect = mainScrollElement.getBoundingClientRect();
+      const nextMargin = Math.max(
+        0,
+        Math.round(listRect.top - scrollRect.top + mainScrollElement.scrollTop)
+      );
+      setScrollMargin((prev) => (prev === nextMargin ? prev : nextMargin));
+    };
+
+    computeScrollMargin();
+
+    const handleResize = () => {
+      computeScrollMargin();
+      const width = window.innerWidth;
+      if (width !== lastViewportWidthRef.current) {
+        lastViewportWidthRef.current = width;
+        virtualizer.measure();
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        computeScrollMargin();
+      });
+      observer.observe(mainScrollElement);
+      if (mainScrollElement.firstElementChild) {
+        observer.observe(mainScrollElement.firstElementChild);
+      }
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      observer?.disconnect();
+    };
+  }, [mainScrollElement, tracks.length, virtualizer]);
+
+  const effectiveScrollMargin = virtualizer.options.scrollMargin;
+
+  return (
+    <div
+      ref={listRef}
+      role="list"
+      aria-label="Playlist tracks"
+      className="relative border-t border-[var(--border-subtle)]"
+      style={{height: `${virtualizer.getTotalSize()}px`}}
+    >
+      {virtualizer.getVirtualItems().map((virtualRow) => {
+        const track = tracks[virtualRow.index];
+        if (!track) return null;
+        const active = currentTrackId === `yt-${track.videoId}`;
+        const playing = active && isPlaying && !isBuffering;
+        const buffering = active && isBuffering;
+        const saveKey = `yt-${track.videoId}`;
+        const saveStatus = getYouTubeSaveStatus(saveKey);
+        const offsetY = virtualRow.start - effectiveScrollMargin;
+
+        return (
+          <div
+            key={track.videoId}
+            ref={virtualizer.measureElement}
+            data-index={virtualRow.index}
+            role="listitem"
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${offsetY}px)`,
+            }}
+            className="border-b border-[var(--border-subtle)]"
+          >
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => onPlayTrack(track, virtualRow.index)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onPlayTrack(track, virtualRow.index);
+                }
+              }}
+              className={`group flex min-h-[62px] items-center gap-3 px-2.5 sm:px-3.5 py-2 transition-colors cursor-pointer rounded-lg ${
+                active ? 'bg-[var(--bg-elevated)]' : 'hover:bg-[var(--bg-secondary)]'
+              }`}
+            >
+              <div className="w-7 text-center shrink-0">
+                {buffering ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)] mx-auto" />
+                ) : playing ? (
+                  <Pause className="w-4 h-4 text-[var(--accent)] fill-current mx-auto" />
+                ) : (
+                  <>
+                    <span
+                      className={`font-mono text-xs tabular-nums group-hover:hidden ${
+                        active ? 'text-[var(--accent)] font-bold' : 'text-[var(--text-muted)]'
+                      }`}
+                    >
+                      {virtualRow.index + 1}
+                    </span>
+                    <Play className="w-3.5 h-3.5 text-[var(--text-primary)] fill-current mx-auto hidden group-hover:block" />
+                  </>
+                )}
+              </div>
+
+              <div className="w-11 h-11 rounded-md overflow-hidden shrink-0 bg-[var(--bg-elevated)]">
+                <ResilientCover
+                  src={track.thumbnail || getYouTubeThumbProxyUrl(track.videoId)}
+                  alt={track.title}
+                  shape="square"
+                  label={track.title}
+                  className="rounded-md"
+                />
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <p
+                  className={`text-sm font-semibold truncate ${
+                    active ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
+                  }`}
+                >
+                  {track.title}
+                </p>
+                <p className="text-xs text-[var(--text-secondary)] truncate mt-0.5">
+                  {track.artist || track.channel || 'Online'}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
+                  {track.duration > 0 ? formatDuration(track.duration) : '--:--'}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={(e) => onQueueTrack(e, track)}
+                  title={`Add "${track.title}" to queue`}
+                  aria-label={`Add ${track.title} to queue`}
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-transparent text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors"
+                >
+                  <ListPlus className="w-4 h-4" />
+                </button>
+
+                {canDownload && (
+                  <button
+                    type="button"
+                    disabled={saveStatus === 'saving' || saveStatus === 'saved'}
+                    onClick={(e) => onDownloadTrack(e, track)}
+                    title={
+                      saveStatus === 'saved'
+                        ? 'Saved to library'
+                        : `Download "${track.title}"`
+                    }
+                    aria-label={`Download ${track.title}`}
+                    className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
+                      saveStatus === 'saved'
+                        ? 'bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--accent)]'
+                        : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent)]'
+                    }`}
+                  >
+                    {saveStatus === 'saving' ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : saveStatus === 'saved' ? (
+                      <Check className="w-4 h-4 stroke-[2.5]" />
+                    ) : (
+                      <Download className="w-4 h-4" />
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
 
 interface ResilientCoverProps {
   src?: string;
@@ -258,8 +547,10 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     isBuffering,
     playTrack,
     togglePlay,
+    addToQueue,
     saveYouTubeTrackToLibrary,
     getYouTubeSaveStatus,
+    bumpLibraryRefresh,
   } = usePlayer();
 
   const [album, setAlbum] = useState<DiscoverAlbumDetail | null>(() =>
@@ -268,9 +559,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   const [artist, setArtist] = useState<DiscoverArtistDetail | null>(() =>
     route.type === 'artist' ? (artistDetailSessionCache.get(route.id) ?? null) : null
   );
+  const [ytPlaylist, setYtPlaylist] = useState<YouTubePlaylistDetail | null>(() =>
+    route.type === 'playlist' ? (playlistDetailSessionCache.get(route.id) ?? null) : null
+  );
   const [loading, setLoading] = useState<boolean>(() => {
     if (route.type === 'album') return !albumDetailSessionCache.has(route.id);
-    return !artistDetailSessionCache.has(route.id);
+    if (route.type === 'artist') return !artistDetailSessionCache.has(route.id);
+    return !playlistDetailSessionCache.has(route.id);
   });
   const [error, setError] = useState<string | null>(null);
 
@@ -284,11 +579,24 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   } | null>(null);
   const albumDownloadCancelRef = useRef(false);
 
+  // "Save as playlist" state for YouTube playlists
+  const [playlistSaveState, setPlaylistSaveState] = useState<{
+    playlistId: string;
+    active: boolean;
+    done: boolean;
+    saved: number;
+    total: number;
+  } | null>(null);
+  const playlistSaveCancelRef = useRef(false);
+
   useEffect(() => {
     albumDownloadCancelRef.current = true;
     setAlbumDownloadState(null);
+    playlistSaveCancelRef.current = true;
+    setPlaylistSaveState(null);
     return () => {
       albumDownloadCancelRef.current = true;
+      playlistSaveCancelRef.current = true;
     };
   }, [route.id, route.type]);
 
@@ -300,11 +608,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         if (cached) {
           setAlbum(cached);
           setArtist(null);
+          setYtPlaylist(null);
           setLoading(false);
           return;
         }
         setLoading(true);
         setArtist(null);
+        setYtPlaylist(null);
         try {
           const qs = forceRefresh ? '?refresh=1' : '';
           const data = await apiFetch<DiscoverAlbumDetail>(
@@ -317,16 +627,18 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         } finally {
           setLoading(false);
         }
-      } else {
+      } else if (route.type === 'artist') {
         const cached = !forceRefresh ? artistDetailSessionCache.get(route.id) : undefined;
         if (cached) {
           setArtist(cached);
           setAlbum(null);
+          setYtPlaylist(null);
           setLoading(false);
           return;
         }
         setLoading(true);
         setAlbum(null);
+        setYtPlaylist(null);
         try {
           const qs = forceRefresh ? '?refresh=1' : '';
           const data = await apiFetch<DiscoverArtistDetail>(
@@ -339,6 +651,30 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         } finally {
           setLoading(false);
         }
+      } else {
+        const cached = !forceRefresh ? playlistDetailSessionCache.get(route.id) : undefined;
+        if (cached) {
+          setYtPlaylist(cached);
+          setAlbum(null);
+          setArtist(null);
+          setLoading(false);
+          return;
+        }
+        setLoading(true);
+        setAlbum(null);
+        setArtist(null);
+        try {
+          const qs = forceRefresh ? '?refresh=1' : '';
+          const data = await apiFetch<YouTubePlaylistDetail>(
+            `/api/youtube/playlist/${encodeURIComponent(route.id)}${qs}`
+          );
+          playlistDetailSessionCache.set(route.id, data);
+          setYtPlaylist(data);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Could not load YouTube playlist');
+        } finally {
+          setLoading(false);
+        }
       }
     },
     [route.id, route.type]
@@ -348,8 +684,21 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     void loadDetail(false);
   }, [loadDetail]);
 
-  // Background prefetch top 3 tracks whenever an album or artist detail view loads
+  // Background prefetch top 3 tracks whenever an album, artist, or playlist detail view loads
   useEffect(() => {
+    if (route.type === 'playlist') {
+      const tracks = ytPlaylist?.tracks;
+      if (!tracks || tracks.length === 0) return;
+      prefetchYouTubeStreams(
+        tracks.slice(0, 3).map((t) => ({
+          videoId: t.videoId,
+          artist: t.artist || t.channel,
+          title: t.title,
+          duration: t.duration,
+        }))
+      );
+      return;
+    }
     const tracks = route.type === 'album' ? album?.tracks : artist?.topTracks;
     if (!tracks || tracks.length === 0) return;
     prefetchYouTubeStreams(
@@ -360,7 +709,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
         duration: t.duration,
       }))
     );
-  }, [album, artist, route.type]);
+  }, [album, artist, route.type, ytPlaylist]);
 
   // Play clicked track, queue rest of list, and prefetch clicked track + next 2 tracks
   const handlePlayTrackFromList = useCallback(
@@ -467,6 +816,164 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     );
   }, [album, albumDownloadState, canDownload, getYouTubeSaveStatus, onFlashToast, saveYouTubeTrackToLibrary]);
 
+  const handlePlayYouTubePlaylistTrack = useCallback(
+    (clicked: YouTubePlaylistTrackItem, index: number) => {
+      if (!ytPlaylist) return;
+      const prefetchSlice = ytPlaylist.tracks.slice(index, index + 3);
+      if (prefetchSlice.length > 0) {
+        prefetchYouTubeStreams(
+          prefetchSlice.map((t) => ({
+            videoId: t.videoId,
+            artist: t.artist || t.channel,
+            title: t.title,
+            duration: t.duration,
+          }))
+        );
+      }
+      const targetId = `yt-${clicked.videoId}`;
+      if (currentTrack?.id === targetId) {
+        togglePlay();
+        return;
+      }
+      const queue = ytPlaylist.tracks.map((entry) =>
+        youtubePlaylistTrackToPlayerTrack(entry, ytPlaylist.title)
+      );
+      const target = queue[index] || youtubePlaylistTrackToPlayerTrack(clicked, ytPlaylist.title);
+      playTrack(target, queue);
+    },
+    [currentTrack?.id, playTrack, togglePlay, ytPlaylist]
+  );
+
+  const handleShuffleYouTubePlaylist = useCallback(() => {
+    if (!ytPlaylist || ytPlaylist.tracks.length === 0) return;
+    const shuffledItems = shuffleArray(ytPlaylist.tracks);
+    prefetchYouTubeStreams(
+      shuffledItems.slice(0, 3).map((t) => ({
+        videoId: t.videoId,
+        artist: t.artist || t.channel,
+        title: t.title,
+        duration: t.duration,
+      }))
+    );
+    const queue = shuffledItems.map((entry) =>
+      youtubePlaylistTrackToPlayerTrack(entry, ytPlaylist.title)
+    );
+    playTrack(queue[0], queue);
+  }, [playTrack, ytPlaylist]);
+
+  const handleQueueYouTubePlaylistTrack = useCallback(
+    (e: React.MouseEvent, item: YouTubePlaylistTrackItem) => {
+      e.stopPropagation();
+      addToQueue(youtubePlaylistTrackToPlayerTrack(item, ytPlaylist?.title || 'YouTube Playlist'));
+      onFlashToast(`Added "${item.title}" to queue`);
+    },
+    [addToQueue, onFlashToast, ytPlaylist?.title]
+  );
+
+  const handleDownloadYouTubePlaylistTrack = useCallback(
+    async (e: React.MouseEvent, item: YouTubePlaylistTrackItem) => {
+      e.stopPropagation();
+      if (!canDownload) return;
+      const trackObj = youtubePlaylistTrackToPlayerTrack(
+        item,
+        ytPlaylist?.title || 'YouTube Playlist'
+      );
+      const res = await saveYouTubeTrackToLibrary(trackObj, 'm4a');
+      onFlashToast(res.message);
+    },
+    [canDownload, onFlashToast, saveYouTubeTrackToLibrary, ytPlaylist?.title]
+  );
+
+  const handleSaveAsXlabPlaylist = useCallback(async () => {
+    if (!canDownload || !ytPlaylist || ytPlaylist.tracks.length === 0) return;
+    if (playlistSaveState?.playlistId === ytPlaylist.playlistId && playlistSaveState.active) {
+      return;
+    }
+
+    playlistSaveCancelRef.current = false;
+    const total = ytPlaylist.tracks.length;
+    setPlaylistSaveState({
+      playlistId: ytPlaylist.playlistId,
+      active: true,
+      done: false,
+      saved: 0,
+      total,
+    });
+
+    try {
+      const created = await apiFetch<{playlist: Playlist}>('/api/playlists', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: ytPlaylist.title.slice(0, 100),
+          description: ytPlaylist.channel
+            ? `Saved from YouTube · ${ytPlaylist.channel}`.slice(0, 300)
+            : 'Saved from YouTube',
+        }),
+      });
+      const createdPlaylistId = created.playlist?.id;
+      if (!createdPlaylistId) {
+        throw new Error('Could not create playlist');
+      }
+      bumpLibraryRefresh();
+
+      let addedCount = 0;
+      for (const item of ytPlaylist.tracks) {
+        if (playlistSaveCancelRef.current) return;
+        const playerTrack = youtubePlaylistTrackToPlayerTrack(item, ytPlaylist.title);
+        const res = await saveYouTubeTrackToLibrary(playerTrack, 'm4a');
+        if (playlistSaveCancelRef.current) return;
+
+        const libraryTrackId = res.track?.id;
+        if (res.ok && typeof libraryTrackId === 'number' && Number.isFinite(libraryTrackId)) {
+          try {
+            await apiFetch(`/api/playlists/${createdPlaylistId}/tracks`, {
+              method: 'POST',
+              body: JSON.stringify({trackIds: [libraryTrackId]}),
+            });
+            addedCount += 1;
+          } catch {
+            // Continue saving remaining tracks
+          }
+        }
+
+        if (playlistSaveCancelRef.current) return;
+        setPlaylistSaveState({
+          playlistId: ytPlaylist.playlistId,
+          active: true,
+          done: false,
+          saved: addedCount,
+          total,
+        });
+      }
+
+      if (playlistSaveCancelRef.current) return;
+      bumpLibraryRefresh();
+      setPlaylistSaveState({
+        playlistId: ytPlaylist.playlistId,
+        active: false,
+        done: addedCount > 0,
+        saved: addedCount,
+        total,
+      });
+      onFlashToast(
+        addedCount > 0
+          ? `Saved "${ytPlaylist.title}" (${addedCount} of ${total} tracks)`
+          : `Created "${ytPlaylist.title}", but no tracks could be downloaded`
+      );
+    } catch (err) {
+      if (playlistSaveCancelRef.current) return;
+      setPlaylistSaveState(null);
+      onFlashToast(err instanceof Error ? err.message : 'Could not save playlist');
+    }
+  }, [
+    bumpLibraryRefresh,
+    canDownload,
+    onFlashToast,
+    playlistSaveState,
+    saveYouTubeTrackToLibrary,
+    ytPlaylist,
+  ]);
+
   const isTrackActive = (item: DiscoverAlbumTrack) =>
     Boolean(
       currentTrack &&
@@ -485,15 +992,33 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
     return artist.topTracks.some((t) => isTrackActive(t)) && isPlaying && !isBuffering;
   }, [artist, currentTrack, isBuffering, isPlaying]);
 
+  const isYouTubePlaylistCurrentlyPlaying = useMemo(() => {
+    if (!ytPlaylist || !currentTrack) return false;
+    return (
+      ytPlaylist.tracks.some((t) => currentTrack.id === `yt-${t.videoId}`) &&
+      isPlaying &&
+      !isBuffering
+    );
+  }, [currentTrack, isBuffering, isPlaying, ytPlaylist]);
+
+  const ytPlaylistTotalDuration = useMemo(() => {
+    if (!ytPlaylist) return 0;
+    return ytPlaylist.tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+  }, [ytPlaylist]);
+
   const heroImageUrl =
     route.type === 'album'
       ? album?.coverUrl || route.coverHint
-      : artist?.pictureUrl || route.pictureHint;
+      : route.type === 'artist'
+        ? artist?.pictureUrl || route.pictureHint
+        : ytPlaylist?.thumbnail || route.coverHint;
 
   const heroFallbackSeed =
     route.type === 'album'
       ? album?.title || route.titleHint || route.id
-      : artist?.name || route.nameHint || route.id;
+      : route.type === 'artist'
+        ? artist?.name || route.nameHint || route.id
+        : ytPlaylist?.title || route.titleHint || route.id;
 
   const heroFallbackColor = useMemo(() => hashTint(heroFallbackSeed), [heroFallbackSeed]);
   const heroColorCacheKey = useMemo(
@@ -622,7 +1147,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
 
           <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 text-center space-y-3">
             <p className="text-base font-semibold text-[var(--text-primary)]">
-              Couldn&apos;t load {route.type === 'album' ? 'album' : 'artist'} details
+              Couldn&apos;t load{' '}
+              {route.type === 'album'
+                ? 'album'
+                : route.type === 'artist'
+                  ? 'artist'
+                  : 'playlist'}{' '}
+              details
             </p>
             <p className="text-xs text-[var(--text-secondary)] max-w-md mx-auto">{error}</p>
             <button
@@ -1231,6 +1762,179 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               </div>
             </section>
           )}
+          </div>
+        </div>
+      ) : route.type === 'playlist' && ytPlaylist ? (
+        <div className="space-y-6">
+          {/* YouTube Playlist Full-Bleed Blurred Cover-Art Hero */}
+          <div
+            className="relative w-full pb-6 overflow-hidden"
+            style={{paddingTop: 'calc(0.75rem + env(safe-area-inset-top, 0px))'}}
+          >
+            <BlurredArtworkBackdrop
+              imageUrl={ytPlaylist.thumbnail || route.coverHint}
+              fallbackSeed={ytPlaylist.title}
+              topHexColor={detailTopHexColor}
+              isLight={isLight}
+            />
+
+            <div className="relative z-10 max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-5">
+              {/* Top Back Button */}
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                  aria-label="Back to Search"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Cover + Metadata + Actions */}
+              <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 sm:gap-7">
+                <div className="w-44 h-44 sm:w-52 sm:h-52 lg:w-56 lg:h-56 shrink-0 rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 bg-[var(--bg-elevated)]">
+                  <ResilientCover
+                    src={ytPlaylist.thumbnail || route.coverHint}
+                    alt={ytPlaylist.title}
+                    shape="square"
+                    label={ytPlaylist.title}
+                    className="rounded-xl"
+                  />
+                </div>
+
+                <div className="min-w-0 flex-1 text-center sm:text-left space-y-2.5">
+                  <p className="text-xs font-semibold text-[var(--text-secondary)]">
+                    YouTube Playlist
+                  </p>
+                  <h1
+                    className="font-display text-2xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-[var(--text-primary)] leading-[1.1]"
+                    style={{textWrap: 'balance'}}
+                  >
+                    {ytPlaylist.title}
+                  </h1>
+
+                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-2 gap-y-1.5 text-sm text-[var(--text-secondary)]">
+                    {(ytPlaylist.channel || route.channelHint) && (
+                      <>
+                        <span className="font-semibold text-[var(--text-primary)]">
+                          {ytPlaylist.channel || route.channelHint}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
+                    <span className="tabular-nums">
+                      {ytPlaylist.tracks.length}{' '}
+                      {ytPlaylist.tracks.length === 1 ? 'song' : 'songs'}
+                    </span>
+                    {ytPlaylistTotalDuration > 0 && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">
+                          {formatTotalRuntime(ytPlaylistTotalDuration)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  {ytPlaylist.tracks.length > 0 && (
+                    <div className="pt-2 flex flex-wrap items-center justify-center sm:justify-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isYouTubePlaylistCurrentlyPlaying) {
+                            togglePlay();
+                          } else {
+                            handlePlayYouTubePlaylistTrack(ytPlaylist.tracks[0], 0);
+                          }
+                        }}
+                        className="inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] active:scale-[0.98] transition-all whitespace-nowrap shadow-lg"
+                      >
+                        {isYouTubePlaylistCurrentlyPlaying ? (
+                          <Pause className="w-4 h-4 fill-current" />
+                        ) : (
+                          <Play className="w-4 h-4 fill-current" />
+                        )}
+                        <span>{isYouTubePlaylistCurrentlyPlaying ? 'Pause' : 'Play all'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleShuffleYouTubePlaylist}
+                        className="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--bg-secondary)]/85 backdrop-blur-sm px-5 py-2.5 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] hover:border-[var(--accent)] transition-colors whitespace-nowrap"
+                      >
+                        <Shuffle className="w-4 h-4" />
+                        <span>Shuffle</span>
+                      </button>
+
+                      {canDownload && (
+                        <button
+                          type="button"
+                          disabled={
+                            playlistSaveState?.playlistId === ytPlaylist.playlistId &&
+                            playlistSaveState.active
+                          }
+                          onClick={() => void handleSaveAsXlabPlaylist()}
+                          className={`inline-flex min-h-[44px] items-center gap-2 rounded-full border px-5 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
+                            playlistSaveState?.playlistId === ytPlaylist.playlistId &&
+                            playlistSaveState.done
+                              ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                              : 'border-[var(--border-strong)] bg-[var(--bg-secondary)]/85 backdrop-blur-sm text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] hover:border-[var(--accent)]'
+                          }`}
+                        >
+                          {playlistSaveState?.playlistId === ytPlaylist.playlistId &&
+                          playlistSaveState.active ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <span className="tabular-nums">
+                                Saving {playlistSaveState.saved}/{playlistSaveState.total}...
+                              </span>
+                            </>
+                          ) : playlistSaveState?.playlistId === ytPlaylist.playlistId &&
+                            playlistSaveState.done ? (
+                            <>
+                              <Check className="w-4 h-4 stroke-[2.5]" />
+                              <span>Saved as playlist</span>
+                            </>
+                          ) : (
+                            <>
+                              <ListPlus className="w-4 h-4" />
+                              <span>Save as playlist</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Virtualized Playlist Tracklist */}
+          <div className="max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 space-y-4">
+            {ytPlaylist.tracks.length === 0 ? (
+              <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 text-center">
+                <p className="text-sm font-semibold text-[var(--text-primary)]">
+                  No playable tracks found in this playlist
+                </p>
+                <p className="text-xs text-[var(--text-secondary)] mt-1">
+                  Videos in this playlist may be private, deleted, or unavailable.
+                </p>
+              </div>
+            ) : (
+              <VirtualizedYouTubePlaylistTracks
+                tracks={ytPlaylist.tracks}
+                currentTrackId={currentTrack?.id}
+                isPlaying={isPlaying}
+                isBuffering={isBuffering}
+                canDownload={canDownload}
+                getYouTubeSaveStatus={getYouTubeSaveStatus}
+                onPlayTrack={handlePlayYouTubePlaylistTrack}
+                onQueueTrack={handleQueueYouTubePlaylistTrack}
+                onDownloadTrack={(e, track) => void handleDownloadYouTubePlaylistTrack(e, track)}
+              />
+            )}
           </div>
         </div>
       ) : null}

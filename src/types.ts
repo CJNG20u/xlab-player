@@ -207,12 +207,38 @@ export interface DiscoverAlbumItem {
   seedArtist: string | null;
 }
 
+export interface YouTubePlaylistSearchItem {
+  playlistId: string;
+  title: string;
+  channel: string;
+  videoCount: number | null;
+  thumbnail: string;
+}
+
+export interface YouTubePlaylistTrackItem {
+  videoId: string;
+  title: string;
+  artist: string;
+  channel: string;
+  duration: number;
+  thumbnail: string;
+}
+
+export interface YouTubePlaylistDetail {
+  playlistId: string;
+  title: string;
+  channel: string;
+  thumbnail: string;
+  tracks: YouTubePlaylistTrackItem[];
+}
+
 export interface DiscoverSearchResponse {
   query: string;
   cached: boolean;
   artists: DiscoverArtistItem[];
   albums: DiscoverAlbumItem[];
   tracks: DiscoverAlbumTrack[];
+  playlists?: YouTubePlaylistSearchItem[];
 }
 
 export interface PlayHistoryEntry {

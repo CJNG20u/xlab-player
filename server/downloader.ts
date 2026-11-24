@@ -734,6 +734,410 @@ export async function fetchMetadataPreview(
   }
 }
 
+export const YOUTUBE_PLAYLIST_ID_RE = /^[\w-]{10,64}$/;
+const YOUTUBE_PLAYLIST_CACHE_TTL_MS = 10 * 60 * 1000;
+const YOUTUBE_PLAYLIST_SEARCH_CACHE_MAX = 200;
+const YOUTUBE_PLAYLIST_DETAIL_CACHE_MAX = 100;
+const YOUTUBE_PLAYLIST_MAX_TRACKS = 200;
+const YOUTUBE_UNAVAILABLE_TITLE_RE = /^\[?(?:private|deleted|unavailable)\s+video\]?$/i;
+const YOUTUBE_UNAVAILABLE_AVAILABILITIES = new Set([
+  'private',
+  'needs_auth',
+  'subscriber_only',
+  'premium_only',
+  'unavailable',
+]);
+
+export interface YouTubePlaylistSearchItem {
+  playlistId: string;
+  title: string;
+  channel: string;
+  videoCount: number | null;
+  thumbnail: string;
+}
+
+export interface YouTubePlaylistTrackItem {
+  videoId: string;
+  title: string;
+  artist: string;
+  channel: string;
+  duration: number;
+  thumbnail: string;
+}
+
+export interface YouTubePlaylistDetail {
+  playlistId: string;
+  title: string;
+  channel: string;
+  thumbnail: string;
+  tracks: YouTubePlaylistTrackItem[];
+}
+
+interface TtlCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+const youtubePlaylistSearchCache = new Map<string, TtlCacheEntry<YouTubePlaylistSearchItem[]>>();
+const youtubePlaylistSearchInFlight = new Map<string, Promise<YouTubePlaylistSearchItem[]>>();
+const youtubePlaylistDetailCache = new Map<string, TtlCacheEntry<YouTubePlaylistDetail>>();
+const youtubePlaylistDetailInFlight = new Map<string, Promise<YouTubePlaylistDetail>>();
+
+export function isValidYouTubePlaylistId(id: string | null | undefined): boolean {
+  return Boolean(id && YOUTUBE_PLAYLIST_ID_RE.test(id.trim()));
+}
+
+function setBoundedTtlCache<T>(
+  cache: Map<string, TtlCacheEntry<T>>,
+  key: string,
+  value: T,
+  maxEntries: number
+): void {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, {value, expiresAt: Date.now() + YOUTUBE_PLAYLIST_CACHE_TTL_MS});
+  while (cache.size > maxEntries) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function sanitizeHttpThumbnailUrl(url: string): string {
+  const trimmed = (url || '').trim();
+  return /^https?:\/\//i.test(trimmed) ? trimmed : '';
+}
+
+function extractPlaylistIdFromEntry(entry: Record<string, unknown>): string | null {
+  const rawUrl =
+    (typeof entry.url === 'string' && entry.url.trim()) ||
+    (typeof entry.webpage_url === 'string' && entry.webpage_url.trim()) ||
+    '';
+
+  let urlListParam: string | null = null;
+  let isWatchWithoutList = false;
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl, 'https://www.youtube.com');
+      const listParam = parsed.searchParams.get('list')?.trim() || '';
+      if (listParam && YOUTUBE_PLAYLIST_ID_RE.test(listParam)) {
+        urlListParam = listParam;
+      } else if (parsed.pathname.startsWith('/watch') && !listParam) {
+        isWatchWithoutList = true;
+      }
+    } catch {
+      // Ignore unparseable URL and fall back to entry.id
+    }
+  }
+
+  if (urlListParam) return urlListParam;
+  if (isWatchWithoutList) return null;
+
+  const rawId = typeof entry.id === 'string' ? entry.id.trim() : '';
+  if (rawId && YOUTUBE_PLAYLIST_ID_RE.test(rawId)) {
+    // Reject bare 11-char single video entries that lack playlist markers
+    if (YOUTUBE_VIDEO_ID_RE.test(rawId) && entry._type === 'video') {
+      return null;
+    }
+    return rawId;
+  }
+
+  return null;
+}
+
+function parseFlatJsonDocument(stdout: string): {
+  root: Record<string, unknown> | null;
+  entries: Array<Record<string, unknown>>;
+} {
+  const trimmed = stdout.trim();
+  if (!trimmed) return {root: null, entries: []};
+
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (Array.isArray(parsed.entries)) {
+        const entries = parsed.entries.filter(
+          (e): e is Record<string, unknown> => Boolean(e && typeof e === 'object')
+        );
+        return {root: parsed, entries};
+      }
+      return {root: parsed, entries: [parsed]};
+    } catch {
+      // Fall back to existing NDJSON parser
+    }
+  }
+
+  const fallback = parseFlatEntriesFromJson(trimmed);
+  return {
+    root: fallback.playlistTitle ? {title: fallback.playlistTitle} : null,
+    entries: fallback.entries,
+  };
+}
+
+async function runFlatYtdlpJson(
+  targetUrl: string,
+  options: {
+    timeoutMs: number;
+    playlistEnd: number;
+    priority: StreamResolvePriority;
+  }
+): Promise<{root: Record<string, unknown> | null; entries: Array<Record<string, unknown>>}> {
+  const execute = async (cookiePath: string | null) => {
+    const args = [
+      '--flat-playlist',
+      '--dump-single-json',
+      '--quiet',
+      '--no-warnings',
+      '--playlist-end',
+      String(options.playlistEnd),
+      ...buildResilienceArgs(cookiePath, {
+        includeSleep: false,
+        includePlayerClient: false,
+        forceIpv4: true,
+      }),
+      '--',
+      targetUrl,
+    ];
+    const {stdout} = await execYtdlp(args, {
+      timeout: options.timeoutMs,
+      maxBuffer: 15 * 1024 * 1024,
+    });
+    return parseFlatJsonDocument(stdout);
+  };
+
+  return withYtdlpResolveSlot(async () => {
+    try {
+      return await execute(null);
+    } catch (anonErr) {
+      const msg = anonErr instanceof Error ? anonErr.message : String(anonErr);
+      if (!isRecoverableCookieError(msg) || !hasConfiguredCookies()) {
+        throw anonErr;
+      }
+      const tempCookiePath = createTempCookiesCopy();
+      try {
+        return await execute(tempCookiePath);
+      } finally {
+        if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+          try {
+            fs.unlinkSync(tempCookiePath);
+          } catch {
+            // ignore cleanup failure
+          }
+        }
+      }
+    }
+  }, options.priority);
+}
+
+export async function searchYoutubePlaylists(
+  query: string,
+  limit = 8
+): Promise<YouTubePlaylistSearchItem[]> {
+  const cleaned = (query || '').trim().slice(0, 120);
+  if (!cleaned) return [];
+
+  const safeLimit = Math.min(Math.max(Math.floor(Number(limit) || 8), 1), 20);
+  const cacheKey = `${cleaned.toLowerCase()}::${safeLimit}`;
+  const now = Date.now();
+
+  const cached = youtubePlaylistSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const existingInFlight = youtubePlaylistSearchInFlight.get(cacheKey);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const runPromise = (async (): Promise<YouTubePlaylistSearchItem[]> => {
+    try {
+      const targetUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(
+        cleaned
+      )}&sp=EgIQAw%3D%3D`;
+      const {entries} = await runFlatYtdlpJson(targetUrl, {
+        timeoutMs: 6500,
+        playlistEnd: Math.max(safeLimit * 2, 16),
+        priority: 'prefetch',
+      });
+
+      const seen = new Set<string>();
+      const results: YouTubePlaylistSearchItem[] = [];
+
+      for (const entry of entries) {
+        if (results.length >= safeLimit) break;
+        const playlistId = extractPlaylistIdFromEntry(entry);
+        if (!playlistId || seen.has(playlistId)) continue;
+
+        const title = String(entry.title || entry.playlist_title || '').trim();
+        if (!title || YOUTUBE_UNAVAILABLE_TITLE_RE.test(title)) continue;
+
+        const channel = String(
+          entry.channel || entry.uploader || entry.playlist_uploader || ''
+        )
+          .replace(/\s*-\s*Topic$/i, '')
+          .trim();
+
+        const rawCount =
+          entry.playlist_count ?? entry.n_entries ?? entry.entry_count ?? entry.video_count;
+        const videoCount =
+          typeof rawCount === 'number' && Number.isFinite(rawCount) && rawCount > 0
+            ? Math.floor(rawCount)
+            : null;
+
+        const thumbnail = sanitizeHttpThumbnailUrl(extractThumbnailUrl(entry));
+
+        seen.add(playlistId);
+        results.push({
+          playlistId,
+          title,
+          channel,
+          videoCount,
+          thumbnail,
+        });
+      }
+
+      setBoundedTtlCache(
+        youtubePlaylistSearchCache,
+        cacheKey,
+        results,
+        YOUTUBE_PLAYLIST_SEARCH_CACHE_MAX
+      );
+      return results;
+    } catch {
+      return [];
+    } finally {
+      youtubePlaylistSearchInFlight.delete(cacheKey);
+    }
+  })();
+
+  youtubePlaylistSearchInFlight.set(cacheKey, runPromise);
+  return runPromise;
+}
+
+export async function getYoutubePlaylistDetail(
+  playlistId: string,
+  options: {forceRefresh?: boolean} = {}
+): Promise<YouTubePlaylistDetail> {
+  const cleanId = (playlistId || '').trim();
+  if (!isValidYouTubePlaylistId(cleanId)) {
+    throw new Error('Invalid YouTube playlist ID');
+  }
+
+  const now = Date.now();
+  if (!options.forceRefresh) {
+    const cached = youtubePlaylistDetailCache.get(cleanId);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
+    }
+    const existingInFlight = youtubePlaylistDetailInFlight.get(cleanId);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
+  }
+
+  const runPromise = (async (): Promise<YouTubePlaylistDetail> => {
+    try {
+      const targetUrl = `https://www.youtube.com/playlist?list=${cleanId}`;
+      const {root, entries} = await runFlatYtdlpJson(targetUrl, {
+        timeoutMs: 25000,
+        playlistEnd: YOUTUBE_PLAYLIST_MAX_TRACKS + 20,
+        priority: 'playback',
+      });
+
+      const tracks: YouTubePlaylistTrackItem[] = [];
+      const seenVideoIds = new Set<string>();
+
+      for (const entry of entries) {
+        if (tracks.length >= YOUTUBE_PLAYLIST_MAX_TRACKS) break;
+        const videoId = typeof entry.id === 'string' ? entry.id.trim() : '';
+        if (!videoId || !YOUTUBE_VIDEO_ID_RE.test(videoId) || seenVideoIds.has(videoId)) {
+          continue;
+        }
+
+        const availability =
+          typeof entry.availability === 'string' ? entry.availability.trim().toLowerCase() : '';
+        if (availability && YOUTUBE_UNAVAILABLE_AVAILABILITIES.has(availability)) {
+          continue;
+        }
+
+        const rawTitle = String(entry.track || entry.title || '').trim();
+        if (!rawTitle || YOUTUBE_UNAVAILABLE_TITLE_RE.test(rawTitle)) {
+          continue;
+        }
+
+        const channel = String(
+          entry.channel || entry.uploader || entry.playlist_uploader || ''
+        )
+          .replace(/\s*-\s*Topic$/i, '')
+          .trim();
+
+        const artist =
+          String(entry.artist || entry.creator || entry.uploader || entry.channel || '')
+            .replace(/\s*-\s*Topic$/i, '')
+            .trim() ||
+          channel ||
+          'YouTube';
+
+        const duration =
+          typeof entry.duration === 'number' && Number.isFinite(entry.duration) && entry.duration > 0
+            ? Math.round(entry.duration)
+            : 0;
+
+        const thumbnail =
+          sanitizeHttpThumbnailUrl(extractThumbnailUrl(entry)) ||
+          `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+        if (thumbnail) {
+          cacheYouTubeThumbnailUrl(videoId, thumbnail);
+        }
+
+        seenVideoIds.add(videoId);
+        tracks.push({
+          videoId,
+          title: rawTitle,
+          artist,
+          channel,
+          duration,
+          thumbnail,
+        });
+      }
+
+      const title =
+        String(root?.title || root?.playlist_title || '').trim() || 'YouTube Playlist';
+      const channel = String(
+        root?.channel || root?.uploader || root?.playlist_uploader || ''
+      )
+        .replace(/\s*-\s*Topic$/i, '')
+        .trim();
+      const thumbnail =
+        (root ? sanitizeHttpThumbnailUrl(extractThumbnailUrl(root)) : '') ||
+        tracks[0]?.thumbnail ||
+        '';
+
+      const detail: YouTubePlaylistDetail = {
+        playlistId: cleanId,
+        title,
+        channel,
+        thumbnail,
+        tracks,
+      };
+
+      setBoundedTtlCache(
+        youtubePlaylistDetailCache,
+        cleanId,
+        detail,
+        YOUTUBE_PLAYLIST_DETAIL_CACHE_MAX
+      );
+      return detail;
+    } finally {
+      youtubePlaylistDetailInFlight.delete(cleanId);
+    }
+  })();
+
+  youtubePlaylistDetailInFlight.set(cleanId, runPromise);
+  return runPromise;
+}
+
 export function getDownloadJobs(): DownloadJobRow[] {
   return db
     .prepare('SELECT * FROM download_jobs ORDER BY id DESC LIMIT 50')
