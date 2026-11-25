@@ -100,7 +100,7 @@ id -g   # set as PGID in .env
 
 ### Using Prebuilt GHCR Images
 
-Automated multi-arch (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry on pushes to `main` (`:latest`) and on every release (version tags like `:1.0.0` and `:1`). To pull a prebuilt image instead of building locally, comment out `build: .` in `docker-compose.yml` and uncomment:
+Automated multi-arch (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry on pushes to `main` (`:latest`) and on every release (version tags like `:2.7.0` and `:2`). To pull a prebuilt image instead of building locally, comment out `build: .` in `docker-compose.yml` and uncomment:
 
 ```yaml
 image: ghcr.io/cjng20u/xlab-player:latest

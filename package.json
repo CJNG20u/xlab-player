@@ -1,7 +1,7 @@
 {
   "name": "xlabplayer",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.7.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
