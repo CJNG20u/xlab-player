@@ -1,4 +1,6 @@
 # xlabplayer
+
+[![Docker image](https://github.com/CJNG20u/xlab-player/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/CJNG20u/xlab-player/pkgs/container/xlab-player)
 <img width="1682" height="1297" alt="image" src="https://github.com/user-attachments/assets/95e1bbf1-1242-4626-880a-0eb7f2b2204d" />
 
 
@@ -98,7 +100,7 @@ id -g   # set as PGID in .env
 
 ### Using Prebuilt GHCR Images
 
-Automated multi-arch (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry on pushes to `main`. To pull a prebuilt image instead of building locally, comment out `build: .` in `docker-compose.yml` and uncomment:
+Automated multi-arch (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry on pushes to `main` (`:latest`) and on every release (version tags like `:1.0.0` and `:1`). To pull a prebuilt image instead of building locally, comment out `build: .` in `docker-compose.yml` and uncomment:
 
 ```yaml
 image: ghcr.io/cjng20u/xlab-player:latest
