@@ -1,6 +1,12 @@
 # xlabplayer
 
 [![Docker image](https://github.com/CJNG20u/xlab-player/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/CJNG20u/xlab-player/pkgs/container/xlab-player)
+
+🐳 **Docker image:** `ghcr.io/cjng20u/xlab-player:latest` (amd64 + arm64)
+
+```bash
+docker pull ghcr.io/cjng20u/xlab-player:latest
+```
 <img width="1682" height="1297" alt="image" src="https://github.com/user-attachments/assets/95e1bbf1-1242-4626-880a-0eb7f2b2204d" />
 
 
