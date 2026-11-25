@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   CheckSquare,
   Clock,
+  Copy,
   FileDown,
   HardDriveDownload,
   Heart,
@@ -28,6 +29,7 @@ import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
 import {ConfirmDeleteModal} from '../components/ConfirmDeleteModal';
 import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
+import {DuplicatesPanel} from '../components/DuplicatesPanel';
 import {PlaylistsHubView, recordRecentPlaylistId} from '../components/PlaylistsHubView';
 import {RenamePlaylistModal} from '../components/RenamePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
@@ -168,6 +170,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const loadSeqRef = useRef(0);
   const currentRouteKey = `${location.pathname}${location.search}`;
   const [createOpen, setCreateOpen] = useState(false);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<Playlist | null>(null);
   const [greeting, setGreeting] = useState<string>(() => getTimeOfDayGreeting());
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1719,6 +1722,23 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       <span className="hidden xs:inline sm:inline">Filter</span>
                     </button>
 
+                    {!offline && (
+                      <button
+                        type="button"
+                        onClick={() => setDuplicatesOpen(true)}
+                        className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors shrink-0 ${
+                          duplicatesOpen
+                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                            : 'border-[var(--action-pill-border)] bg-[var(--action-pill-bg)] text-[var(--action-pill-text)] hover:border-[var(--action-pill-border-hover)] hover:bg-[var(--action-pill-bg-hover)] hover:text-[var(--action-pill-text-hover)]'
+                        }`}
+                        aria-label="Find duplicates"
+                        title="Find duplicates"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Duplicates</span>
+                      </button>
+                    )}
+
                     {artistFilter && (
                       <button
                         type="button"
@@ -2182,6 +2202,24 @@ export const PlaylistsLibraryPage: React.FC = () => {
           }
         }}
         onConfirm={() => void handleBatchConfirmDelete()}
+      />
+
+      <DuplicatesPanel
+        open={duplicatesOpen}
+        onClose={() => setDuplicatesOpen(false)}
+        onDuplicateRemoved={({removeId, keepTrack, keepLiked}) => {
+          setTracks((prev) =>
+            prev
+              .filter((t) => t.id !== removeId)
+              .map((t) => (t.id === keepTrack.id ? {...t, liked: keepLiked} : t))
+          );
+          setSelectedIds((prev) => {
+            if (!prev.has(removeId)) return prev;
+            const next = new Set(prev);
+            next.delete(removeId);
+            return next;
+          });
+        }}
       />
     </>
   );

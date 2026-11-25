@@ -3,7 +3,13 @@ import {EventEmitter} from 'events';
 import fs from 'fs';
 import path from 'path';
 import {parseFile} from 'music-metadata';
-import {COVERS_DIR, db, getMusicDir} from './db.ts';
+import {
+  COVERS_DIR,
+  db,
+  getIgnoredLibraryPathsSet,
+  getMusicDir,
+  normalizeIgnoredRelPath,
+} from './db.ts';
 
 export const AUDIO_EXTENSIONS = new Set([
   '.mp3',
@@ -629,7 +635,9 @@ export async function runLibraryScan(fullReindex = false): Promise<ScanProgress>
   });
 
   try {
-    const {audioFiles: absFiles, playlistFiles} = collectMediaFiles(musicDir);
+    const {audioFiles: discoveredAudioFiles, playlistFiles} = collectMediaFiles(musicDir);
+    const ignoredRelPaths = getIgnoredLibraryPathsSet();
+    const absFiles = filterIgnoredAudioFiles(discoveredAudioFiles, musicDir, ignoredRelPaths);
     const existingRows = db
       .prepare('SELECT id, rel_path, size_bytes FROM tracks')
       .all() as Array<{id: number; rel_path: string; size_bytes: number}>;
@@ -719,6 +727,20 @@ export async function runLibraryScan(fullReindex = false): Promise<ScanProgress>
   }
 
   return getScanState();
+}
+
+export function filterIgnoredAudioFiles(
+  absFiles: string[],
+  musicDir: string,
+  ignoredRelPaths: ReadonlySet<string>
+): string[] {
+  if (ignoredRelPaths.size === 0) return absFiles;
+  return absFiles.filter((absPath) => {
+    const relPath = normalizeIgnoredRelPath(
+      path.relative(musicDir, absPath).split(path.sep).join('/')
+    );
+    return !ignoredRelPaths.has(relPath);
+  });
 }
 
 export function readTrackLyricsLive(relPath: string, storedLyrics: string | null): string | null {

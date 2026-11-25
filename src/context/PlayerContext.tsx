@@ -111,6 +111,7 @@ interface PlayerContextValue {
   setQueueOpen: (open: boolean) => void;
   setLyricsOpen: (open: boolean) => void;
   syncTrackLikeState: (trackId: TrackId, liked: boolean) => void;
+  replaceDuplicateInQueue: (removeId: number, keepTrack: Track) => void;
   libraryRefreshVersion: number;
   bumpLibraryRefresh: () => void;
   recentlyDownloadedTracks: Track[];
@@ -2600,6 +2601,83 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
     setQueue((prev) => prev.map((t) => (t.id === trackId ? {...t, liked} : t)));
   }, []);
 
+  const replaceDuplicateInQueue = useCallback((removeId: number, keepTrack: Track) => {
+    const {queue: prevQueue, currentIndex: currIdx, currentTrack: activeTrack} = stateRef.current;
+    // Never touch the currently playing track slot
+    if (activeTrack && typeof activeTrack.id === 'number' && activeTrack.id === removeId) {
+      return;
+    }
+
+    let queueChanged = false;
+    let seenKeep = false;
+    const nextQueue: Track[] = [];
+    let nextCurrIdx = currIdx;
+
+    // If keepTrack is the active playing track, ensure we preserve the active slot
+    const activeIsKeep = Boolean(
+      activeTrack && typeof activeTrack.id === 'number' && activeTrack.id === keepTrack.id
+    );
+
+    for (let i = 0; i < prevQueue.length; i++) {
+      const item = prevQueue[i];
+      const isRemoved = typeof item.id === 'number' && item.id === removeId;
+      const isKept = typeof item.id === 'number' && item.id === keepTrack.id;
+
+      if (isRemoved || isKept) {
+        if (activeIsKeep) {
+          if (i === currIdx) {
+            nextCurrIdx = nextQueue.length;
+            nextQueue.push({...item, liked: keepTrack.liked});
+            seenKeep = true;
+          } else {
+            // Drop extra duplicate copy (earlier or later) without disturbing active slot
+            queueChanged = true;
+          }
+          continue;
+        }
+
+        if (!seenKeep) {
+          seenKeep = true;
+          if (i === currIdx) {
+            nextCurrIdx = nextQueue.length;
+          }
+          if (isRemoved) {
+            queueChanged = true;
+            nextQueue.push({...keepTrack});
+          } else {
+            nextQueue.push({...item, liked: keepTrack.liked});
+          }
+        } else {
+          queueChanged = true;
+        }
+      } else {
+        if (i === currIdx) {
+          nextCurrIdx = nextQueue.length;
+        }
+        nextQueue.push(item);
+      }
+    }
+
+    if (queueChanged) {
+      setQueue(nextQueue);
+      if (nextCurrIdx !== currIdx && currIdx >= 0) {
+        setCurrentIndex(nextCurrIdx);
+      }
+    } else if (seenKeep) {
+      setQueue((prev) =>
+        prev.map((t) => (t.id === keepTrack.id ? {...t, liked: keepTrack.liked} : t))
+      );
+    }
+
+    setRecentlyDownloadedTracks((prev) => {
+      if (!prev.some((t) => t.id === removeId)) return prev;
+      const hasKeep = prev.some((t) => t.id === keepTrack.id);
+      return hasKeep
+        ? prev.filter((t) => t.id !== removeId)
+        : prev.map((t) => (t.id === removeId ? keepTrack : t));
+    });
+  }, []);
+
   const toggleLikeTrack = useCallback(
     async (trackId: TrackId) => {
       if (typeof trackId !== 'number') return null;
@@ -4118,6 +4196,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       setQueueOpen,
       setLyricsOpen,
       syncTrackLikeState,
+      replaceDuplicateInQueue,
       libraryRefreshVersion,
       bumpLibraryRefresh,
       recentlyDownloadedTracks,
@@ -4159,6 +4238,7 @@ export const PlayerProvider: React.FC<{children: React.ReactNode}> = ({children}
       removeFromQueue,
       reorderQueue,
       repeat,
+      replaceDuplicateInQueue,
       saveYouTubeTrackToLibrary,
       seek,
       setAutoplayEnabled,

@@ -285,6 +285,12 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_track_video_rejects_created
     ON track_video_rejects(createdAt DESC);
+
+  CREATE TABLE IF NOT EXISTS library_ignored_paths (
+    rel_path TEXT PRIMARY KEY,
+    reason TEXT NOT NULL DEFAULT 'duplicate',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // Safe incremental migrations for existing databases
@@ -770,6 +776,52 @@ export function getUserListeningEvents(
 export function clearUserListeningEvents(userId: number): number {
   const result = clearUserListeningEventsStmt.run(userId);
   return result.changes || 0;
+}
+
+// ---------------------------------------------------------------------------
+// Ignored Local Library Paths (Removed Duplicates — Never Re-imported)
+// ---------------------------------------------------------------------------
+
+export function normalizeIgnoredRelPath(relPath: string): string {
+  return String(relPath || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.?\//, '');
+}
+
+const insertIgnoredLibraryPathStmt = db.prepare(
+  `INSERT OR IGNORE INTO library_ignored_paths (rel_path, reason)
+   VALUES (?, ?)`
+);
+
+const getAllIgnoredLibraryPathsStmt = db.prepare(
+  'SELECT rel_path FROM library_ignored_paths'
+);
+
+const hasIgnoredLibraryPathStmt = db.prepare(
+  'SELECT 1 FROM library_ignored_paths WHERE rel_path = ? LIMIT 1'
+);
+
+export function addIgnoredLibraryPath(relPath: string, reason = 'duplicate'): void {
+  const normalized = normalizeIgnoredRelPath(relPath);
+  if (!normalized) return;
+  insertIgnoredLibraryPathStmt.run(normalized, reason);
+}
+
+export function getIgnoredLibraryPathsSet(): Set<string> {
+  const rows = getAllIgnoredLibraryPathsStmt.all() as Array<{rel_path: string}>;
+  const set = new Set<string>();
+  for (const row of rows) {
+    const normalized = normalizeIgnoredRelPath(row.rel_path);
+    if (normalized) set.add(normalized);
+  }
+  return set;
+}
+
+export function isLibraryPathIgnored(relPath: string): boolean {
+  const normalized = normalizeIgnoredRelPath(relPath);
+  if (!normalized) return false;
+  return Boolean(hasIgnoredLibraryPathStmt.get(normalized));
 }
 
 

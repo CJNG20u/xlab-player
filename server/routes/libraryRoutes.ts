@@ -4,6 +4,12 @@ import fs from 'fs';
 import path from 'path';
 import {type AuthRequest, requireAuth} from '../auth.ts';
 import {COVERS_DIR, db, getMusicDir} from '../db.ts';
+import {deviceHub} from '../deviceHub.ts';
+import {
+  DuplicateResolveError,
+  findDuplicateGroupsForUser,
+  resolveDuplicatePair,
+} from '../duplicates.ts';
 import {resolveTrackLyrics} from '../lyrics.ts';
 
 export const libraryRouter = Router();
@@ -1165,3 +1171,98 @@ libraryRouter.delete(
     res.json({ok: true});
   }
 );
+
+function getActivePlayingTrackIdsForUser(
+  userId: number,
+  clientPlayingTrackId?: unknown
+): Set<number> {
+  const playingIds = new Set<number>();
+  const devices = deviceHub.listDevices(userId);
+  for (const device of devices) {
+    if (!device.online || !device.state?.isPlaying || !device.state.track) continue;
+    const rawId = device.state.track.id;
+    const numericId = typeof rawId === 'number' ? rawId : Number(rawId);
+    if (Number.isSafeInteger(numericId) && numericId > 0) {
+      playingIds.add(numericId);
+    }
+  }
+
+  if (clientPlayingTrackId !== undefined && clientPlayingTrackId !== null && clientPlayingTrackId !== '') {
+    const numericClientId = Number(clientPlayingTrackId);
+    if (Number.isSafeInteger(numericClientId) && numericClientId > 0) {
+      playingIds.add(numericClientId);
+    }
+  }
+
+  return playingIds;
+}
+
+libraryRouter.get('/library/duplicates', requireAuth, (req: AuthRequest, res) => {
+  try {
+    const playingTrackIds = getActivePlayingTrackIdsForUser(
+      req.user!.id,
+      req.query.playingTrackId
+    );
+    const groups = findDuplicateGroupsForUser(db, {
+      userId: req.user!.id,
+      userRole: req.user!.role,
+      playingTrackIds,
+    });
+    res.json({
+      groups,
+      totalGroups: groups.length,
+    });
+  } catch (err) {
+    console.error(
+      '[library-dedupe] failed to list duplicates:',
+      err instanceof Error ? err.message : String(err)
+    );
+    res.status(500).json({error: 'Failed to scan library for duplicates'});
+  }
+});
+
+libraryRouter.post('/library/duplicates/resolve', requireAuth, (req: AuthRequest, res) => {
+  const rawKeepId = req.body?.keepId;
+  const rawRemoveId = req.body?.removeId;
+  const keepId = typeof rawKeepId === 'number' ? rawKeepId : Number(rawKeepId);
+  const removeId = typeof rawRemoveId === 'number' ? rawRemoveId : Number(rawRemoveId);
+
+  if (
+    !Number.isSafeInteger(keepId) ||
+    keepId <= 0 ||
+    !Number.isSafeInteger(removeId) ||
+    removeId <= 0
+  ) {
+    res.status(400).json({error: 'keepId and removeId must be valid positive integers'});
+    return;
+  }
+
+  try {
+    const playingTrackIds = getActivePlayingTrackIdsForUser(
+      req.user!.id,
+      req.body?.playingTrackId
+    );
+    const result = resolveDuplicatePair(db, {
+      userId: req.user!.id,
+      userRole: req.user!.role,
+      keepId,
+      removeId,
+      playingTrackIds,
+    });
+    res.json({
+      ok: true,
+      ...result,
+    });
+  } catch (err) {
+    if (err instanceof DuplicateResolveError) {
+      res.status(err.status).json({error: err.message});
+      return;
+    }
+    console.error(
+      '[library-dedupe] failed to resolve duplicate:',
+      err instanceof Error ? err.message : String(err)
+    );
+    res.status(500).json({error: 'Failed to remove duplicate copy'});
+  }
+});
+
