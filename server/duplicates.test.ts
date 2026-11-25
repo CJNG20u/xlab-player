@@ -8,8 +8,13 @@ import {
   extractPrimaryArtist,
   extractVersionMarkers,
   findDuplicateGroupsForUser,
+  isBulkDedupeRunning,
   normalizeDuplicateTitle,
+  releaseBulkDedupeLock,
+  resolveAllSafeDuplicates,
   resolveDuplicatePair,
+  tryAcquireBulkDedupeLock,
+  type BulkProgressEvent,
   type DuplicateInputTrack,
 } from './duplicates.ts';
 import {filterIgnoredAudioFiles} from './scanner.ts';
@@ -659,3 +664,378 @@ test('resolveDuplicatePair rolls back completely if an error occurs inside the t
 
   testDb.close();
 });
+
+// ---------------------------------------------------------------------------
+// 3. Bulk Resolution Tests
+// ---------------------------------------------------------------------------
+
+test('resolveAllSafeDuplicates handles 2 identical copies, 3 copies, playing skip, 2s-apart skip, and mid-run group failure isolation', () => {
+  const testDb = createTestDb();
+  const userId = Number(
+    testDb
+      .prepare("INSERT INTO users (username, password_hash, role) VALUES ('bulkuser', 'hash', 'admin')")
+      .run().lastInsertRowid
+  );
+
+  const insertTrack = testDb.prepare(
+    `INSERT INTO tracks (rel_path, title, artist, album, duration, format, bitrate, size_bytes, added_at, file_hash, youtube_video_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  // Anchor track so playlists stay populated with surrounding songs
+  const anchorId = Number(
+    insertTrack.run(
+      'Music/anchor.mp3',
+      'Anchor Song',
+      'Anchor Artist',
+      'Alb',
+      180,
+      'mp3',
+      320,
+      4_000_000,
+      '2024-01-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+
+  // Group 1: 2 identical copies (same format, bitrate, playlists) -> deterministic tie-breaker keeps oldest added_at (then lowest id)
+  const g1OldKeepId = Number(
+    insertTrack.run(
+      'Music/twin-a.mp3',
+      'Twin Track',
+      'Artist One',
+      'Alb',
+      200,
+      'mp3',
+      320,
+      5_000_000,
+      '2024-02-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+  const g1NewRemoveId = Number(
+    insertTrack.run(
+      'Music/twin-b.mp3',
+      'Twin Track',
+      'Artist One',
+      'Alb',
+      200.4,
+      'mp3',
+      320,
+      5_000_000,
+      '2025-05-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+
+  // Group 2: 3 copies (FLAC + 320k MP3 + 128k M4A) -> keeps FLAC, removes both others in one group tx
+  const g2FlacKeepId = Number(
+    insertTrack.run(
+      'Music/trio.flac',
+      'Trio Anthem',
+      'Artist Two',
+      'Alb',
+      240,
+      'flac',
+      950,
+      28_000_000,
+      '2025-03-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+  const g2Mp3RemoveId = Number(
+    insertTrack.run(
+      'Music/trio.mp3',
+      'Trio Anthem - Remastered',
+      'Artist Two',
+      'Alb',
+      240.5,
+      'mp3',
+      320,
+      7_000_000,
+      '2024-01-15 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+  const g2M4aRemoveId = Number(
+    insertTrack.run(
+      'YouTube/trio.m4a',
+      'Trio Anthem (Official Audio)',
+      'Artist Two',
+      'YouTube',
+      239.8,
+      'm4a',
+      128,
+      3_000_000,
+      '2025-04-01 00:00:00',
+      null,
+      'trioVid1234'
+    ).lastInsertRowid
+  );
+
+  // Group 3: a copy is playing right now -> MUST be skipped
+  const g3KeepId = Number(
+    insertTrack.run(
+      'Music/playing-a.flac',
+      'Playing Now Song',
+      'Artist Three',
+      'Alb',
+      210,
+      'flac',
+      900,
+      20_000_000,
+      '2025-01-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+  const g3PlayingId = Number(
+    insertTrack.run(
+      'Music/playing-b.mp3',
+      'Playing Now Song',
+      'Artist Three',
+      'Alb',
+      210,
+      'mp3',
+      192,
+      4_000_000,
+      '2025-02-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+
+  // Group 4: durations 2 seconds apart (180s vs 182s) -> valid duplicate group, NOT safe for bulk -> MUST be skipped
+  const g4CopyA = Number(
+    insertTrack.run(
+      'Music/dur-a.flac',
+      'Two Seconds Apart',
+      'Artist Four',
+      'Alb',
+      180,
+      'flac',
+      900,
+      18_000_000,
+      '2025-01-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+  const g4CopyB = Number(
+    insertTrack.run(
+      'Music/dur-b.mp3',
+      'Two Seconds Apart',
+      'Artist Four',
+      'Alb',
+      182,
+      'mp3',
+      192,
+      4_000_000,
+      '2025-02-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+
+  // Group 5: safe group whose transaction will fail midway -> MUST roll back completely while others commit
+  const g5KeepId = Number(
+    insertTrack.run(
+      'Music/fail-a.flac',
+      'Failing Group Song',
+      'Artist Five',
+      'Alb',
+      195,
+      'flac',
+      900,
+      19_000_000,
+      '2025-01-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+  const g5RemoveId = Number(
+    insertTrack.run(
+      'Music/fail-b.mp3',
+      'Failing Group Song',
+      'Artist Five',
+      'Alb',
+      195,
+      'mp3',
+      192,
+      4_000_000,
+      '2025-02-01 00:00:00',
+      null,
+      null
+    ).lastInsertRowid
+  );
+
+  // Playlist containing anchor + all 3 copies of Group 2 + both copies of Group 1 + Group 5 remove copy
+  const plId = Number(
+    testDb.prepare("INSERT INTO playlists (user_id, name) VALUES (?, 'Mega Mix')").run(userId)
+      .lastInsertRowid
+  );
+  const addPlTrack = testDb.prepare(
+    'INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)'
+  );
+  addPlTrack.run(plId, anchorId, 0);
+  addPlTrack.run(plId, g1NewRemoveId, 1);
+  addPlTrack.run(plId, g2M4aRemoveId, 2);
+  addPlTrack.run(plId, g1OldKeepId, 3);
+  addPlTrack.run(plId, g2Mp3RemoveId, 4);
+  addPlTrack.run(plId, g2FlacKeepId, 5);
+  addPlTrack.run(plId, g5RemoveId, 6);
+
+  // Likes & play history on removed copies
+  testDb.prepare('INSERT INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, g2M4aRemoveId);
+  testDb.prepare('INSERT INTO liked_tracks (user_id, track_id) VALUES (?, ?)').run(userId, g5RemoveId);
+  testDb
+    .prepare(
+      'INSERT INTO play_history (user_id, title, artist, track_id, played_at) VALUES (?, ?, ?, ?, ?)'
+    )
+    .run(userId, 'Trio Anthem', 'Artist Two', g2Mp3RemoveId, 1700000000000);
+
+  const progressEvents: BulkProgressEvent[] = [];
+
+  const summary = resolveAllSafeDuplicates(testDb, {
+    userId,
+    userRole: 'admin',
+    playingTrackIds: new Set([g3PlayingId]),
+    silentLog: true,
+    onProgress: (ev) => progressEvents.push(ev),
+    beforeGroupCommitHook: (group) => {
+      if (group.copies.some((c) => c.id === g5KeepId)) {
+        throw new Error('simulated mid-run group failure');
+      }
+    },
+  });
+
+  // Planned: Group 1 (1) + Group 2 (2) + Group 5 (1) = 4 copies across 3 safe groups
+  // Skipped: Group 3 (playing) + Group 4 (2s apart) = 2 skipped groups
+  // Failed: Group 5 (rolled back) = 1 failed group
+  // Removed: Group 1 (1) + Group 2 (2) = 3 copies across 2 resolved groups
+  assert.equal(summary.totalPlanned, 4);
+  assert.equal(summary.removedCount, 3);
+  assert.equal(summary.resolvedGroupCount, 2);
+  assert.equal(summary.skippedCount, 2);
+  assert.equal(summary.failedCount, 1);
+
+  assert.ok(progressEvents.some((e) => e.type === 'start' && e.totalPlanned === 4));
+  assert.ok(progressEvents.some((e) => e.type === 'done' && e.summary.removedCount === 3));
+
+  // Verify skip reasons mention "Skipped, review manually"
+  for (const skipped of summary.skipped) {
+    assert.match(skipped.reason, /Skipped, review manually/);
+  }
+  assert.equal(summary.failed[0].reason, 'simulated mid-run group failure');
+
+  // Group 1: oldest kept, newer removed
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g1OldKeepId));
+  assert.equal(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g1NewRemoveId), undefined);
+
+  // Group 2: FLAC kept, MP3 & M4A removed; liked & history carried over to FLAC
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g2FlacKeepId));
+  assert.equal(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g2Mp3RemoveId), undefined);
+  assert.equal(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g2M4aRemoveId), undefined);
+  assert.ok(
+    testDb
+      .prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?')
+      .get(userId, g2FlacKeepId)
+  );
+  assert.deepEqual(
+    testDb.prepare('SELECT track_id FROM play_history WHERE user_id = ?').all(userId),
+    [{track_id: g2FlacKeepId}]
+  );
+
+  // Group 3 (playing) and Group 4 (2s apart): completely untouched
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g3KeepId));
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g3PlayingId));
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g4CopyA));
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g4CopyB));
+
+  // Group 5 (failed tx): completely rolled back and unchanged
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g5KeepId));
+  assert.ok(testDb.prepare('SELECT id FROM tracks WHERE id = ?').get(g5RemoveId));
+  assert.ok(
+    testDb
+      .prepare('SELECT 1 FROM liked_tracks WHERE user_id = ? AND track_id = ?')
+      .get(userId, g5RemoveId)
+  );
+  assert.equal(
+    testDb.prepare('SELECT 1 FROM library_ignored_paths WHERE rel_path = ?').get('Music/fail-b.mp3'),
+    undefined
+  );
+
+  // Playlist: anchor, Group 1 kept once (at pos 1), Group 2 kept once (at pos 2), Group 5 untouched (at pos 3)
+  const plRows = testDb
+    .prepare('SELECT track_id, position FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC')
+    .all(plId) as Array<{track_id: number; position: number}>;
+  assert.deepEqual(plRows, [
+    {track_id: anchorId, position: 0},
+    {track_id: g1OldKeepId, position: 1},
+    {track_id: g2FlacKeepId, position: 2},
+    {track_id: g5RemoveId, position: 3},
+  ]);
+
+  // Ignored paths recorded ONLY for committed removals (Group 1 & Group 2)
+  const ignoredPaths = (
+    testDb.prepare('SELECT rel_path FROM library_ignored_paths ORDER BY rel_path ASC').all() as Array<{
+      rel_path: string;
+    }>
+  ).map((r) => r.rel_path);
+  assert.deepEqual(ignoredPaths, ['Music/trio.mp3', 'Music/twin-b.mp3', 'YouTube/trio.m4a']);
+
+  // Remaining groups in library should ONLY be the 2 skipped groups + 1 failed group
+  const remaining = findDuplicateGroupsForUser(testDb, {
+    userId,
+    userRole: 'admin',
+    playingTrackIds: new Set([g3PlayingId]),
+  });
+  assert.equal(remaining.length, 3);
+
+  testDb.close();
+});
+
+test('deterministic tie-breaker keeps oldest added_at, then lowest id when all else is equal', () => {
+  const sameDate = detectDuplicateGroups([
+    makeTrack({
+      id: 502,
+      title: 'Identical Tie',
+      artist: 'Artist Tie',
+      duration: 180,
+      format: 'm4a',
+      bitrate: 256,
+      playlistCount: 2,
+      added_at: '2025-06-01 12:00:00',
+    }),
+    makeTrack({
+      id: 501,
+      title: 'Identical Tie',
+      artist: 'Artist Tie',
+      duration: 180,
+      format: 'm4a',
+      bitrate: 256,
+      playlistCount: 2,
+      added_at: '2025-06-01 12:00:00',
+    }),
+  ]);
+  assert.equal(sameDate[0].suggestedKeepId, 501);
+  assert.equal(sameDate[0].safeForBulk, true);
+});
+
+test('per-user bulk concurrency lock rejects overlapping runs and releases cleanly', () => {
+  const testUserId = 999991;
+  assert.equal(isBulkDedupeRunning(testUserId), false);
+  assert.equal(tryAcquireBulkDedupeLock(testUserId), true);
+  assert.equal(isBulkDedupeRunning(testUserId), true);
+  assert.equal(tryAcquireBulkDedupeLock(testUserId), false);
+  releaseBulkDedupeLock(testUserId);
+  assert.equal(isBulkDedupeRunning(testUserId), false);
+  assert.equal(tryAcquireBulkDedupeLock(testUserId), true);
+  releaseBulkDedupeLock(testUserId);
+});
+

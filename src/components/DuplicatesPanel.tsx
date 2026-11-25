@@ -1,19 +1,21 @@
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Copy,
   Disc3,
   Heart,
   Loader2,
   RefreshCw,
+  Sparkles,
   Trash2,
   Volume2,
   X,
 } from 'lucide-react';
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {usePlayer} from '../context/PlayerContext';
 import {useLayoutMode} from '../hooks/useLayoutMode';
-import {apiFetch, formatDuration} from '../lib/api';
+import {apiFetch, formatDuration, getStoredToken} from '../lib/api';
 import type {Track} from '../types';
 import {AlbumArt} from './AlbumArt';
 
@@ -43,6 +45,9 @@ export interface DuplicateGroupItem {
   label: 'Same song' | 'Probably the same';
   suggestedKeepId: number;
   copies: DuplicateCopyItem[];
+  safeForBulk: boolean;
+  bulkSkipReason: string | null;
+  bulkRemovableCount: number;
 }
 
 interface DuplicatesListResponse {
@@ -60,10 +65,76 @@ interface ResolveDuplicateResponse {
   remainingGroup: DuplicateGroupItem | null;
 }
 
+export interface BulkResolvedReplacementItem {
+  removeId: number;
+  keepId: number;
+  keepLiked: boolean;
+  playlistsUpdated: number;
+  keepTrack: Track;
+}
+
+interface BulkSkippedGroupItem {
+  groupId: string;
+  title: string;
+  artist: string;
+  copyCount: number;
+  reason: string;
+}
+
+interface BulkFailedGroupItem {
+  groupId: string;
+  title: string;
+  artist: string;
+  copyCount: number;
+  reason: string;
+}
+
+interface BulkResolveSummaryResponse {
+  totalPlanned: number;
+  removedCount: number;
+  resolvedGroupCount: number;
+  skippedCount: number;
+  failedCount: number;
+  replacements: BulkResolvedReplacementItem[];
+  skipped: BulkSkippedGroupItem[];
+  failed: BulkFailedGroupItem[];
+}
+
+type BulkStreamEvent =
+  | {
+      type: 'start';
+      totalPlanned: number;
+      safeGroupCount: number;
+      skippedGroupCount: number;
+    }
+  | {
+      type: 'progress';
+      removedCount: number;
+      totalPlanned: number;
+      groupId: string;
+      status: 'resolved' | 'failed';
+      replacements?: BulkResolvedReplacementItem[];
+      error?: string;
+    }
+  | {
+      type: 'done';
+      summary: BulkResolveSummaryResponse;
+    }
+  | {
+      type: 'error';
+      error: string;
+    };
+
 interface ConfirmRemoveTarget {
   group: DuplicateGroupItem;
   removeCopy: DuplicateCopyItem;
   keepCopy: DuplicateCopyItem;
+}
+
+interface ConfirmBulkSnapshot {
+  removableCopies: number;
+  safeGroups: number;
+  skippedGroups: number;
 }
 
 interface DuplicatesPanelProps {
@@ -75,12 +146,14 @@ interface DuplicatesPanelProps {
     keepLiked: boolean;
     playlistsUpdated: number;
   }) => void;
+  onBulkDuplicatesRemoved?: (replacements: BulkResolvedReplacementItem[]) => void;
 }
 
 export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
   open,
   onClose,
   onDuplicateRemoved,
+  onBulkDuplicatesRemoved,
 }) => {
   const layoutMode = useLayoutMode();
   const isDesktop = layoutMode === 'desktop';
@@ -99,6 +172,13 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+
+  // Bulk resolve state
+  const [confirmBulk, setConfirmBulk] = useState<ConfirmBulkSnapshot | null>(null);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{removed: number; total: number} | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkSummary, setBulkSummary] = useState<BulkResolveSummaryResponse | null>(null);
 
   const activeNumericTrackId =
     isPlaying && currentTrack && typeof currentTrack.id === 'number' ? currentTrack.id : null;
@@ -124,18 +204,28 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
   useEffect(() => {
     if (!open) {
       setConfirmTarget(null);
+      setConfirmBulk(null);
       setResolveError(null);
+      setBulkError(null);
       setStatusNotice(null);
+      setBulkSummary(null);
       return;
     }
     void fetchDuplicates();
   }, [open, fetchDuplicates]);
 
-  // Close on Escape (confirmation dialog first, then panel)
+  // Close on Escape (confirmation dialogs first, then panel)
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      if (confirmBulk) {
+        if (!bulkRunning) {
+          setConfirmBulk(null);
+          setBulkError(null);
+        }
+        return;
+      }
       if (confirmTarget) {
         if (!resolving) {
           setConfirmTarget(null);
@@ -143,11 +233,13 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
         }
         return;
       }
-      onClose();
+      if (!bulkRunning) {
+        onClose();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, confirmTarget, resolving, onClose]);
+  }, [open, confirmTarget, confirmBulk, resolving, bulkRunning, onClose]);
 
   useEffect(() => {
     if (!statusNotice) return;
@@ -155,12 +247,32 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
     return () => window.clearTimeout(timer);
   }, [statusNotice]);
 
-  if (!open) return null;
+  const isCopyPlaying = useCallback(
+    (copy: DuplicateCopyItem): boolean => {
+      if (copy.isPlaying) return true;
+      return activeNumericTrackId !== null && activeNumericTrackId === copy.id;
+    },
+    [activeNumericTrackId]
+  );
 
-  const isCopyPlaying = (copy: DuplicateCopyItem): boolean => {
-    if (copy.isPlaying) return true;
-    return activeNumericTrackId !== null && activeNumericTrackId === copy.id;
-  };
+  const liveBulkPlan = useMemo(() => {
+    let removableCopies = 0;
+    let safeGroups = 0;
+    let skippedGroups = 0;
+    for (const group of groups) {
+      const hasPlaying = group.copies.some((c) => isCopyPlaying(c));
+      const isSafe = Boolean(group.safeForBulk) && !hasPlaying && group.copies.length >= 2;
+      if (isSafe) {
+        safeGroups += 1;
+        removableCopies += Math.max(0, group.copies.length - 1);
+      } else {
+        skippedGroups += 1;
+      }
+    }
+    return {removableCopies, safeGroups, skippedGroups};
+  }, [groups, isCopyPlaying]);
+
+  if (!open) return null;
 
   const pickKeepCopyForRemoval = (
     group: DuplicateGroupItem,
@@ -174,7 +286,7 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
   };
 
   const handleRequestRemove = (group: DuplicateGroupItem, copy: DuplicateCopyItem) => {
-    if (group.copies.length <= 1 || isCopyPlaying(copy)) return;
+    if (group.copies.length <= 1 || isCopyPlaying(copy) || bulkRunning) return;
     const keepCopy = pickKeepCopyForRemoval(group, copy);
     if (!keepCopy) return;
     setResolveError(null);
@@ -182,7 +294,7 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
   };
 
   const handleConfirmRemove = async () => {
-    if (!confirmTarget || resolving) return;
+    if (!confirmTarget || resolving || bulkRunning) return;
     const {group, removeCopy, keepCopy} = confirmTarget;
     setResolving(true);
     setResolveError(null);
@@ -231,54 +343,262 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
     }
   };
 
+  const handleRequestBulkRemove = () => {
+    if (liveBulkPlan.removableCopies <= 0 || bulkRunning || resolving || loading) return;
+    setBulkError(null);
+    setConfirmBulk({
+      removableCopies: liveBulkPlan.removableCopies,
+      safeGroups: liveBulkPlan.safeGroups,
+      skippedGroups: liveBulkPlan.skippedGroups,
+    });
+  };
+
+  const handleConfirmBulkRemove = async () => {
+    if (!confirmBulk || bulkRunning) return;
+    const plannedTotal = confirmBulk.removableCopies;
+    setConfirmBulk(null);
+    setBulkRunning(true);
+    setBulkError(null);
+    setBulkSummary(null);
+    setBulkProgress({removed: 0, total: plannedTotal});
+
+    const appliedReplacementIds = new Set<number>();
+    const allReplacements: BulkResolvedReplacementItem[] = [];
+
+    const applyReplacements = (items: BulkResolvedReplacementItem[] | undefined) => {
+      if (!items || items.length === 0) return;
+      for (const item of items) {
+        if (appliedReplacementIds.has(item.removeId)) continue;
+        appliedReplacementIds.add(item.removeId);
+        allReplacements.push(item);
+        if (item.keepTrack) {
+          replaceDuplicateInQueue(item.removeId, item.keepTrack);
+          syncTrackLikeState(item.keepId, item.keepLiked);
+        }
+      }
+    };
+
+    try {
+      const token = getStoredToken();
+      const headers = new Headers({
+        'Content-Type': 'application/json',
+        Accept: 'application/x-ndjson',
+      });
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+
+      const playingId = activePlayingIdRef.current;
+      const response = await fetch('/api/library/duplicates/resolve-all', {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify(playingId ? {playingTrackId: playingId} : {}),
+      });
+
+      if (!response.ok) {
+        let message = `Request failed (${response.status})`;
+        try {
+          const errJson = (await response.json()) as {error?: string};
+          if (errJson.error) message = errJson.error;
+        } catch {
+          // ignore non-JSON body
+        }
+        throw new Error(message);
+      }
+
+      let finalSummary: BulkResolveSummaryResponse | null = null;
+      const contentType = response.headers.get('content-type') || '';
+
+      if (contentType.includes('application/x-ndjson') && response.body) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const processLine = (rawLine: string) => {
+          const line = rawLine.trim();
+          if (!line) return;
+          const ev = JSON.parse(line) as BulkStreamEvent;
+          if (ev.type === 'start') {
+            setBulkProgress({removed: 0, total: ev.totalPlanned});
+          } else if (ev.type === 'progress') {
+            setBulkProgress({removed: ev.removedCount, total: ev.totalPlanned});
+            applyReplacements(ev.replacements);
+          } else if (ev.type === 'done') {
+            finalSummary = ev.summary;
+            setBulkProgress({
+              removed: ev.summary.removedCount,
+              total: ev.summary.totalPlanned,
+            });
+            applyReplacements(ev.summary.replacements);
+          } else if (ev.type === 'error') {
+            throw new Error(ev.error || 'Bulk duplicate removal failed');
+          }
+        };
+
+        while (true) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {stream: true});
+          let nlIdx = buffer.indexOf('\n');
+          while (nlIdx !== -1) {
+            const line = buffer.slice(0, nlIdx);
+            buffer = buffer.slice(nlIdx + 1);
+            processLine(line);
+            nlIdx = buffer.indexOf('\n');
+          }
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          processLine(buffer);
+        }
+      } else {
+        const json = (await response.json()) as BulkResolveSummaryResponse;
+        finalSummary = json;
+        setBulkProgress({removed: json.removedCount, total: json.totalPlanned});
+        applyReplacements(json.replacements);
+      }
+
+      if (finalSummary) {
+        setBulkSummary(finalSummary);
+      }
+      if (allReplacements.length > 0) {
+        onBulkDuplicatesRemoved?.(allReplacements);
+      }
+      bumpLibraryRefresh();
+      await fetchDuplicates();
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : 'Bulk duplicate removal failed');
+      if (allReplacements.length > 0) {
+        onBulkDuplicatesRemoved?.(allReplacements);
+        bumpLibraryRefresh();
+        await fetchDuplicates();
+      }
+    } finally {
+      setBulkRunning(false);
+      setBulkProgress(null);
+    }
+  };
+
   const totalExtraCopies = groups.reduce((acc, g) => acc + Math.max(0, g.copies.length - 1), 0);
 
   const panelContent = (
     <div className="flex h-full flex-col min-h-0">
       {/* Header */}
-      <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 sm:px-5 py-3.5 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)] shrink-0">
-            <Copy className="w-4 h-4" />
+      <div className="border-b border-[var(--border-subtle)] px-4 sm:px-5 py-3.5 shrink-0 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)] shrink-0">
+              <Copy className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-[var(--text-primary)] leading-tight truncate">
+                Duplicates
+              </h2>
+              <p className="text-xs text-[var(--text-secondary)] truncate">
+                {loading
+                  ? 'Checking your whole library...'
+                  : groups.length === 0
+                    ? 'Whole library checked'
+                    : `${groups.length} ${groups.length === 1 ? 'group' : 'groups'}, ${totalExtraCopies} extra ${totalExtraCopies === 1 ? 'copy' : 'copies'}`}
+              </p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h2 className="text-base font-bold text-[var(--text-primary)] leading-tight truncate">
-              Duplicates
-            </h2>
-            <p className="text-xs text-[var(--text-secondary)] truncate">
-              {loading
-                ? 'Checking your whole library...'
-                : groups.length === 0
-                  ? 'Whole library checked'
-                  : `${groups.length} ${groups.length === 1 ? 'group' : 'groups'} · ${totalExtraCopies} extra ${totalExtraCopies === 1 ? 'copy' : 'copies'}`}
-            </p>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => void fetchDuplicates()}
+              disabled={loading || resolving || bulkRunning}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] disabled:opacity-40 transition-colors"
+              title="Re-scan for duplicates"
+              aria-label="Re-scan for duplicates"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={bulkRunning}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] disabled:opacity-40 transition-colors"
+              title="Close duplicates panel"
+              aria-label="Close duplicates panel"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => void fetchDuplicates()}
-            disabled={loading || resolving}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] disabled:opacity-40 transition-colors"
-            title="Re-scan for duplicates"
-            aria-label="Re-scan for duplicates"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--surface-overlay)] hover:text-[var(--text-primary)] transition-colors"
-            title="Close duplicates panel"
-            aria-label="Close duplicates panel"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        {/* Primary Bulk Action Button */}
+        <button
+          type="button"
+          disabled={liveBulkPlan.removableCopies === 0 || loading || resolving || bulkRunning}
+          onClick={handleRequestBulkRemove}
+          className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--accent)] px-4 py-2.5 text-xs font-bold text-[var(--accent-contrast)] shadow-sm hover:bg-[var(--accent-hover)] disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
+        >
+          {bulkRunning ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              <span>
+                Removed {bulkProgress?.removed ?? 0} of {bulkProgress?.total ?? 0}
+              </span>
+            </>
+          ) : (
+            <>
+              <Sparkles className="w-4 h-4 shrink-0" />
+              <span>Remove all suggested duplicates ({liveBulkPlan.removableCopies})</span>
+            </>
+          )}
+        </button>
       </div>
 
-      {/* Inline status notice */}
+      {/* Live Bulk Progress Bar */}
+      {bulkRunning && bulkProgress && (
+        <div className="mx-4 sm:mx-5 mt-3 rounded-xl border border-[var(--accent)]/30 bg-[var(--accent-soft)]/70 p-3 space-y-2 shrink-0">
+          <div className="flex items-center justify-between text-xs font-semibold text-[var(--text-primary)]">
+            <span className="inline-flex items-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+              Removed {bulkProgress.removed} of {bulkProgress.total}
+            </span>
+            <span className="font-mono tabular-nums text-[var(--text-secondary)]">
+              {bulkProgress.total > 0
+                ? `${Math.min(100, Math.round((bulkProgress.removed / bulkProgress.total) * 100))}%`
+                : '0%'}
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--surface-overlay)]">
+            <div
+              className="h-full rounded-full bg-[var(--accent)] transition-all duration-200"
+              style={{
+                width:
+                  bulkProgress.total > 0
+                    ? `${Math.min(100, (bulkProgress.removed / bulkProgress.total) * 100)}%`
+                    : '0%',
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Error Banner */}
+      {bulkError && (
+        <div className="mx-4 sm:mx-5 mt-3 flex items-start justify-between gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-300 shrink-0">
+          <div className="flex items-start gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{bulkError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBulkError(null)}
+            className="text-rose-300/80 hover:text-rose-200 shrink-0"
+            aria-label="Dismiss error"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Inline single-removal status notice */}
       {statusNotice && (
         <div className="mx-4 sm:mx-5 mt-3 flex items-center gap-2 rounded-lg border border-[var(--accent)]/30 bg-[var(--accent-soft)] px-3 py-2 text-xs font-medium text-[var(--accent)] shrink-0">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -288,6 +608,95 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-4 sm:px-5 py-4 space-y-4">
+        {/* Bulk Completion Summary */}
+        {bulkSummary && !bulkRunning && (
+          <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <CheckCircle2 className="w-4 h-4 text-[var(--accent)] shrink-0" />
+                <h3 className="text-xs font-bold text-[var(--text-primary)]">
+                  Bulk cleanup complete
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBulkSummary(null)}
+                className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors shrink-0"
+                aria-label="Dismiss summary"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="rounded-lg bg-[var(--surface-overlay)]/60 px-2 py-1.5">
+                <p className="font-mono text-sm font-bold text-[var(--accent)] tabular-nums">
+                  {bulkSummary.removedCount}
+                </p>
+                <p className="text-[10px] text-[var(--text-secondary)]">Removed</p>
+              </div>
+              <div className="rounded-lg bg-[var(--surface-overlay)]/60 px-2 py-1.5">
+                <p className="font-mono text-sm font-bold text-amber-400 tabular-nums">
+                  {bulkSummary.skippedCount}
+                </p>
+                <p className="text-[10px] text-[var(--text-secondary)]">Skipped</p>
+              </div>
+              <div className="rounded-lg bg-[var(--surface-overlay)]/60 px-2 py-1.5">
+                <p className="font-mono text-sm font-bold text-rose-400 tabular-nums">
+                  {bulkSummary.failedCount}
+                </p>
+                <p className="text-[10px] text-[var(--text-secondary)]">Failed</p>
+              </div>
+            </div>
+
+            {bulkSummary.skipped.length > 0 && (
+              <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
+                <p className="text-[11px] font-semibold text-amber-400 flex items-center gap-1">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  Skipped, review manually ({bulkSummary.skipped.length})
+                </p>
+                <ul className="space-y-1">
+                  {bulkSummary.skipped.map((item) => (
+                    <li
+                      key={item.groupId}
+                      className="text-[11px] text-[var(--text-secondary)] leading-snug"
+                    >
+                      <span className="font-semibold text-[var(--text-primary)]">
+                        {item.title}
+                      </span>{' '}
+                      <span className="text-[var(--text-muted)]">({item.artist})</span> —{' '}
+                      {item.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {bulkSummary.failed.length > 0 && (
+              <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
+                <p className="text-[11px] font-semibold text-rose-400 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  Failed ({bulkSummary.failed.length})
+                </p>
+                <ul className="space-y-1">
+                  {bulkSummary.failed.map((item) => (
+                    <li
+                      key={item.groupId}
+                      className="text-[11px] text-rose-300/90 leading-snug"
+                    >
+                      <span className="font-semibold text-[var(--text-primary)]">
+                        {item.title}
+                      </span>{' '}
+                      <span className="text-[var(--text-muted)]">({item.artist})</span> —{' '}
+                      {item.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        )}
+
         {loading ? (
           <div className="flex flex-col items-center justify-center py-16 text-center gap-3">
             <Loader2 className="w-7 h-7 animate-spin text-[var(--accent)]" />
@@ -338,6 +747,11 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
           groups.map((group) => {
             const lead = group.copies[0];
             const isLastCopyInGroup = group.copies.length <= 1;
+            const hasPlayingCopy = group.copies.some((c) => isCopyPlaying(c));
+            const groupSafeLive = Boolean(group.safeForBulk) && !hasPlayingCopy;
+            const manualReason = hasPlayingCopy
+              ? 'Skipped, review manually (currently playing)'
+              : group.bulkSkipReason || 'Skipped, review manually';
 
             return (
               <section
@@ -355,22 +769,33 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
                       {group.copies.length === 1 ? 'copy' : 'copies'}
                     </p>
                   </div>
-                  <span
-                    className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-semibold ${
-                      group.matchType === 'definite'
-                        ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                        : 'bg-[var(--surface-overlay)] text-[var(--text-secondary)] border border-[var(--border-subtle)]'
-                    }`}
-                  >
-                    {group.label}
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {!groupSafeLive && (
+                      <span
+                        title={manualReason}
+                        className="rounded-md bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400"
+                      >
+                        Review manually
+                      </span>
+                    )}
+                    <span
+                      className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                        group.matchType === 'definite'
+                          ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : 'bg-[var(--surface-overlay)] text-[var(--text-secondary)] border border-[var(--border-subtle)]'
+                      }`}
+                    >
+                      {group.label}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Copies List */}
                 <div className="divide-y divide-[var(--border-subtle)]">
                   {group.copies.map((copy) => {
                     const playingNow = isCopyPlaying(copy);
-                    const removeDisabled = isLastCopyInGroup || playingNow || resolving;
+                    const removeDisabled =
+                      isLastCopyInGroup || playingNow || resolving || bulkRunning;
                     const disabledTooltip = playingNow
                       ? 'Playing now'
                       : isLastCopyInGroup
@@ -445,10 +870,7 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
                         </div>
 
                         <div className="flex items-center justify-end">
-                          <span
-                            title={disabledTooltip}
-                            className="inline-flex"
-                          >
+                          <span title={disabledTooltip} className="inline-flex">
                             <button
                               type="button"
                               disabled={removeDisabled}
@@ -475,7 +897,7 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
         )}
       </div>
 
-      {/* Confirmation Dialog */}
+      {/* Single-Copy Confirmation Dialog */}
       {confirmTarget && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 backdrop-blur-xs p-4"
@@ -553,6 +975,67 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* Bulk Confirmation Dialog */}
+      {confirmBulk && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 backdrop-blur-xs p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-bulk-duplicates-title"
+          onClick={() => {
+            if (!bulkRunning) {
+              setConfirmBulk(null);
+              setBulkError(null);
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="space-y-1.5">
+              <h3
+                id="confirm-bulk-duplicates-title"
+                className="text-base font-bold text-[var(--text-primary)]"
+              >
+                Remove all suggested duplicates
+              </h3>
+              <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
+                Remove {confirmBulk.removableCopies}{' '}
+                {confirmBulk.removableCopies === 1 ? 'copy' : 'copies'} from{' '}
+                {confirmBulk.safeGroups} {confirmBulk.safeGroups === 1 ? 'group' : 'groups'}?{' '}
+                {confirmBulk.skippedGroups}{' '}
+                {confirmBulk.skippedGroups === 1 ? 'group needs' : 'groups need'} manual review
+                and will be skipped. Playlists, favourites and history will be moved to the kept
+                copy. Music files are not deleted.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={bulkRunning}
+                onClick={() => {
+                  setConfirmBulk(null);
+                  setBulkError(null);
+                }}
+                className="rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-overlay)] px-4 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-overlay-hover)] disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={bulkRunning}
+                onClick={() => void handleConfirmBulkRemove()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50 transition-colors"
+              >
+                <span>Remove all</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -561,7 +1044,9 @@ export const DuplicatesPanel: React.FC<DuplicatesPanelProps> = ({
       <div className="fixed inset-0 z-50 flex justify-end">
         <div
           className="fixed inset-0 bg-black/45 backdrop-blur-[2px]"
-          onClick={onClose}
+          onClick={() => {
+            if (!bulkRunning) onClose();
+          }}
           aria-hidden="true"
         />
         <aside

@@ -8,7 +8,10 @@ import {deviceHub} from '../deviceHub.ts';
 import {
   DuplicateResolveError,
   findDuplicateGroupsForUser,
+  releaseBulkDedupeLock,
+  resolveAllSafeDuplicatesAsync,
   resolveDuplicatePair,
+  tryAcquireBulkDedupeLock,
 } from '../duplicates.ts';
 import {resolveTrackLyrics} from '../lyrics.ts';
 
@@ -1265,4 +1268,71 @@ libraryRouter.post('/library/duplicates/resolve', requireAuth, (req: AuthRequest
     res.status(500).json({error: 'Failed to remove duplicate copy'});
   }
 });
+
+libraryRouter.post('/library/duplicates/resolve-all', requireAuth, async (req: AuthRequest, res) => {
+  const userId = req.user!.id;
+  if (!tryAcquireBulkDedupeLock(userId)) {
+    res.status(409).json({error: 'A bulk duplicate removal is already running'});
+    return;
+  }
+
+  const wantsStream =
+    typeof req.headers.accept === 'string' &&
+    req.headers.accept.includes('application/x-ndjson');
+
+  const writeNdjson = (payload: unknown): void => {
+    if (!wantsStream || res.writableEnded || res.destroyed) return;
+    try {
+      res.write(`${JSON.stringify(payload)}\n`);
+    } catch {
+      // client disconnected; let remaining server-side groups finish cleanly
+    }
+  };
+
+  try {
+    const playingTrackIds = getActivePlayingTrackIdsForUser(userId, req.body?.playingTrackId);
+
+    if (wantsStream) {
+      res.status(200);
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders?.();
+    }
+
+    const summary = await resolveAllSafeDuplicatesAsync(db, {
+      userId,
+      userRole: req.user!.role,
+      playingTrackIds,
+      onProgress: wantsStream ? writeNdjson : undefined,
+    });
+
+    if (wantsStream) {
+      if (!res.writableEnded) {
+        res.end();
+      }
+    } else {
+      res.json({
+        ok: true,
+        ...summary,
+      });
+    }
+  } catch (err) {
+    console.error(
+      '[library-dedupe] failed bulk duplicate removal:',
+      err instanceof Error ? err.message : String(err)
+    );
+    if (wantsStream) {
+      writeNdjson({type: 'error', error: 'Bulk duplicate removal failed'});
+      if (!res.writableEnded) {
+        res.end();
+      }
+    } else if (!res.headersSent) {
+      res.status(500).json({error: 'Bulk duplicate removal failed'});
+    }
+  } finally {
+    releaseBulkDedupeLock(userId);
+  }
+});
+
 

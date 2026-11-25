@@ -101,6 +101,14 @@ export interface DuplicateGroup {
   label: 'Same song' | 'Probably the same';
   suggestedKeepId: number;
   copies: DuplicateCopy[];
+  safeForBulk: boolean;
+  bulkSkipReason: string | null;
+  bulkRemovableCount: number;
+}
+
+export interface BulkSafetyEvaluation {
+  safe: boolean;
+  skipReason: string | null;
 }
 
 export interface ResolvedKeepTrackSummary {
@@ -129,6 +137,62 @@ export interface ResolveDuplicateResult {
   keepTrack: ResolvedKeepTrackSummary;
   remainingGroup: DuplicateGroup | null;
 }
+
+export interface BulkResolvedReplacement {
+  removeId: number;
+  keepId: number;
+  keepLiked: boolean;
+  playlistsUpdated: number;
+  keepTrack: ResolvedKeepTrackSummary;
+}
+
+export interface BulkSkippedGroup {
+  groupId: string;
+  title: string;
+  artist: string;
+  copyCount: number;
+  reason: string;
+}
+
+export interface BulkFailedGroup {
+  groupId: string;
+  title: string;
+  artist: string;
+  copyCount: number;
+  reason: string;
+}
+
+export interface BulkResolveSummary {
+  totalPlanned: number;
+  removedCount: number;
+  resolvedGroupCount: number;
+  skippedCount: number;
+  failedCount: number;
+  replacements: BulkResolvedReplacement[];
+  skipped: BulkSkippedGroup[];
+  failed: BulkFailedGroup[];
+}
+
+export type BulkProgressEvent =
+  | {
+      type: 'start';
+      totalPlanned: number;
+      safeGroupCount: number;
+      skippedGroupCount: number;
+    }
+  | {
+      type: 'progress';
+      removedCount: number;
+      totalPlanned: number;
+      groupId: string;
+      status: 'resolved' | 'failed';
+      replacements?: BulkResolvedReplacement[];
+      error?: string;
+    }
+  | {
+      type: 'done';
+      summary: BulkResolveSummary;
+    };
 
 export class DuplicateResolveError extends Error {
   status: number;
@@ -492,6 +556,7 @@ export function detectDuplicateGroups(tracks: DuplicateInputTrack[]): DuplicateG
         return compareCopiesForKeep(a, b);
       });
 
+    const safety = evaluateBulkSafety(copies);
     const sortedIds = copies.map((c) => c.id).sort((a, b) => a - b);
     groups.push({
       id: `dup-${sortedIds.join('-')}`,
@@ -499,6 +564,9 @@ export function detectDuplicateGroups(tracks: DuplicateInputTrack[]): DuplicateG
       label,
       suggestedKeepId,
       copies,
+      safeForBulk: safety.safe,
+      bulkSkipReason: safety.skipReason,
+      bulkRemovableCount: safety.safe ? Math.max(0, copies.length - 1) : 0,
     });
   }
 
@@ -603,6 +671,196 @@ export function findDuplicateGroupsForUser(
   return detectDuplicateGroups(inputs);
 }
 
+export function evaluateBulkSafety(
+  copies: DuplicateCopy[],
+  playingTrackIds?: ReadonlySet<number>
+): BulkSafetyEvaluation {
+  if (copies.length < 2) {
+    return {safe: false, skipReason: 'Skipped, review manually (only one copy)'};
+  }
+
+  // 1. No copy in the group may be playing right now
+  if (copies.some((c) => c.isPlaying || Boolean(playingTrackIds?.has(c.id)))) {
+    return {safe: false, skipReason: 'Skipped, review manually (currently playing)'};
+  }
+
+  // 2. Normalized title, primary artist, and version markers must match across all copies
+  const firstTitle = normalizeDuplicateTitle(copies[0].title);
+  const firstArtist = extractPrimaryArtist(copies[0].artist);
+  const firstVersion = extractVersionMarkers(copies[0].title).join('|');
+  if (!firstTitle || !firstArtist) {
+    return {safe: false, skipReason: 'Skipped, review manually (missing title or artist)'};
+  }
+  for (let i = 1; i < copies.length; i++) {
+    const t = normalizeDuplicateTitle(copies[i].title);
+    const a = extractPrimaryArtist(copies[i].artist);
+    const v = extractVersionMarkers(copies[i].title).join('|');
+    if (t !== firstTitle || a !== firstArtist || v !== firstVersion) {
+      return {safe: false, skipReason: 'Skipped, review manually (title or artist differs)'};
+    }
+  }
+
+  // 3. Durations must all be known (> 0) and within 1 second of each other
+  let minDur = Infinity;
+  let maxDur = -Infinity;
+  for (const copy of copies) {
+    const dur = Number(copy.duration);
+    if (!Number.isFinite(dur) || dur <= 0) {
+      return {safe: false, skipReason: 'Skipped, review manually (missing track duration)'};
+    }
+    if (dur < minDur) minDur = dur;
+    if (dur > maxDur) maxDur = dur;
+  }
+  if (maxDur - minDur > 1) {
+    return {
+      safe: false,
+      skipReason: 'Skipped, review manually (durations differ by more than 1s)',
+    };
+  }
+
+  return {safe: true, skipReason: null};
+}
+
+/**
+ * Shared per-copy merge mutations executed inside an active SQLite transaction.
+ * Used identically by both single removal and bulk removal.
+ */
+function mergeSingleCopyInTransaction(
+  database: Database.Database,
+  params: {keepId: number; removeId: number; removeRelPath: string}
+): {playlistsUpdated: number} {
+  const {keepId, removeId, removeRelPath} = params;
+  let playlistsUpdated = 0;
+
+  // 1. Update playlist_tracks across all playlists referencing removeId
+  const affectedPlaylists = database
+    .prepare('SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?')
+    .all(removeId) as Array<{playlist_id: number}>;
+
+  const getPlaylistRowsStmt = database.prepare(
+    `SELECT id, track_id, position
+     FROM playlist_tracks
+     WHERE playlist_id = ?
+     ORDER BY position ASC, id ASC`
+  );
+  const updatePlaylistRowTrackStmt = database.prepare(
+    'UPDATE playlist_tracks SET track_id = ? WHERE id = ?'
+  );
+  const deletePlaylistRowStmt = database.prepare('DELETE FROM playlist_tracks WHERE id = ?');
+  const updatePlaylistRowPositionStmt = database.prepare(
+    'UPDATE playlist_tracks SET position = ? WHERE id = ?'
+  );
+  const touchPlaylistStmt = database.prepare(
+    "UPDATE playlists SET updated_at = datetime('now') WHERE id = ?"
+  );
+
+  for (const {playlist_id: playlistId} of affectedPlaylists) {
+    const rows = getPlaylistRowsStmt.all(playlistId) as Array<{
+      id: number;
+      track_id: number;
+      position: number;
+    }>;
+
+    let seenTarget = false;
+    const survivingRowIds: number[] = [];
+
+    for (const row of rows) {
+      if (row.track_id === removeId || row.track_id === keepId) {
+        if (!seenTarget) {
+          seenTarget = true;
+          if (row.track_id === removeId) {
+            updatePlaylistRowTrackStmt.run(keepId, row.id);
+          }
+          survivingRowIds.push(row.id);
+        } else {
+          // Collapse duplicate occurrence so only the first slot survives
+          deletePlaylistRowStmt.run(row.id);
+        }
+      } else {
+        survivingRowIds.push(row.id);
+      }
+    }
+
+    for (let pos = 0; pos < survivingRowIds.length; pos++) {
+      updatePlaylistRowPositionStmt.run(pos, survivingRowIds[pos]);
+    }
+    touchPlaylistStmt.run(playlistId);
+    playlistsUpdated += 1;
+  }
+
+  // 2. Carry over liked_tracks (if either copy was liked, keepId is liked)
+  const removedLikes = database
+    .prepare('SELECT user_id, liked_at FROM liked_tracks WHERE track_id = ?')
+    .all(removeId) as Array<{user_id: number; liked_at: string}>;
+
+  const insertLikeStmt = database.prepare(
+    'INSERT OR IGNORE INTO liked_tracks (user_id, track_id, liked_at) VALUES (?, ?, ?)'
+  );
+  for (const likeRow of removedLikes) {
+    insertLikeStmt.run(likeRow.user_id, keepId, likeRow.liked_at);
+  }
+  database.prepare('DELETE FROM liked_tracks WHERE track_id = ?').run(removeId);
+
+  // 3. Reassign play_history & listening_events so play counts/history carry over
+  database
+    .prepare('UPDATE play_history SET track_id = ? WHERE track_id = ?')
+    .run(keepId, removeId);
+  database
+    .prepare('UPDATE listening_events SET track_id = ? WHERE track_id = ?')
+    .run(String(keepId), String(removeId));
+
+  // 4. Reassign download_jobs and youtube_playlist_job_items references
+  database
+    .prepare('UPDATE download_jobs SET track_id = ? WHERE track_id = ?')
+    .run(keepId, removeId);
+  database
+    .prepare('UPDATE youtube_playlist_job_items SET track_id = ? WHERE track_id = ?')
+    .run(keepId, removeId);
+
+  // 5. Record ignored local path so future rescans never re-import this file
+  //    (Never delete files on disk or in the audio cache.)
+  const normalizedRelPath = normalizeIgnoredRelPath(removeRelPath || '');
+  if (normalizedRelPath) {
+    database
+      .prepare(
+        "INSERT OR IGNORE INTO library_ignored_paths (rel_path, reason) VALUES (?, 'duplicate')"
+      )
+      .run(normalizedRelPath);
+  }
+
+  // 6. Remove the duplicate track record from the library table
+  database.prepare('DELETE FROM tracks WHERE id = ?').run(removeId);
+
+  return {playlistsUpdated};
+}
+
+function loadKeepTrackSummary(
+  database: Database.Database,
+  userId: number,
+  keepId: number
+): ResolvedKeepTrackSummary | null {
+  const keepTrackRow = database
+    .prepare(
+      `SELECT
+         t.id, t.rel_path, t.title, t.artist, t.album, t.track_number, t.year,
+         t.duration, t.format, t.bitrate, t.size_bytes, t.cover_file,
+         t.dominant_color, t.added_at,
+         CASE WHEN lt.track_id IS NOT NULL THEN 1 ELSE 0 END AS liked
+       FROM tracks t
+       LEFT JOIN liked_tracks lt ON lt.track_id = t.id AND lt.user_id = ?
+       WHERE t.id = ?`
+    )
+    .get(userId, keepId) as
+    | (Omit<ResolvedKeepTrackSummary, 'liked'> & {liked: number})
+    | undefined;
+
+  if (!keepTrackRow) return null;
+  return {
+    ...keepTrackRow,
+    liked: Boolean(keepTrackRow.liked),
+  };
+}
+
 /**
  * Merges a duplicate pair inside a single SQLite transaction:
  * - Replaces removeId with keepId in all playlists, collapsing duplicates into
@@ -678,106 +936,12 @@ export function resolveDuplicatePair(
   let playlistsUpdated = 0;
 
   const runMergeTx = database.transaction(() => {
-    // 1. Update playlist_tracks across all playlists referencing removeId
-    const affectedPlaylists = database
-      .prepare('SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?')
-      .all(removeId) as Array<{playlist_id: number}>;
-
-    const getPlaylistRowsStmt = database.prepare(
-      `SELECT id, track_id, position
-       FROM playlist_tracks
-       WHERE playlist_id = ?
-       ORDER BY position ASC, id ASC`
-    );
-    const updatePlaylistRowTrackStmt = database.prepare(
-      'UPDATE playlist_tracks SET track_id = ? WHERE id = ?'
-    );
-    const deletePlaylistRowStmt = database.prepare(
-      'DELETE FROM playlist_tracks WHERE id = ?'
-    );
-    const updatePlaylistRowPositionStmt = database.prepare(
-      'UPDATE playlist_tracks SET position = ? WHERE id = ?'
-    );
-    const touchPlaylistStmt = database.prepare(
-      "UPDATE playlists SET updated_at = datetime('now') WHERE id = ?"
-    );
-
-    for (const {playlist_id: playlistId} of affectedPlaylists) {
-      const rows = getPlaylistRowsStmt.all(playlistId) as Array<{
-        id: number;
-        track_id: number;
-        position: number;
-      }>;
-
-      let seenTarget = false;
-      const survivingRowIds: number[] = [];
-
-      for (const row of rows) {
-        if (row.track_id === removeId || row.track_id === keepId) {
-          if (!seenTarget) {
-            seenTarget = true;
-            if (row.track_id === removeId) {
-              updatePlaylistRowTrackStmt.run(keepId, row.id);
-            }
-            survivingRowIds.push(row.id);
-          } else {
-            // Collapse duplicate occurrence so only the first slot survives
-            deletePlaylistRowStmt.run(row.id);
-          }
-        } else {
-          survivingRowIds.push(row.id);
-        }
-      }
-
-      for (let pos = 0; pos < survivingRowIds.length; pos++) {
-        updatePlaylistRowPositionStmt.run(pos, survivingRowIds[pos]);
-      }
-      touchPlaylistStmt.run(playlistId);
-      playlistsUpdated += 1;
-    }
-
-    // 2. Carry over liked_tracks (if either copy was liked, keepId is liked)
-    const removedLikes = database
-      .prepare('SELECT user_id, liked_at FROM liked_tracks WHERE track_id = ?')
-      .all(removeId) as Array<{user_id: number; liked_at: string}>;
-
-    const insertLikeStmt = database.prepare(
-      'INSERT OR IGNORE INTO liked_tracks (user_id, track_id, liked_at) VALUES (?, ?, ?)'
-    );
-    for (const likeRow of removedLikes) {
-      insertLikeStmt.run(likeRow.user_id, keepId, likeRow.liked_at);
-    }
-    database.prepare('DELETE FROM liked_tracks WHERE track_id = ?').run(removeId);
-
-    // 3. Reassign play_history & listening_events so play counts/history carry over
-    database
-      .prepare('UPDATE play_history SET track_id = ? WHERE track_id = ?')
-      .run(keepId, removeId);
-    database
-      .prepare('UPDATE listening_events SET track_id = ? WHERE track_id = ?')
-      .run(String(keepId), String(removeId));
-
-    // 4. Reassign download_jobs and youtube_playlist_job_items references
-    database
-      .prepare('UPDATE download_jobs SET track_id = ? WHERE track_id = ?')
-      .run(keepId, removeId);
-    database
-      .prepare('UPDATE youtube_playlist_job_items SET track_id = ? WHERE track_id = ?')
-      .run(keepId, removeId);
-
-    // 5. Record ignored local path so future rescans never re-import this file
-    //    (Never delete files on disk or in the audio cache.)
-    const normalizedRelPath = normalizeIgnoredRelPath(existingRemove.rel_path || '');
-    if (normalizedRelPath) {
-      database
-        .prepare(
-          "INSERT OR IGNORE INTO library_ignored_paths (rel_path, reason) VALUES (?, 'duplicate')"
-        )
-        .run(normalizedRelPath);
-    }
-
-    // 6. Remove the duplicate track record from the library table
-    database.prepare('DELETE FROM tracks WHERE id = ?').run(removeId);
+    const res = mergeSingleCopyInTransaction(database, {
+      keepId,
+      removeId,
+      removeRelPath: existingRemove.rel_path,
+    });
+    playlistsUpdated = res.playlistsUpdated;
 
     // Optional hook for transactional rollback tests
     if (beforeCommitHook) {
@@ -793,22 +957,8 @@ export function resolveDuplicatePair(
     );
   }
 
-  const keepTrackRow = database
-    .prepare(
-      `SELECT
-         t.id, t.rel_path, t.title, t.artist, t.album, t.track_number, t.year,
-         t.duration, t.format, t.bitrate, t.size_bytes, t.cover_file,
-         t.dominant_color, t.added_at,
-         CASE WHEN lt.track_id IS NOT NULL THEN 1 ELSE 0 END AS liked
-       FROM tracks t
-       LEFT JOIN liked_tracks lt ON lt.track_id = t.id AND lt.user_id = ?
-       WHERE t.id = ?`
-    )
-    .get(userId, keepId) as
-    | (Omit<ResolvedKeepTrackSummary, 'liked'> & {liked: number})
-    | undefined;
-
-  if (!keepTrackRow) {
+  const keepTrack = loadKeepTrackSummary(database, userId, keepId);
+  if (!keepTrack) {
     throw new DuplicateResolveError(500, 'Kept track could not be loaded after merge');
   }
 
@@ -824,11 +974,338 @@ export function resolveDuplicatePair(
     keepId,
     removeId,
     playlistsUpdated,
-    keepLiked: Boolean(keepTrackRow.liked),
-    keepTrack: {
-      ...keepTrackRow,
-      liked: Boolean(keepTrackRow.liked),
-    },
+    keepLiked: keepTrack.liked,
+    keepTrack,
     remainingGroup,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Per-User Concurrency Lock for Bulk Duplicate Removal
+// ---------------------------------------------------------------------------
+
+const activeBulkUsers = new Set<number>();
+
+export function tryAcquireBulkDedupeLock(userId: number): boolean {
+  if (activeBulkUsers.has(userId)) return false;
+  activeBulkUsers.add(userId);
+  return true;
+}
+
+export function releaseBulkDedupeLock(userId: number): void {
+  activeBulkUsers.delete(userId);
+}
+
+export function isBulkDedupeRunning(userId: number): boolean {
+  return activeBulkUsers.has(userId);
+}
+
+interface PreparedSafeGroup {
+  group: DuplicateGroup;
+  keepId: number;
+  removeIds: number[];
+}
+
+function executeSingleSafeGroupTx(
+  database: Database.Database,
+  options: {
+    userId: number;
+    prepared: PreparedSafeGroup;
+    beforeGroupCommitHook?: (group: DuplicateGroup) => void;
+    silentLog?: boolean;
+  }
+): {replacements: BulkResolvedReplacement[]} {
+  const {userId, prepared, beforeGroupCommitHook, silentLog} = options;
+  const {group, keepId, removeIds} = prepared;
+
+  const selectTrackRelPathStmt = database.prepare('SELECT id, rel_path FROM tracks WHERE id = ?');
+  const mergedItems: Array<{removeId: number; playlistsUpdated: number}> = [];
+
+  const runGroupTx = database.transaction(() => {
+    const keepRow = selectTrackRelPathStmt.get(keepId) as {id: number; rel_path: string} | undefined;
+    if (!keepRow) {
+      throw new Error('Kept track no longer exists');
+    }
+
+    for (const removeId of removeIds) {
+      const remRow = selectTrackRelPathStmt.get(removeId) as
+        | {id: number; rel_path: string}
+        | undefined;
+      if (!remRow) {
+        throw new Error(`Track ${removeId} no longer exists`);
+      }
+      const res = mergeSingleCopyInTransaction(database, {
+        keepId,
+        removeId,
+        removeRelPath: remRow.rel_path,
+      });
+      mergedItems.push({removeId, playlistsUpdated: res.playlistsUpdated});
+    }
+
+    if (beforeGroupCommitHook) {
+      beforeGroupCommitHook(group);
+    }
+  });
+
+  runGroupTx();
+
+  const keepTrack = loadKeepTrackSummary(database, userId, keepId);
+  if (!keepTrack) {
+    throw new Error('Kept track could not be loaded after group merge');
+  }
+
+  const replacements: BulkResolvedReplacement[] = mergedItems.map((item) => {
+    if (!silentLog) {
+      console.log(
+        `[library-dedupe] removed ${item.removeId}, kept ${keepId}, playlists updated ${item.playlistsUpdated}`
+      );
+    }
+    return {
+      removeId: item.removeId,
+      keepId,
+      keepLiked: keepTrack.liked,
+      playlistsUpdated: item.playlistsUpdated,
+      keepTrack,
+    };
+  });
+
+  return {replacements};
+}
+
+function planBulkGroups(
+  database: Database.Database,
+  options: {
+    userId: number;
+    userRole?: string;
+    playingTrackIds?: ReadonlySet<number>;
+  }
+): {
+  safeGroups: PreparedSafeGroup[];
+  skipped: BulkSkippedGroup[];
+  totalPlanned: number;
+} {
+  const groups = findDuplicateGroupsForUser(database, options);
+  const safeGroups: PreparedSafeGroup[] = [];
+  const skipped: BulkSkippedGroup[] = [];
+  let totalPlanned = 0;
+
+  for (const group of groups) {
+    const safety = evaluateBulkSafety(group.copies, options.playingTrackIds);
+    const lead = group.copies[0];
+    if (!safety.safe) {
+      skipped.push({
+        groupId: group.id,
+        title: lead?.title || 'Unknown Title',
+        artist: lead?.artist || 'Unknown Artist',
+        copyCount: group.copies.length,
+        reason: safety.skipReason || 'Skipped, review manually',
+      });
+      continue;
+    }
+
+    const keepId = group.suggestedKeepId;
+    const removeIds = group.copies.filter((c) => c.id !== keepId).map((c) => c.id);
+    if (removeIds.length === 0) continue;
+
+    safeGroups.push({group, keepId, removeIds});
+    totalPlanned += removeIds.length;
+  }
+
+  return {safeGroups, skipped, totalPlanned};
+}
+
+/**
+ * Resolves all safe duplicate groups synchronously (each group in its own SQLite
+ * transaction so one failure rolls back only that group and the rest continue).
+ */
+export function resolveAllSafeDuplicates(
+  database: Database.Database,
+  options: {
+    userId: number;
+    userRole?: string;
+    playingTrackIds?: ReadonlySet<number>;
+    onProgress?: (event: BulkProgressEvent) => void;
+    beforeGroupCommitHook?: (group: DuplicateGroup) => void;
+    silentLog?: boolean;
+  }
+): BulkResolveSummary {
+  const {userId, userRole = 'listener', playingTrackIds, onProgress, beforeGroupCommitHook, silentLog} =
+    options;
+
+  const {safeGroups, skipped, totalPlanned} = planBulkGroups(database, {
+    userId,
+    userRole,
+    playingTrackIds,
+  });
+
+  onProgress?.({
+    type: 'start',
+    totalPlanned,
+    safeGroupCount: safeGroups.length,
+    skippedGroupCount: skipped.length,
+  });
+
+  const replacements: BulkResolvedReplacement[] = [];
+  const failed: BulkFailedGroup[] = [];
+  let removedCount = 0;
+  let resolvedGroupCount = 0;
+
+  for (const prepared of safeGroups) {
+    const lead = prepared.group.copies[0];
+    try {
+      const groupResult = executeSingleSafeGroupTx(database, {
+        userId,
+        prepared,
+        beforeGroupCommitHook,
+        silentLog,
+      });
+      replacements.push(...groupResult.replacements);
+      removedCount += groupResult.replacements.length;
+      resolvedGroupCount += 1;
+      onProgress?.({
+        type: 'progress',
+        removedCount,
+        totalPlanned,
+        groupId: prepared.group.id,
+        status: 'resolved',
+        replacements: groupResult.replacements,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Transaction failed';
+      failed.push({
+        groupId: prepared.group.id,
+        title: lead?.title || 'Unknown Title',
+        artist: lead?.artist || 'Unknown Artist',
+        copyCount: prepared.group.copies.length,
+        reason,
+      });
+      onProgress?.({
+        type: 'progress',
+        removedCount,
+        totalPlanned,
+        groupId: prepared.group.id,
+        status: 'failed',
+        error: reason,
+      });
+    }
+  }
+
+  const summary: BulkResolveSummary = {
+    totalPlanned,
+    removedCount,
+    resolvedGroupCount,
+    skippedCount: skipped.length,
+    failedCount: failed.length,
+    replacements,
+    skipped,
+    failed,
+  };
+
+  if (!silentLog) {
+    console.log(
+      `[library-dedupe] bulk complete: removed ${summary.removedCount}, groups resolved ${summary.resolvedGroupCount}, skipped ${summary.skippedCount}, failed ${summary.failedCount}`
+    );
+  }
+
+  onProgress?.({type: 'done', summary});
+  return summary;
+}
+
+/**
+ * Async variant that yields between per-group transactions so streaming HTTP
+ * responses flush real-time progress and overlapping requests see the lock.
+ */
+export async function resolveAllSafeDuplicatesAsync(
+  database: Database.Database,
+  options: {
+    userId: number;
+    userRole?: string;
+    playingTrackIds?: ReadonlySet<number>;
+    onProgress?: (event: BulkProgressEvent) => void;
+    beforeGroupCommitHook?: (group: DuplicateGroup) => void;
+    silentLog?: boolean;
+  }
+): Promise<BulkResolveSummary> {
+  const {userId, userRole = 'listener', playingTrackIds, onProgress, beforeGroupCommitHook, silentLog} =
+    options;
+
+  const {safeGroups, skipped, totalPlanned} = planBulkGroups(database, {
+    userId,
+    userRole,
+    playingTrackIds,
+  });
+
+  onProgress?.({
+    type: 'start',
+    totalPlanned,
+    safeGroupCount: safeGroups.length,
+    skippedGroupCount: skipped.length,
+  });
+
+  const replacements: BulkResolvedReplacement[] = [];
+  const failed: BulkFailedGroup[] = [];
+  let removedCount = 0;
+  let resolvedGroupCount = 0;
+
+  for (const prepared of safeGroups) {
+    const lead = prepared.group.copies[0];
+    try {
+      const groupResult = executeSingleSafeGroupTx(database, {
+        userId,
+        prepared,
+        beforeGroupCommitHook,
+        silentLog,
+      });
+      replacements.push(...groupResult.replacements);
+      removedCount += groupResult.replacements.length;
+      resolvedGroupCount += 1;
+      onProgress?.({
+        type: 'progress',
+        removedCount,
+        totalPlanned,
+        groupId: prepared.group.id,
+        status: 'resolved',
+        replacements: groupResult.replacements,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Transaction failed';
+      failed.push({
+        groupId: prepared.group.id,
+        title: lead?.title || 'Unknown Title',
+        artist: lead?.artist || 'Unknown Artist',
+        copyCount: prepared.group.copies.length,
+        reason,
+      });
+      onProgress?.({
+        type: 'progress',
+        removedCount,
+        totalPlanned,
+        groupId: prepared.group.id,
+        status: 'failed',
+        error: reason,
+      });
+    }
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  const summary: BulkResolveSummary = {
+    totalPlanned,
+    removedCount,
+    resolvedGroupCount,
+    skippedCount: skipped.length,
+    failedCount: failed.length,
+    replacements,
+    skipped,
+    failed,
+  };
+
+  if (!silentLog) {
+    console.log(
+      `[library-dedupe] bulk complete: removed ${summary.removedCount}, groups resolved ${summary.resolvedGroupCount}, skipped ${summary.skippedCount}, failed ${summary.failedCount}`
+    );
+  }
+
+  onProgress?.({type: 'done', summary});
+  return summary;
 }

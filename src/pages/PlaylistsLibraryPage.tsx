@@ -2220,6 +2220,31 @@ export const PlaylistsLibraryPage: React.FC = () => {
             return next;
           });
         }}
+        onBulkDuplicatesRemoved={(replacements) => {
+          if (replacements.length === 0) return;
+          const removedSet = new Set(replacements.map((r) => r.removeId));
+          const keepLikedMap = new Map<number, boolean>();
+          for (const r of replacements) {
+            keepLikedMap.set(r.keepId, r.keepLiked);
+          }
+          setTracks((prev) =>
+            prev
+              .filter((t) => !(typeof t.id === 'number' && removedSet.has(t.id)))
+              .map((t) =>
+                typeof t.id === 'number' && keepLikedMap.has(t.id)
+                  ? {...t, liked: keepLikedMap.get(t.id)!}
+                  : t
+              )
+          );
+          setSelectedIds((prev) => {
+            let changed = false;
+            const next = new Set(prev);
+            for (const id of removedSet) {
+              if (next.delete(id)) changed = true;
+            }
+            return changed ? next : prev;
+          });
+        }}
       />
     </>
   );
