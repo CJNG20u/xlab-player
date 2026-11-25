@@ -26,15 +26,18 @@ import {
 import React, {Suspense, useCallback, useEffect, useState} from 'react';
 import {NavLink, Outlet, useLocation, useNavigate} from 'react-router-dom';
 import {useAuth} from '../context/AuthContext';
+import {DesktopLayoutProvider, useDesktopLayout} from '../context/DesktopLayoutContext';
 import {MainScrollProvider} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
+import {useDesktopKeyboardShortcuts} from '../hooks/useDesktopKeyboardShortcuts';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {useRemoteHost} from '../hooks/useRemoteHost';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {apiFetch, formatDuration} from '../lib/api';
-import {usePlaybackTime} from '../lib/playbackClock';
+import {getTime as getPlaybackTime, usePlaybackTime} from '../lib/playbackClock';
 import {useYouTubePlaylistJobsSync} from '../lib/playlistJobs';
 import {useRemoteControl} from '../lib/remoteControl';
 import {useMainScrollRestoration} from '../lib/scrollHistory';
@@ -118,13 +121,66 @@ const MobileMiniProgressBar: React.FC<MobileMiniProgressBarProps> = React.memo(
   }
 );
 
+const DesktopFullWidthProgressBar: React.FC<DesktopPlaybackScrubberProps> = React.memo(
+  ({isRemoteActive, remoteTime, duration, disabled, onSeek}) => {
+    const localTime = usePlaybackTime();
+    const displayTime = isRemoteActive ? remoteTime : localTime;
+    const progressPct = duration > 0 ? Math.min(100, (displayTime / duration) * 100) : 0;
+
+    return (
+      <div className="xlab-desktop-scrubber-group relative w-full h-3 -mt-1.5 flex items-center group">
+        <input
+          type="range"
+          min={0}
+          max={duration || 1}
+          step={0.1}
+          value={Math.min(displayTime, duration || 1)}
+          disabled={disabled}
+          onChange={(e) => onSeek(parseFloat(e.target.value))}
+          className="xlab-desktop-scrubber w-full h-1 group-hover:h-1.5 transition-[height]"
+          style={{
+            background: `linear-gradient(to right, var(--accent) ${progressPct}%, var(--slider-track) ${progressPct}%)`,
+          }}
+          aria-label="Seek progress"
+        />
+      </div>
+    );
+  }
+);
+
+interface DesktopTimeReadoutProps {
+  isRemoteActive: boolean;
+  remoteTime: number;
+  duration: number;
+}
+
+const DesktopTimeReadout: React.FC<DesktopTimeReadoutProps> = React.memo(
+  ({isRemoteActive, remoteTime, duration}) => {
+    const localTime = usePlaybackTime();
+    const displayTime = isRemoteActive ? remoteTime : localTime;
+
+    return (
+      <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] whitespace-nowrap select-none">
+        {formatDuration(displayTime)} / {formatDuration(duration)}
+      </span>
+    );
+  }
+);
+
 const RouteLoadingFallback: React.FC = () => (
   <div className="flex h-full min-h-[60vh] w-full items-center justify-center">
     <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
   </div>
 );
 
-export const AppShell: React.FC = () => {
+const AppShellInner: React.FC = () => {
+  const isDesktop = useLayoutMode() === 'desktop';
+  const {
+    desktopLyricsVisible,
+    setDesktopLyricsVisible,
+    toggleDesktopLyrics,
+    requestFocusQueue,
+  } = useDesktopLayout();
   const {user, isOfflineMode, logout} = useAuth();
   const {theme, baseThemeColor} = useTheme();
   const {
@@ -379,6 +435,47 @@ export const AppShell: React.FC = () => {
     rememberTabLocation(location.pathname, location.search);
   }, [location.pathname, location.search]);
 
+  // Ensure mobile Queue drawer is closed if the window transitions live into desktop mode
+  useEffect(() => {
+    if (isDesktop && queueOpen) {
+      setQueueOpen(false);
+    }
+  }, [isDesktop, queueOpen, setQueueOpen]);
+
+  const handleDesktopToggleLyrics = useCallback(() => {
+    if (isNowPlayingPage) {
+      toggleDesktopLyrics();
+    } else {
+      setDesktopLyricsVisible(true);
+      navigate('/now-playing');
+    }
+  }, [isNowPlayingPage, navigate, setDesktopLyricsVisible, toggleDesktopLyrics]);
+
+  const handleDesktopFocusQueue = useCallback(() => {
+    if (!isNowPlayingPage) {
+      navigate('/now-playing');
+    }
+    requestFocusQueue();
+  }, [isNowPlayingPage, navigate, requestFocusQueue]);
+
+  useDesktopKeyboardShortcuts({
+    enabled: isDesktop,
+    hasTrack: Boolean(displayTrack),
+    getCurrentTime: () =>
+      remote.isRemoteActive ? remote.extrapolatedPositionSec : getPlaybackTime(),
+    duration: displayDuration,
+    volume: displayVolume,
+    isMuted: displayMuted,
+    onTogglePlay: handleTogglePlay,
+    onSeek: handleSeek,
+    onPrevTrack: handlePrevTrack,
+    onNextTrack: handleNextTrack,
+    onSetVolume: handleSetVolume,
+    onToggleMute: handleToggleMute,
+    onToggleLyrics: handleDesktopToggleLyrics,
+    onFocusQueue: handleDesktopFocusQueue,
+  });
+
   const handlePrimaryNavClick = useCallback(
     (e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
@@ -530,7 +627,9 @@ export const AppShell: React.FC = () => {
           {/* Unified Full-Bleed Top-to-Bottom Header Gradient Backdrop (starts flush at y=0 behind status bar) */}
           <main
             ref={handleMainRef}
-            className="flex-1 overflow-y-auto relative"
+            className={`flex-1 relative ${
+              isDesktop && isNowPlayingPage ? 'overflow-hidden' : 'overflow-y-auto'
+            }`}
             style={{
               backgroundColor: 'var(--bg-primary)',
               backgroundImage: usesUnifiedHeader ? unifiedHeaderGradient : undefined,
@@ -554,8 +653,298 @@ export const AppShell: React.FC = () => {
         </div>
       </div>
 
-      {/* Desktop Fixed Bottom Playback Bar (90px) */}
-      <footer className="hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(240px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] bg-[var(--footer-bg)] backdrop-blur-xl px-4 z-30">
+      {/* Bottom Playback Bar: Desktop gets full-width edge progress bar & no Queue button; non-desktop (incl. 768px touch) stays identical */}
+      {isDesktop ? (
+        <footer className="flex flex-col shrink-0 border-t border-[var(--border-subtle)] bg-[var(--footer-bg)] backdrop-blur-xl z-30">
+          <DesktopFullWidthProgressBar
+            isRemoteActive={remote.isRemoteActive}
+            remoteTime={remote.extrapolatedPositionSec}
+            duration={displayDuration}
+            disabled={!displayTrack}
+            onSeek={handleSeek}
+          />
+          <div className="grid h-[78px] grid-cols-[minmax(240px,1fr)_auto_minmax(240px,1fr)] items-center gap-4 px-5">
+            {/* Left: Mini Cover + Title + Artist + Heart/Save */}
+            <div className="flex items-center gap-3.5 min-w-0">
+              {displayTrack ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => navigate('/now-playing')}
+                    className="shrink-0 group relative cursor-pointer"
+                    aria-label="Open Now Playing"
+                  >
+                    <AlbumArt
+                      coverFile={displayTrack.cover_file}
+                      externalUrl={displayTrack.coverUrl}
+                      alt={displayTrack.title}
+                      color={displayTrack.dominant_color}
+                      className="w-13 h-13 rounded-md shadow-md transition-transform group-hover:scale-[1.03]"
+                      iconSize={22}
+                    />
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <button
+                      type="button"
+                      onClick={() => navigate('/now-playing')}
+                      className="block max-w-full truncate text-sm font-semibold text-[var(--text-primary)] hover:underline text-left cursor-pointer"
+                    >
+                      {displayTrack.title}
+                    </button>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {isCurrentYouTube || remote.isRemoteActive ? (
+                        <span className="truncate text-xs text-[var(--text-secondary)]">
+                          {displayTrack.artist}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigate(`/?artist=${encodeURIComponent(displayTrack.artist)}`)
+                          }
+                          className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left cursor-pointer"
+                        >
+                          {displayTrack.artist}
+                        </button>
+                      )}
+                      {remote.isRemoteActive && remote.targetDevice ? (
+                        <span className="shrink-0 rounded border border-[var(--accent)] bg-[var(--accent-soft)] px-1.5 py-0.5 text-[9px] font-semibold tracking-wide leading-none text-[var(--accent)] truncate max-w-[110px]">
+                          {remote.targetDevice.name}
+                        </span>
+                      ) : isCurrentYouTube ? (
+                        <span className="shrink-0 rounded border border-[var(--badge-source-border)] bg-[var(--badge-source-bg)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide leading-none text-[var(--badge-source-text)]">
+                          Web
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  {!remote.isRemoteActive && currentTrack ? (
+                    isCurrentYouTube ? (
+                      canDownload && !offline ? (
+                        <button
+                          type="button"
+                          disabled={currentYtSaveStatus === 'saving'}
+                          onClick={() => void handleSaveCurrentYouTube()}
+                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors cursor-pointer ${
+                            currentYtSaveStatus === 'saved'
+                              ? 'text-[var(--accent)]'
+                              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
+                          }`}
+                          title={
+                            currentYtSaveStatus === 'saved'
+                              ? 'Queued for library download'
+                              : 'Save to Library'
+                          }
+                          aria-label="Save to Library"
+                        >
+                          {currentYtSaveStatus === 'saving' ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : currentYtSaveStatus === 'saved' ? (
+                            <Check className="w-4 h-4 stroke-[2.5]" />
+                          ) : (
+                            <Plus className="w-4 h-4 stroke-[2.5]" />
+                          )}
+                        </button>
+                      ) : null
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void toggleLikeTrack(currentTrack.id)}
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer ${
+                          currentTrack.liked
+                            ? 'text-[var(--accent)]'
+                            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                        }`}
+                        aria-label={currentTrack.liked ? 'Unlike track' : 'Like track'}
+                      >
+                        <Heart className={`w-4 h-4 ${currentTrack.liked ? 'fill-current' : ''}`} />
+                      </button>
+                    )
+                  ) : null}
+                </>
+              ) : (
+                <div className="flex items-center gap-3 text-[var(--text-muted)]">
+                  <div className="h-13 w-13 rounded-md bg-[var(--bg-elevated)] flex items-center justify-center">
+                    <ListMusic className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-[var(--text-secondary)] truncate">
+                      {remote.isRemoteActive && remote.targetDevice
+                        ? `${remote.targetDevice.name} · Idle`
+                        : 'Not playing'}
+                    </p>
+                    <p className="text-xs text-[var(--text-muted)]">
+                      {remote.isRemoteActive ? 'Remote control active' : 'Select a track to begin'}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Center: Transport Controls + Elapsed / Total Readout */}
+            <div className="flex flex-col items-center gap-1">
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={handleToggleShuffle}
+                  className={`relative p-2 rounded-full hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer ${
+                    displayShuffle
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                  title="Shuffle"
+                  aria-label="Shuffle"
+                >
+                  <Shuffle className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePrevTrack}
+                  disabled={!displayTrack}
+                  className="p-2 rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors cursor-pointer"
+                  title="Previous track (Shift+Left)"
+                  aria-label="Previous track"
+                >
+                  <SkipBack className="w-5 h-5 fill-current" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTogglePlay}
+                  disabled={!displayTrack}
+                  className={`flex h-10 w-10 items-center justify-center rounded-full bg-[var(--btn-contrast-bg)] text-[var(--btn-contrast-text)] hover:scale-105 active:scale-95 disabled:opacity-40 transition-transform cursor-pointer ${
+                    remote.isPending ? 'opacity-70' : ''
+                  }`}
+                  title={displayIsPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                  aria-label={displayIsPlaying ? 'Pause' : 'Play'}
+                >
+                  {displayIsPlaying ? (
+                    <Pause className="w-4 h-4 fill-current" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleNextTrack}
+                  disabled={!displayTrack}
+                  className="p-2 rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] disabled:opacity-30 transition-colors cursor-pointer"
+                  title="Next track (Shift+Right)"
+                  aria-label="Next track"
+                >
+                  <SkipForward className="w-5 h-5 fill-current" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCycleRepeat}
+                  className={`p-2 rounded-full hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer ${
+                    displayRepeat !== 'off'
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                  title={`Repeat: ${displayRepeat}`}
+                  aria-label={`Repeat: ${displayRepeat}`}
+                >
+                  {displayRepeat === 'one' ? (
+                    <Repeat1 className="w-4 h-4" />
+                  ) : (
+                    <Repeat className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+              <DesktopTimeReadout
+                isRemoteActive={remote.isRemoteActive}
+                remoteTime={remote.extrapolatedPositionSec}
+                duration={displayDuration}
+              />
+            </div>
+
+            {/* Right: Lyrics + Devices + Volume + Expand (Queue button hidden on desktop) */}
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleDesktopToggleLyrics}
+                disabled={!displayTrack}
+                className={`p-2 rounded-full hover:bg-[var(--bg-elevated)] disabled:opacity-30 transition-colors cursor-pointer ${
+                  isNowPlayingPage && desktopLyricsVisible
+                    ? 'text-[var(--accent)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+                title="Toggle Lyrics (L)"
+                aria-label="Toggle Lyrics"
+              >
+                <Mic2 className="w-4 h-4" />
+              </button>
+              {!offline && (
+                <button
+                  type="button"
+                  onClick={() => remote.setDeviceSheetOpen(true)}
+                  className={`relative p-2 rounded-full hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer ${
+                    remote.isRemoteActive
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                  title={
+                    remote.isRemoteActive && remote.targetDevice
+                      ? `Controlling ${remote.targetDevice.name}`
+                      : 'Devices'
+                  }
+                  aria-label="Devices"
+                >
+                  <MonitorSpeaker className="w-4 h-4" />
+                  {(remote.isRemoteActive || onlineOtherDeviceCount > 0) && (
+                    <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                  )}
+                </button>
+              )}
+
+              <div className="xlab-slider-group flex items-center gap-2 w-28">
+                <button
+                  type="button"
+                  onClick={handleToggleMute}
+                  className="p-1.5 rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                  title={displayMuted ? 'Unmute (M)' : 'Mute (M)'}
+                  aria-label={displayMuted ? 'Unmute' : 'Mute'}
+                >
+                  {displayMuted || displayVolume === 0 ? (
+                    <VolumeX className="w-4 h-4" />
+                  ) : (
+                    <Volume2 className="w-4 h-4" />
+                  )}
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={displayMuted ? 0 : displayVolume}
+                  onChange={(e) => handleSetVolume(parseFloat(e.target.value))}
+                  className="xlab-slider flex-1 h-1"
+                  style={{
+                    background: `linear-gradient(to right, var(--accent) ${volPct}%, var(--slider-track) ${volPct}%)`,
+                    borderRadius: '9999px',
+                  }}
+                  aria-label="Volume"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => navigate(isNowPlayingPage ? '/' : '/now-playing')}
+                className={`p-2 rounded-full hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer ${
+                  isNowPlayingPage
+                    ? 'text-[var(--accent)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+                title={isNowPlayingPage ? 'Close Now Playing' : 'Expand Now Playing'}
+                aria-label="Expand Now Playing"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </footer>
+      ) : (
+        <footer className="hidden md:grid h-[90px] shrink-0 grid-cols-[minmax(220px,1fr)_minmax(340px,1.5fr)_minmax(240px,1fr)] items-center gap-4 border-t border-[var(--border-subtle)] bg-[var(--footer-bg)] backdrop-blur-xl px-4 z-30">
         {/* Left: Mini Cover + Title + Artist + Heart */}
         <div className="flex items-center gap-3.5 min-w-0">
           {displayTrack ? (
@@ -843,6 +1232,7 @@ export const AppShell: React.FC = () => {
           </button>
         </div>
       </footer>
+      )}
 
       {/* Mobile Floating Mini-Player (64px) above safe-area-padded 60px Bottom Nav */}
       {!isNowPlayingPage && (displayTrack || remote.isRemoteActive) && (
@@ -1058,7 +1448,7 @@ export const AppShell: React.FC = () => {
       )}
 
       {/* Modals & Drawers */}
-      <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} />
+      {!isDesktop && <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} />}
       <DeviceSheet
         open={remote.deviceSheetOpen}
         onClose={() => remote.setDeviceSheetOpen(false)}
@@ -1075,3 +1465,9 @@ export const AppShell: React.FC = () => {
     </MainScrollProvider>
   );
 };
+
+export const AppShell: React.FC = () => (
+  <DesktopLayoutProvider>
+    <AppShellInner />
+  </DesktopLayoutProvider>
+);

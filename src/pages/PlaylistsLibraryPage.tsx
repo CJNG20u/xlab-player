@@ -34,6 +34,7 @@ import {TrackTable} from '../components/TrackTable';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
@@ -1010,6 +1011,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     playTrack(randomTrack, filteredTracks);
   }, [filteredTracks, playTrack, shuffle, toggleShuffle]);
 
+  const isDesktop = useLayoutMode() === 'desktop';
   const activeHomeTitle = artistFilter || HOME_VIEW_META[activeHomeTab].title;
   const showFloatingBatchBar = selectionMode && selectedIdArray.length > 0;
 
@@ -1024,7 +1026,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       {playlistIdParam ? (
         // --- PLAYLIST DETAIL VIEW (/playlists/:id) ---
         <div
-          className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto pb-36 md:pb-12"
+          className={`px-4 sm:px-6 lg:px-8 ${isDesktop ? 'max-w-[1680px]' : 'max-w-7xl'} mx-auto pb-36 md:pb-12`}
           style={{
             paddingTop: 'calc(1.25rem + env(safe-area-inset-top, 0px))',
             paddingBottom: showFloatingBatchBar
@@ -1479,7 +1481,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 } as React.CSSProperties
               }
             >
-              <div className="px-4 sm:px-6 lg:px-8 pt-4 pb-4 max-w-7xl mx-auto space-y-4">
+              <div
+                className={`px-4 sm:px-6 lg:px-8 pt-4 pb-4 ${
+                  isDesktop ? 'max-w-[1680px]' : 'max-w-7xl'
+                } mx-auto space-y-4`}
+              >
                 {/* Offline Mode Banner when Disconnected */}
                 {offline && (
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-[var(--warn-bg)] backdrop-blur-md border border-[var(--warn-border)] px-4 py-3">
@@ -1815,7 +1821,163 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
           {/* Content Stage for Home Views (Starts Immediately Below Home Hero Action Bar) */}
           {isHomeView && (
-          <div className="px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
+          <div className={`px-4 sm:px-6 lg:px-8 ${isDesktop ? 'max-w-[1680px]' : 'max-w-7xl'} mx-auto`}>
+            {/* Desktop-only responsive quick-access cards grid so Home fills wide screens */}
+            {isDesktop && !searchQuery && !artistFilter && (playlists.length > 0 || tracks.length > 0) && (
+              <section aria-label="Quick collections" className="mb-6">
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+                  {!offline && (
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setSearchParams({});
+                        setActiveTab('liked');
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSearchParams({});
+                          setActiveTab('liked');
+                        }
+                      }}
+                      className={`group flex items-center gap-3 rounded-lg border p-2 pr-3 transition-colors cursor-pointer ${
+                        activeHomeTab === 'liked'
+                          ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
+                          : 'bg-[var(--bg-secondary)]/90 border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)]'
+                      }`}
+                    >
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-[#4f39f6] via-[#32468a] to-[var(--accent)] shadow-sm">
+                        <Heart className="w-5 h-5 text-white fill-white" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[var(--text-primary)] truncate">
+                          Liked Songs
+                        </p>
+                        <p className="text-xs text-[var(--text-secondary)] truncate">
+                          Your favorites
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {!offline && (
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setSearchParams({});
+                        setActiveTab('recent');
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSearchParams({});
+                          setActiveTab('recent');
+                        }
+                      }}
+                      className={`group flex items-center gap-3 rounded-lg border p-2 pr-3 transition-colors cursor-pointer ${
+                        activeHomeTab === 'recent'
+                          ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
+                          : 'bg-[var(--bg-secondary)]/90 border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)]'
+                      }`}
+                    >
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-[var(--accent)] via-[#135c32] to-[#0d2819] shadow-sm">
+                        <Clock className="w-5 h-5 text-white" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[var(--text-primary)] truncate">
+                          Recently Downloaded
+                        </p>
+                        <p className="text-xs text-[var(--text-secondary)] truncate">
+                          Latest additions
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {cachedTrackIds.size > 0 && (
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setSearchParams({});
+                        setActiveTab('offline');
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSearchParams({});
+                          setActiveTab('offline');
+                        }
+                      }}
+                      className={`group flex items-center gap-3 rounded-lg border p-2 pr-3 transition-colors cursor-pointer ${
+                        activeHomeTab === 'offline'
+                          ? 'bg-[var(--bg-elevated)] border-[var(--accent)]/60'
+                          : 'bg-[var(--bg-secondary)]/90 border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)]'
+                      }`}
+                    >
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-emerald-500 via-teal-800 to-[#0e241d] shadow-sm">
+                        <HardDriveDownload className="w-5 h-5 text-white" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[var(--text-primary)] truncate">
+                          Offline Ready
+                        </p>
+                        <p className="text-xs text-[var(--text-secondary)] truncate font-mono tabular-nums">
+                          {cachedTrackIds.size} {cachedTrackIds.size === 1 ? 'track' : 'tracks'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {playlists.slice(0, 8).map((pl) => (
+                    <div
+                      key={pl.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        recordRecentPlaylistId(pl.id);
+                        navigate(`/playlists/${pl.id}`);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          recordRecentPlaylistId(pl.id);
+                          navigate(`/playlists/${pl.id}`);
+                        }
+                      }}
+                      className="group relative flex items-center gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-secondary)]/90 p-2 pr-3 hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer"
+                    >
+                      <PlaylistMosaic
+                        covers={pl.covers || []}
+                        alt={pl.name}
+                        className="h-12 w-12 rounded-md shrink-0 shadow-sm"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-[var(--text-primary)] truncate">
+                          {pl.name}
+                        </p>
+                        <p className="text-xs text-[var(--text-secondary)] truncate font-mono tabular-nums">
+                          {pl.track_count} {pl.track_count === 1 ? 'track' : 'tracks'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handlePlayPlaylistById(pl.id, false);
+                        }}
+                        aria-label={`Play ${pl.name}`}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-contrast)] shadow-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--accent-hover)] hover:scale-105 transition-all cursor-pointer"
+                      >
+                        <Play className="w-4 h-4 fill-current ml-0.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
             {loading ? (
               <div className="flex items-center justify-center py-16 text-[var(--text-secondary)] gap-2">
                 <Loader2 className="w-5 h-5 animate-spin text-[var(--accent)]" />

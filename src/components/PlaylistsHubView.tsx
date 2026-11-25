@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useTheme} from '../context/ThemeContext';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {getCoverUrl, getLocalPlayHistory, getTrackCoverUrl} from '../lib/api';
 import {
   computeLightTintedTopHex,
@@ -93,12 +94,14 @@ interface SmartMixCardData {
 interface HorizontalCarouselSectionProps {
   title: string;
   subtitle?: string;
+  isDesktop?: boolean;
   children: React.ReactNode;
 }
 
 const HorizontalCarouselSection: React.FC<HorizontalCarouselSectionProps> = ({
   title,
   subtitle,
+  isDesktop = false,
   children,
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -106,13 +109,15 @@ const HorizontalCarouselSection: React.FC<HorizontalCarouselSectionProps> = ({
   const [canScrollRight, setCanScrollRight] = useState(false);
 
   const updateScrollEdges = useCallback(() => {
+    if (isDesktop) return;
     const el = scrollRef.current;
     if (!el) return;
     setCanScrollLeft(el.scrollLeft > 8);
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
-  }, []);
+  }, [isDesktop]);
 
   useEffect(() => {
+    if (isDesktop) return;
     updateScrollEdges();
     const el = scrollRef.current;
     if (!el) return;
@@ -123,7 +128,7 @@ const HorizontalCarouselSection: React.FC<HorizontalCarouselSectionProps> = ({
       window.removeEventListener('resize', onResize);
       window.clearTimeout(timer);
     };
-  }, [updateScrollEdges, children]);
+  }, [isDesktop, updateScrollEdges, children]);
 
   const scrollByAmount = (direction: -1 | 1) => {
     const el = scrollRef.current;
@@ -144,7 +149,7 @@ const HorizontalCarouselSection: React.FC<HorizontalCarouselSectionProps> = ({
           )}
         </div>
 
-        {(canScrollLeft || canScrollRight) && (
+        {!isDesktop && (canScrollLeft || canScrollRight) && (
           <div className="hidden md:flex items-center gap-1.5 shrink-0">
             <button
               type="button"
@@ -168,13 +173,19 @@ const HorizontalCarouselSection: React.FC<HorizontalCarouselSectionProps> = ({
         )}
       </div>
 
-      <div
-        ref={scrollRef}
-        onScroll={updateScrollEdges}
-        className="flex flex-nowrap items-start gap-4 overflow-x-auto snap-x snap-mandatory no-scrollbar pb-2 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:mx-0 lg:px-0"
-      >
-        {children}
-      </div>
+      {isDesktop ? (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(185px,1fr))] gap-5">
+          {children}
+        </div>
+      ) : (
+        <div
+          ref={scrollRef}
+          onScroll={updateScrollEdges}
+          className="flex flex-nowrap items-start gap-4 overflow-x-auto snap-x snap-mandatory no-scrollbar pb-2 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:mx-0 lg:px-0"
+        >
+          {children}
+        </div>
+      )}
     </section>
   );
 };
@@ -221,6 +232,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   playlistDownloadJobs,
 }) => {
   const {theme, isLight, isTidal} = useTheme();
+  const isDesktop = useLayoutMode() === 'desktop';
   const [recentIds, setRecentIds] = useState<number[]>(() => readRecentPlaylistIds());
   const [heroSampledColor, setHeroSampledColor] = useState<string | null>(null);
   const [heroOfflineCoverUrl, setHeroOfflineCoverUrl] = useState<string | null>(null);
@@ -286,6 +298,20 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
       prev?.playlist.id === pl.id ? null : {playlist: pl, top, left: clampedLeft}
     );
   }, []);
+
+  const openPlaylistContextMenu = useCallback(
+    (e: React.MouseEvent, pl: Playlist) => {
+      if (!isDesktop || offline) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const menuWidth = 196;
+      const menuHeight = 144;
+      const left = Math.max(12, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+      const top = Math.max(12, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+      setMenuState({playlist: pl, top, left});
+    },
+    [isDesktop, offline]
+  );
 
   // Derive recent artists from persistent play history + library tracks for "My Soundtrack"
   const recentArtists = useMemo(() => {
@@ -699,13 +725,18 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         role="button"
         tabIndex={0}
         onClick={() => handleOpenPlaylistCard(pl.id)}
+        onContextMenu={(e) => openPlaylistContextMenu(e, pl)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             handleOpenPlaylistCard(pl.id);
           }
         }}
-        className="group w-40 sm:w-44 shrink-0 snap-start text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded-xl"
+        className={`group text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded-xl ${
+          isDesktop
+            ? 'w-full p-2 -m-2 hover:bg-[var(--bg-secondary)] transition-colors'
+            : 'w-40 sm:w-44 shrink-0 snap-start'
+        }`}
       >
         <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-[var(--bg-secondary)] shadow-md ring-1 ring-[var(--border-subtle)]">
           <PlaylistMosaic
@@ -895,6 +926,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         {/* ROW 1: Your Playlists */}
         <HorizontalCarouselSection
           title={offline ? 'Offline Playlists' : 'Your Playlists'}
+          isDesktop={isDesktop}
           subtitle={
             playlists.length > 0
               ? `${primaryPlaylists.length} ${primaryPlaylists.length === 1 ? 'playlist' : 'playlists'}${
@@ -907,14 +939,17 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         >
           {loading && playlists.length === 0 ? (
             Array.from({length: 5}).map((_, idx) => (
-              <div key={idx} className="w-40 sm:w-44 shrink-0 snap-start space-y-2.5 animate-pulse">
+              <div
+                key={idx}
+                className={`${isDesktop ? 'w-full' : 'w-40 sm:w-44 shrink-0 snap-start'} space-y-2.5 animate-pulse`}
+              >
                 <div className="w-full aspect-square rounded-xl bg-[var(--bg-secondary)]" />
                 <div className="h-3.5 w-3/4 rounded bg-[var(--bg-secondary)]" />
                 <div className="h-3 w-1/2 rounded bg-[var(--bg-secondary)]" />
               </div>
             ))
           ) : primaryPlaylists.length === 0 ? (
-            <div className="w-full rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 sm:p-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className={`${isDesktop ? 'col-span-full ' : ''}w-full rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 sm:p-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4`}>
               <div className="flex items-center gap-4 min-w-0">
                 <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[var(--bg-elevated)] text-[var(--accent)]">
                   <Disc3 className="w-6 h-6" />
@@ -951,7 +986,11 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         {(secondaryM3uPlaylists.length > 0 ||
           secondaryRecentPlaylists.length > 0 ||
           smartMixes.length > 0) && (
-          <HorizontalCarouselSection title={secondaryRowTitle} subtitle={secondaryRowSubtitle}>
+          <HorizontalCarouselSection
+            title={secondaryRowTitle}
+            subtitle={secondaryRowSubtitle}
+            isDesktop={isDesktop}
+          >
             {/* Imported M3U Playlists (when separated from manual playlists) */}
             {secondaryM3uPlaylists.map((pl) => renderPlaylistCard(pl, 'm3u'))}
 
@@ -971,7 +1010,11 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
                     mix.onCardClick();
                   }
                 }}
-                className="group w-40 sm:w-44 shrink-0 snap-start text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded-xl"
+                className={`group text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] rounded-xl ${
+                  isDesktop
+                    ? 'w-full p-2 -m-2 hover:bg-[var(--bg-secondary)] transition-colors'
+                    : 'w-40 sm:w-44 shrink-0 snap-start'
+                }`}
               >
                 <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-[var(--bg-secondary)] shadow-md ring-1 ring-[var(--border-subtle)]">
                   {mix.variant === 'offline' && mix.covers.length === 0 ? (

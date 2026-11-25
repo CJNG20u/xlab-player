@@ -19,6 +19,7 @@ import {useAuth} from '../context/AuthContext';
 import {useMainScroll} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {useOfflineLibrary} from '../hooks/useOfflineLibrary';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {apiFetch, formatDuration} from '../lib/api';
@@ -50,6 +51,8 @@ interface TrackTableRowProps {
   isActive: boolean;
   isRowPlaying: boolean;
   isMenuOpen: boolean;
+  contextMenuPos: {top: number; left: number} | null;
+  isDesktop: boolean;
   showPlaylistSubmenu: boolean;
   isSelected: boolean;
   isCached: boolean;
@@ -70,6 +73,7 @@ interface TrackTableRowProps {
   onClearLongPress: () => void;
   onRowClick: (numericId: number | null) => void;
   onRowDoubleClick: (index: number) => void;
+  onRowContextMenu: (e: React.MouseEvent, numericId: number | null) => void;
   onToggleSelectRow: (numericId: number | null) => void;
   onDesktopPlayToggle: (index: number, isActive: boolean) => void;
   onCoverClick: (
@@ -108,6 +112,8 @@ const TrackTableRow = React.memo<TrackTableRowProps>(function TrackTableRow({
   isActive,
   isRowPlaying,
   isMenuOpen,
+  contextMenuPos,
+  isDesktop,
   showPlaylistSubmenu,
   isSelected,
   isCached,
@@ -128,6 +134,7 @@ const TrackTableRow = React.memo<TrackTableRowProps>(function TrackTableRow({
   onClearLongPress,
   onRowClick,
   onRowDoubleClick,
+  onRowContextMenu,
   onToggleSelectRow,
   onDesktopPlayToggle,
   onCoverClick,
@@ -172,13 +179,14 @@ const TrackTableRow = React.memo<TrackTableRowProps>(function TrackTableRow({
           : isActive
             ? 'bg-[var(--bg-elevated)]/85'
             : 'hover:bg-[var(--bg-hover)]'
-      } ${selectionMode ? 'cursor-pointer' : ''}`}
+      } ${selectionMode || isDesktop ? 'cursor-pointer' : ''}`}
       onTouchStart={(e) => onTouchStartRow(e, numericId)}
       onTouchMove={onTouchMoveRow}
       onTouchEnd={onClearLongPress}
       onTouchCancel={onClearLongPress}
       onClick={() => onRowClick(numericId)}
       onDoubleClick={() => onRowDoubleClick(index)}
+      onContextMenu={isDesktop ? (e) => onRowContextMenu(e, numericId) : undefined}
     >
       {/* Index / Play button OR Checkbox (Desktop) */}
       <div className="hidden md:flex items-center justify-center">
@@ -395,12 +403,21 @@ const TrackTableRow = React.memo<TrackTableRowProps>(function TrackTableRow({
         )}
       </div>
 
-      {/* Dropdown Menu */}
+      {/* Dropdown Menu (also used as right-click context menu on desktop) */}
       {isMenuOpen && !selectionMode && (
         <div
           ref={menuRef}
           onClick={(e) => e.stopPropagation()}
-          className="absolute right-4 top-12 z-40 w-56 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-strong)] p-1.5 shadow-2xl"
+          style={
+            contextMenuPos
+              ? {top: `${contextMenuPos.top}px`, left: `${contextMenuPos.left}px`}
+              : undefined
+          }
+          className={
+            contextMenuPos
+              ? 'fixed z-50 w-56 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-strong)] p-1.5 shadow-2xl'
+              : 'absolute right-4 top-12 z-40 w-56 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-strong)] p-1.5 shadow-2xl'
+          }
         >
           <button
             type="button"
@@ -569,9 +586,11 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     bumpLibraryRefresh,
   } = usePlayer();
 
+  const isDesktop = useLayoutMode() === 'desktop';
   const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
 
   const [menuTrackId, setMenuTrackId] = useState<number | null>(null);
+  const [contextMenuPos, setContextMenuPos] = useState<{top: number; left: number} | null>(null);
   const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [pendingDeleteTrack, setPendingDeleteTrack] = useState<Track | null>(null);
@@ -714,16 +733,40 @@ export const TrackTable: React.FC<TrackTableProps> = ({
     const onDocClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuTrackId(null);
+        setContextMenuPos(null);
+        setShowPlaylistSubmenu(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMenuTrackId(null);
+        setContextMenuPos(null);
         setShowPlaylistSubmenu(false);
       }
     };
     document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!contextMenuPos) return;
+    const onScroll = () => {
+      setMenuTrackId(null);
+      setContextMenuPos(null);
+      setShowPlaylistSubmenu(false);
+    };
+    window.addEventListener('scroll', onScroll, true);
+    return () => window.removeEventListener('scroll', onScroll, true);
+  }, [contextMenuPos]);
 
   useEffect(() => {
     if (selectionMode) {
       setMenuTrackId(null);
+      setContextMenuPos(null);
       setShowPlaylistSubmenu(false);
     }
   }, [selectionMode]);
@@ -926,8 +969,25 @@ export const TrackTable: React.FC<TrackTableProps> = ({
 
   const handleToggleMenuRow = useCallback((numericId: number | null, isMenuOpen: boolean) => {
     setShowPlaylistSubmenu(false);
+    setContextMenuPos(null);
     setMenuTrackId(isMenuOpen ? null : numericId);
   }, []);
+
+  const handleRowContextMenu = useCallback(
+    (e: React.MouseEvent, numericId: number | null) => {
+      if (actionRef.current.selectionMode || numericId === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const menuWidth = 228;
+      const menuHeight = 320;
+      const left = Math.max(12, Math.min(e.clientX, window.innerWidth - menuWidth - 12));
+      const top = Math.max(12, Math.min(e.clientY, window.innerHeight - menuHeight - 12));
+      setShowPlaylistSubmenu(false);
+      setContextMenuPos({top, left});
+      setMenuTrackId(numericId);
+    },
+    []
+  );
 
   const handlePlayNextRow = useCallback(
     (index: number) => {
@@ -1071,6 +1131,8 @@ export const TrackTable: React.FC<TrackTableProps> = ({
         isActive={isActive}
         isRowPlaying={isActive && isPlaying}
         isMenuOpen={isMenuOpen}
+        contextMenuPos={isMenuOpen ? contextMenuPos : null}
+        isDesktop={isDesktop}
         showPlaylistSubmenu={rowShowSubmenu}
         isSelected={isSelected}
         isCached={isCached}
@@ -1093,6 +1155,7 @@ export const TrackTable: React.FC<TrackTableProps> = ({
         onClearLongPress={clearLongPress}
         onRowClick={handleRowClick}
         onRowDoubleClick={handleRowDoubleClick}
+        onRowContextMenu={handleRowContextMenu}
         onToggleSelectRow={handleToggleSelectRow}
         onDesktopPlayToggle={handleDesktopPlayToggle}
         onCoverClick={handleCoverClick}

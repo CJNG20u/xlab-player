@@ -31,6 +31,7 @@ import {
 import {useAuth} from '../context/AuthContext';
 import {useMainScroll} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {
   apiFetch,
@@ -391,6 +392,7 @@ const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
   horizontalOnly = false,
   children,
 }) => {
+  const isDesktop = useLayoutMode() === 'desktop';
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
   const scrollShelf = (direction: 'left' | 'right') => {
@@ -403,11 +405,15 @@ const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
     });
   };
 
-  const desktopGridClasses = horizontalOnly
-    ? ''
-    : variant === 'circle'
-      ? 'lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0'
-      : 'lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 min-[1720px]:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0';
+  const desktopGridClasses = isDesktop
+    ? variant === 'circle'
+      ? 'grid grid-cols-[repeat(auto-fill,minmax(156px,1fr))] gap-4 overflow-visible mx-0 px-0 pb-0'
+      : 'grid grid-cols-[repeat(auto-fill,minmax(185px,1fr))] gap-4 overflow-visible mx-0 px-0 pb-0'
+    : horizontalOnly
+      ? ''
+      : variant === 'circle'
+        ? 'lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0'
+        : 'lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 min-[1720px]:grid-cols-10 lg:gap-3 lg:overflow-visible lg:mx-0 lg:px-0 lg:pb-0';
 
   return (
     <section className="space-y-3">
@@ -415,31 +421,37 @@ const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
         <h2 className="font-display text-lg sm:text-xl font-bold tracking-tight text-[var(--text-primary)]">
           {title}
         </h2>
-        <div
-          className={`hidden sm:flex ${horizontalOnly ? '' : 'lg:hidden'} items-center gap-1.5 shrink-0`}
-        >
-          <button
-            type="button"
-            onClick={() => scrollShelf('left')}
-            aria-label={`Scroll ${title} left`}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
+        {!isDesktop && (
+          <div
+            className={`hidden sm:flex ${horizontalOnly ? '' : 'lg:hidden'} items-center gap-1.5 shrink-0`}
           >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => scrollShelf('right')}
-            aria-label={`Scroll ${title} right`}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={() => scrollShelf('left')}
+              aria-label={`Scroll ${title} left`}
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => scrollShelf('right')}
+              aria-label={`Scroll ${title} right`}
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
 
       <div
         ref={scrollerRef}
-        className={`flex gap-2.5 sm:gap-3.5 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar ${desktopGridClasses}`}
+        className={
+          isDesktop
+            ? desktopGridClasses
+            : `flex gap-2.5 sm:gap-3.5 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar ${desktopGridClasses}`
+        }
       >
         {children}
       </div>
@@ -447,84 +459,116 @@ const ResponsiveDiscoverShelf: React.FC<ResponsiveDiscoverShelfProps> = ({
   );
 };
 
-const DiscoverSkeletonShelves: React.FC = () => (
-  <div className="space-y-8" aria-label="Loading personalized recommendations">
-    {/* New releases skeleton */}
-    <div className="space-y-3">
-      <div className="h-6 w-36 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
-        {Array.from({length: 8}).map((_, i) => (
-          <div key={i} className="w-[144px] sm:w-[164px] lg:w-auto shrink-0 space-y-2.5 p-2">
-            <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3 w-3/5 rounded bg-[var(--bg-secondary)] animate-pulse" />
-          </div>
-        ))}
+const DiscoverSkeletonShelves: React.FC = () => {
+  const isDesktop = useLayoutMode() === 'desktop';
+  return (
+    <div className="space-y-8" aria-label="Loading personalized recommendations">
+      {/* New releases skeleton */}
+      <div className="space-y-3">
+        <div className="h-6 w-36 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <div
+          className={
+            isDesktop
+              ? 'grid grid-cols-[repeat(auto-fill,minmax(185px,1fr))] gap-4'
+              : 'flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8'
+          }
+        >
+          {Array.from({length: 8}).map((_, i) => (
+            <div
+              key={i}
+              className={`${isDesktop ? 'w-full' : 'w-[144px] sm:w-[164px] lg:w-auto shrink-0'} space-y-2.5 p-2`}
+            >
+              <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3 w-3/5 rounded bg-[var(--bg-secondary)] animate-pulse" />
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
 
-    {/* Artists to discover skeleton */}
-    <div className="space-y-3">
-      <div className="h-6 w-44 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
-        {Array.from({length: 10}).map((_, i) => (
-          <div
-            key={i}
-            className="w-[128px] sm:w-[144px] lg:w-auto shrink-0 space-y-2.5 p-2 flex flex-col items-center"
-          >
-            <div className="aspect-square w-full rounded-full bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3.5 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3 w-4/5 rounded bg-[var(--bg-secondary)] animate-pulse" />
-          </div>
-        ))}
+      {/* Artists to discover skeleton */}
+      <div className="space-y-3">
+        <div className="h-6 w-44 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <div
+          className={
+            isDesktop
+              ? 'grid grid-cols-[repeat(auto-fill,minmax(156px,1fr))] gap-4'
+              : 'flex gap-3 overflow-hidden lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10'
+          }
+        >
+          {Array.from({length: 10}).map((_, i) => (
+            <div
+              key={i}
+              className={`${isDesktop ? 'w-full' : 'w-[128px] sm:w-[144px] lg:w-auto shrink-0'} space-y-2.5 p-2 flex flex-col items-center`}
+            >
+              <div className="aspect-square w-full rounded-full bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3.5 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3 w-4/5 rounded bg-[var(--bg-secondary)] animate-pulse" />
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
 
-    {/* Albums for you skeleton */}
-    <div className="space-y-3">
-      <div className="h-6 w-40 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
-        {Array.from({length: 8}).map((_, i) => (
-          <div key={i} className="w-[144px] sm:w-[164px] lg:w-auto shrink-0 space-y-2.5 p-2">
-            <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3 w-2/3 rounded bg-[var(--bg-secondary)] animate-pulse" />
-          </div>
-        ))}
+      {/* Albums for you skeleton */}
+      <div className="space-y-3">
+        <div className="h-6 w-40 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <div
+          className={
+            isDesktop
+              ? 'grid grid-cols-[repeat(auto-fill,minmax(185px,1fr))] gap-4'
+              : 'flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8'
+          }
+        >
+          {Array.from({length: 8}).map((_, i) => (
+            <div
+              key={i}
+              className={`${isDesktop ? 'w-full' : 'w-[144px] sm:w-[164px] lg:w-auto shrink-0'} space-y-2.5 p-2`}
+            >
+              <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3 w-2/3 rounded bg-[var(--bg-secondary)] animate-pulse" />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 interface DiscoverArtistCardProps {
   artist: DiscoverArtistItem;
   onSelect: (artist: DiscoverArtistItem) => void;
 }
 
-const DiscoverArtistCard: React.FC<DiscoverArtistCardProps> = ({artist, onSelect}) => (
-  <button
-    type="button"
-    onClick={() => onSelect(artist)}
-    className="group w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-  >
-    <div className="relative aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
-      <DiscoverArtwork
-        directUrl={artist.thumbnailUrl}
-        videoId={artist.videoId}
-        fallbackUrl={artist.fallbackThumbnailUrl}
-        alt={artist.name}
-        shape="circle"
-        labelForFallback={artist.name}
-        className="transition-transform duration-200 group-hover:scale-[1.04]"
-      />
-    </div>
+const DiscoverArtistCard: React.FC<DiscoverArtistCardProps> = ({artist, onSelect}) => {
+  const isDesktop = useLayoutMode() === 'desktop';
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(artist)}
+      className={`group ${
+        isDesktop ? 'w-full' : 'w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start'
+      } rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]`}
+    >
+      <div className="relative aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
+        <DiscoverArtwork
+          directUrl={artist.thumbnailUrl}
+          videoId={artist.videoId}
+          fallbackUrl={artist.fallbackThumbnailUrl}
+          alt={artist.name}
+          shape="circle"
+          labelForFallback={artist.name}
+          className="transition-transform duration-200 group-hover:scale-[1.04]"
+        />
+      </div>
 
-    <div className="mt-2.5 min-w-0 space-y-0.5">
-      <p className="text-sm font-semibold text-[var(--text-primary)] truncate">{artist.name}</p>
-      <p className="text-[11px] text-[var(--text-secondary)] truncate">{artist.subtitle}</p>
-    </div>
-  </button>
-);
+      <div className="mt-2.5 min-w-0 space-y-0.5">
+        <p className="text-sm font-semibold text-[var(--text-primary)] truncate">{artist.name}</p>
+        <p className="text-[11px] text-[var(--text-secondary)] truncate">{artist.subtitle}</p>
+      </div>
+    </button>
+  );
+};
 
 interface DiscoverAlbumCardProps {
   album: DiscoverAlbumItem;
@@ -538,59 +582,64 @@ const DiscoverAlbumCard: React.FC<DiscoverAlbumCardProps> = ({
   isCurrent,
   onOpen,
   onQuickSearch,
-}) => (
-  <div
-    role="button"
-    tabIndex={0}
-    onClick={() => onOpen(album)}
-    onKeyDown={(e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        onOpen(album);
-      }
-    }}
-    className="group w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-  >
-    <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
-      <DiscoverArtwork
-        directUrl={album.thumbnailUrl}
-        videoId={album.videoId}
-        fallbackUrl={album.fallbackThumbnailUrl}
-        alt={album.title}
-        shape="square"
-        labelForFallback={album.title}
-        className="transition-transform duration-200 group-hover:scale-[1.03]"
-      />
-      {onQuickSearch && (
-        <button
-          type="button"
-          onClick={(e) => onQuickSearch(e, album)}
-          title={`Search online for ${album.title}`}
-          aria-label={`Search online for ${album.title}`}
-          className="absolute top-2 right-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/85 transition-opacity"
-        >
-          <Search className="w-3.5 h-3.5" />
-        </button>
-      )}
-    </div>
+}) => {
+  const isDesktop = useLayoutMode() === 'desktop';
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(album)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen(album);
+        }
+      }}
+      className={`group ${
+        isDesktop ? 'w-full' : 'w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start'
+      } rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]`}
+    >
+      <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
+        <DiscoverArtwork
+          directUrl={album.thumbnailUrl}
+          videoId={album.videoId}
+          fallbackUrl={album.fallbackThumbnailUrl}
+          alt={album.title}
+          shape="square"
+          labelForFallback={album.title}
+          className="transition-transform duration-200 group-hover:scale-[1.03]"
+        />
+        {onQuickSearch && (
+          <button
+            type="button"
+            onClick={(e) => onQuickSearch(e, album)}
+            title={`Search online for ${album.title}`}
+            aria-label={`Search online for ${album.title}`}
+            className="absolute top-2 right-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/85 transition-opacity"
+          >
+            <Search className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
 
-    <div className="mt-2.5 min-w-0 space-y-0.5">
-      <p
-        className={`text-sm font-semibold truncate ${
-          isCurrent ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
-        }`}
-      >
-        {album.title}
-      </p>
-      <p className="text-xs font-medium text-[var(--text-secondary)] truncate">{album.artist}</p>
-      {(album.releaseYear || album.subtitle) && (
-        <p className="text-[11px] text-[var(--text-muted)] truncate">
-          {album.releaseYear || album.subtitle}
+      <div className="mt-2.5 min-w-0 space-y-0.5">
+        <p
+          className={`text-sm font-semibold truncate ${
+            isCurrent ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
+          }`}
+        >
+          {album.title}
         </p>
-      )}
+        <p className="text-xs font-medium text-[var(--text-secondary)] truncate">{album.artist}</p>
+        {(album.releaseYear || album.subtitle) && (
+          <p className="text-[11px] text-[var(--text-muted)] truncate">
+            {album.releaseYear || album.subtitle}
+          </p>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 interface DiscoverYouTubePlaylistCardProps {
   playlist: YouTubePlaylistSearchItem;
@@ -601,6 +650,7 @@ const DiscoverYouTubePlaylistCard: React.FC<DiscoverYouTubePlaylistCardProps> = 
   playlist,
   onOpen,
 }) => {
+  const isDesktop = useLayoutMode() === 'desktop';
   const countLabel =
     playlist.videoCount != null && playlist.videoCount > 0
       ? `${playlist.videoCount} ${playlist.videoCount === 1 ? 'song' : 'songs'}`
@@ -617,7 +667,9 @@ const DiscoverYouTubePlaylistCard: React.FC<DiscoverYouTubePlaylistCardProps> = 
           onOpen(playlist);
         }
       }}
-      className="group w-[144px] sm:w-[164px] shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+      className={`group ${
+        isDesktop ? 'w-full' : 'w-[144px] sm:w-[164px] shrink-0 snap-start'
+      } rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]`}
     >
       <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
         <DiscoverArtwork
@@ -644,38 +696,55 @@ const DiscoverYouTubePlaylistCard: React.FC<DiscoverYouTubePlaylistCardProps> = 
   );
 };
 
-const DiscoverSearchSkeleton: React.FC = () => (
-  <div className="space-y-8" aria-label="Searching catalog">
-    {/* Artists skeleton */}
-    <div className="space-y-3">
-      <div className="h-6 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
-        {Array.from({length: 8}).map((_, i) => (
-          <div
-            key={i}
-            className="w-[128px] sm:w-[144px] lg:w-auto shrink-0 space-y-2.5 p-2 flex flex-col items-center"
-          >
-            <div className="aspect-square w-full rounded-full bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3.5 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3 w-1/2 rounded bg-[var(--bg-secondary)] animate-pulse" />
-          </div>
-        ))}
+const DiscoverSearchSkeleton: React.FC = () => {
+  const isDesktop = useLayoutMode() === 'desktop';
+  return (
+    <div className="space-y-8" aria-label="Searching catalog">
+      {/* Artists skeleton */}
+      <div className="space-y-3">
+        <div className="h-6 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <div
+          className={
+            isDesktop
+              ? 'grid grid-cols-[repeat(auto-fill,minmax(156px,1fr))] gap-4'
+              : 'flex gap-3 overflow-hidden lg:grid lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10'
+          }
+        >
+          {Array.from({length: 8}).map((_, i) => (
+            <div
+              key={i}
+              className={`${isDesktop ? 'w-full' : 'w-[128px] sm:w-[144px] lg:w-auto shrink-0'} space-y-2.5 p-2 flex flex-col items-center`}
+            >
+              <div className="aspect-square w-full rounded-full bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3.5 w-3/4 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3 w-1/2 rounded bg-[var(--bg-secondary)] animate-pulse" />
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
 
-    {/* Albums skeleton */}
-    <div className="space-y-3">
-      <div className="h-6 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
-      <div className="flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
-        {Array.from({length: 8}).map((_, i) => (
-          <div key={i} className="w-[144px] sm:w-[164px] lg:w-auto shrink-0 space-y-2.5 p-2">
-            <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
-            <div className="h-3 w-2/3 rounded bg-[var(--bg-secondary)] animate-pulse" />
-          </div>
-        ))}
+      {/* Albums skeleton */}
+      <div className="space-y-3">
+        <div className="h-6 w-24 rounded bg-[var(--bg-elevated)] animate-pulse" />
+        <div
+          className={
+            isDesktop
+              ? 'grid grid-cols-[repeat(auto-fill,minmax(185px,1fr))] gap-4'
+              : 'flex gap-3 overflow-hidden lg:grid lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8'
+          }
+        >
+          {Array.from({length: 8}).map((_, i) => (
+            <div
+              key={i}
+              className={`${isDesktop ? 'w-full' : 'w-[144px] sm:w-[164px] lg:w-auto shrink-0'} space-y-2.5 p-2`}
+            >
+              <div className="aspect-square w-full rounded-lg bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3.5 w-4/5 rounded bg-[var(--bg-elevated)] animate-pulse" />
+              <div className="h-3 w-2/3 rounded bg-[var(--bg-secondary)] animate-pulse" />
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
 
     {/* Songs skeleton */}
     <div className="space-y-3">
@@ -695,10 +764,12 @@ const DiscoverSearchSkeleton: React.FC = () => (
         ))}
       </div>
     </div>
-  </div>
-);
+    </div>
+  );
+};
 
 export const DiscoverPage: React.FC = () => {
+  const isDesktop = useLayoutMode() === 'desktop';
   const {user, isOfflineMode} = useAuth();
   const {
     currentTrack,
@@ -1914,7 +1985,11 @@ export const DiscoverPage: React.FC = () => {
                             handleOpenDiscoverRelease(item);
                           }
                         }}
-                        className="group w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                        className={`group ${
+                          isDesktop
+                            ? 'w-full'
+                            : 'w-[144px] sm:w-[164px] lg:w-auto shrink-0 snap-start'
+                        } rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]`}
                       >
                         <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
                           <DiscoverArtwork

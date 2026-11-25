@@ -25,9 +25,11 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt} from '../components/AlbumArt';
+import {DesktopNowPlayingView} from '../components/DesktopNowPlayingView';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
 import {useSwipeTrackGesture} from '../hooks/useSwipeTrackGesture';
 import {
@@ -99,6 +101,7 @@ function getTrackPlaylistActionKeys(track: Track): string[] {
 export const NowPlayingPage: React.FC = () => {
   const navigate = useNavigate();
   useScrollReady(true);
+  const isDesktop = useLayoutMode() === 'desktop';
   const {user, isOfflineMode} = useAuth();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
@@ -658,6 +661,68 @@ export const NowPlayingPage: React.FC = () => {
     });
   }, [activeLyricIndex, lyricsOpen, parsedLyrics?.isSynced]);
 
+  const coverUrl = activeTrack ? offlineCoverBackdrop || getTrackCoverUrl(activeTrack) : null;
+  const isYouTubeTrack = Boolean(activeTrack?.isYouTubeStream);
+  const ytSaveStatus =
+    !isRemoteActive && activeTrack && isYouTubeTrack ? getYouTubeSaveStatus(activeTrack.id) : 'idle';
+  const isAddingCurrentToPlaylist = Boolean(
+    !isRemoteActive &&
+      currentTrack &&
+      currentTrack.isYouTubeStream &&
+      getTrackPlaylistActionKeys(currentTrack).some((k) => pendingPlaylistAddKeys.has(k))
+  );
+
+  const handleSaveToLibrary = async () => {
+    if (isRemoteActive || !currentTrack) return;
+    const res = await saveYouTubeTrackToLibrary(currentTrack);
+    flashToast(res.message);
+  };
+
+  if (isDesktop) {
+    return (
+      <>
+        <DesktopNowPlayingView
+          activeTrack={activeTrack}
+          currentTrack={currentTrack}
+          isRemoteActive={isRemoteActive}
+          remoteDeviceName={remote.targetDevice?.name ?? null}
+          offline={offline}
+          canDownload={canDownload}
+          isLight={isLight}
+          isTidal={isTidal}
+          dominantTopHexColor={dominantTopHexColor}
+          coverUrl={coverUrl}
+          actionToast={actionToast}
+          lyricsLoading={lyricsLoading}
+          isInstrumental={Boolean(lyricsData?.instrumental)}
+          parsedLyrics={parsedLyrics}
+          activeLyricIndex={activeLyricIndex}
+          ytSaveStatus={ytSaveStatus}
+          isAddingCurrentToPlaylist={isAddingCurrentToPlaylist}
+          onSeek={handleSeek}
+          onSaveToLibrary={() => void handleSaveToLibrary()}
+          onOpenPlaylistPicker={handleOpenPlaylistPicker}
+          onToggleLike={(id) => void toggleLikeTrack(id)}
+          onOpenDevices={() => remote.setDeviceSheetOpen(true)}
+          onPlayHereQuick={() => void handlePlayHereQuick()}
+          onFlashToast={flashToast}
+        />
+        <AddToPlaylistModal
+          open={Boolean(pickerTrack)}
+          trackIds={
+            pickerTrack && !pickerTrack.isYouTubeStream && typeof pickerTrack.id === 'number'
+              ? [pickerTrack.id]
+              : []
+          }
+          playlists={playlists}
+          onClose={() => setPickerTrack(null)}
+          onPick={pickerTrack?.isYouTubeStream ? handlePickYouTubePlaylist : undefined}
+          onSuccess={handleLibraryPlaylistSuccess}
+        />
+      </>
+    );
+  }
+
   if (!activeTrack) {
     return (
       <div className="flex h-full min-h-[70vh] flex-col items-center justify-center px-6 pt-safe text-center bg-[var(--bg-primary)]">
@@ -697,26 +762,10 @@ export const NowPlayingPage: React.FC = () => {
     );
   }
 
-  const coverUrl = offlineCoverBackdrop || getTrackCoverUrl(activeTrack);
   const progressPct =
     activeDuration > 0 ? Math.min(100, (activeTime / activeDuration) * 100) : 0;
   const remaining = Math.max(0, (activeDuration || 0) - activeTime);
   const volPct = (activeMuted ? 0 : activeVolume) * 100;
-  const isYouTubeTrack = Boolean(activeTrack.isYouTubeStream);
-  const ytSaveStatus =
-    !isRemoteActive && isYouTubeTrack ? getYouTubeSaveStatus(activeTrack.id) : 'idle';
-  const isAddingCurrentToPlaylist = Boolean(
-    !isRemoteActive &&
-      currentTrack &&
-      currentTrack.isYouTubeStream &&
-      getTrackPlaylistActionKeys(currentTrack).some((k) => pendingPlaylistAddKeys.has(k))
-  );
-
-  const handleSaveToLibrary = async () => {
-    if (isRemoteActive || !currentTrack) return;
-    const res = await saveYouTubeTrackToLibrary(currentTrack);
-    flashToast(res.message);
-  };
 
   return (
     <div

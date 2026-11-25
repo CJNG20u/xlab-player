@@ -17,6 +17,7 @@ import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import {useMainScroll} from '../context/MainScrollContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
+import {useLayoutMode} from '../hooks/useLayoutMode';
 import {
   apiFetch,
   formatDuration,
@@ -642,6 +643,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
   onOpenArtist,
   onFlashToast,
 }) => {
+  const isDesktop = useLayoutMode() === 'desktop';
   const {theme, isLight, isTidal} = useTheme();
   const {element: mainScrollElement} = useMainScroll();
   const {
@@ -2051,7 +2053,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                   {artist.albums.length} {artist.albums.length === 1 ? 'release' : 'releases'}
                 </span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5 sm:gap-3.5">
+              <div
+                className={
+                  isDesktop
+                    ? 'grid grid-cols-[repeat(auto-fill,minmax(185px,1fr))] gap-4'
+                    : 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5 sm:gap-3.5'
+                }
+              >
                 {artist.albums.map((alb) => (
                   <button
                     key={alb.id}
@@ -2064,7 +2072,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                         coverHint: alb.coverUrl,
                       })
                     }
-                    className="group rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                    className="group rounded-xl p-2 text-left transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                   >
                     <div className="aspect-square w-full rounded-lg overflow-hidden bg-[var(--bg-elevated)] shadow-md">
                       <ResilientCover
@@ -2093,7 +2101,13 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
               <h2 className="font-display text-lg font-bold tracking-tight text-[var(--text-primary)]">
                 Fans Also Like
               </h2>
-              <div className="flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar lg:grid lg:grid-cols-6 xl:grid-cols-8 lg:overflow-visible lg:mx-0 lg:px-0">
+              <div
+                className={
+                  isDesktop
+                    ? 'grid grid-cols-[repeat(auto-fill,minmax(152px,1fr))] gap-4'
+                    : 'flex gap-3 overflow-x-auto pb-2 -mx-4 px-4 sm:-mx-2 sm:px-2 snap-x snap-mandatory no-scrollbar lg:grid lg:grid-cols-6 xl:grid-cols-8 lg:overflow-visible lg:mx-0 lg:px-0'
+                }
+              >
                 {artist.relatedArtists.map((rel) => (
                   <button
                     key={rel.id}
@@ -2107,7 +2121,11 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                         });
                       }
                     }}
-                    className="group w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                    className={`group ${
+                      isDesktop
+                        ? 'w-full'
+                        : 'w-[128px] sm:w-[144px] lg:w-auto shrink-0 snap-start'
+                    } rounded-xl p-2 text-center transition-colors hover:bg-[var(--bg-secondary)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]`}
                   >
                     <div className="aspect-square w-full rounded-full overflow-hidden bg-[var(--bg-elevated)] shadow-md ring-1 ring-[var(--border-subtle)]">
                       <ResilientCover
