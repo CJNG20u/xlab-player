@@ -15,6 +15,7 @@ export interface DesktopKeyboardShortcutsOptions {
   onToggleMute: () => void;
   onToggleLyrics: () => void;
   onFocusQueue: () => void;
+  onToggleSidebar?: () => void;
 }
 
 const NON_TEXT_INPUT_TYPES = new Set([
@@ -104,6 +105,7 @@ export function processDesktopShortcutKeyDown(
     onToggleMute,
     onToggleLyrics,
     onFocusQueue,
+    onToggleSidebar,
   } = options;
 
   const key = e.key;
@@ -173,6 +175,12 @@ export function processDesktopShortcutKeyDown(
   if (lower === 'q' && !e.shiftKey) {
     e.preventDefault();
     onFocusQueue();
+    return true;
+  }
+
+  if (key === '[' && onToggleSidebar) {
+    e.preventDefault();
+    onToggleSidebar();
     return true;
   }
 

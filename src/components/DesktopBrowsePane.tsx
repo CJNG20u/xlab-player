@@ -305,7 +305,7 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
           e.preventDefault();
           openMenuAt(track, e.clientX, e.clientY);
         }}
-        className={`group flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors select-none ${
+        className={`group flex items-center gap-[clamp(0.625rem,0.75vw,0.9rem)] rounded-lg px-[clamp(0.5rem,0.65vw,0.85rem)] py-[clamp(0.4rem,0.48vw,0.68rem)] transition-colors select-none ${
           isActive
             ? 'bg-[var(--bg-elevated)]/90'
             : 'hover:bg-[var(--bg-hover)]/80'
@@ -320,16 +320,16 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
               playTrack(track, list);
             }
           }}
-          className="flex min-w-0 flex-1 items-center gap-2.5 text-left cursor-pointer"
+          className="flex min-w-0 flex-1 items-center gap-[clamp(0.625rem,0.75vw,0.9rem)] text-left cursor-pointer"
         >
-          <div className="relative w-10 h-10 shrink-0 rounded overflow-hidden">
+          <div className="relative w-[clamp(2.5rem,2.15rem_+_0.68vw,3.25rem)] h-[clamp(2.5rem,2.15rem_+_0.68vw,3.25rem)] shrink-0 rounded overflow-hidden">
             <AlbumArt
               coverFile={track.cover_file}
               externalUrl={track.coverUrl}
               alt={track.title}
               color={track.dominant_color}
-              className="w-10 h-10 rounded"
-              iconSize={15}
+              className="w-full h-full rounded"
+              iconSize={16}
             />
             <span
               className={`absolute inset-0 flex items-center justify-center bg-black/55 text-white transition-opacity ${
@@ -337,26 +337,28 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
               }`}
             >
               {isRowPlaying ? (
-                <Pause className="w-3.5 h-3.5 fill-current" />
+                <Pause className="w-4 h-4 fill-current" />
               ) : (
-                <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                <Play className="w-4 h-4 fill-current ml-0.5" />
               )}
             </span>
           </div>
           <div className="min-w-0 flex-1">
             <p
-              className={`text-sm font-medium truncate leading-snug ${
+              className={`text-[clamp(0.875rem,0.7rem_+_0.26vw,1.125rem)] font-medium truncate leading-snug ${
                 isActive ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'
               }`}
             >
               {formatDisplayTitle(track.title)}
             </p>
-            <p className="text-xs text-[var(--text-secondary)] truncate">{track.artist}</p>
+            <p className="text-[clamp(0.75rem,0.62rem_+_0.22vw,0.9375rem)] text-[var(--text-secondary)] truncate leading-snug">
+              {track.artist}
+            </p>
           </div>
         </button>
 
         <div className="flex items-center gap-1 shrink-0">
-          <span className="font-mono text-[11px] tabular-nums text-[var(--text-muted)] group-hover:hidden">
+          <span className="font-mono text-[clamp(0.75rem,0.64rem_+_0.18vw,0.875rem)] tabular-nums text-[var(--text-muted)] group-hover:hidden">
             {formatDuration(track.duration)}
           </span>
           <button
@@ -366,7 +368,7 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
               const rect = e.currentTarget.getBoundingClientRect();
               openMenuAt(track, rect.right - 220, rect.bottom + 4);
             }}
-            className="hidden group-hover:flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+            className="hidden group-hover:flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
             aria-label={`Options for ${track.title}`}
             title="Track options"
           >
@@ -385,23 +387,23 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
   return (
     <aside
       aria-label="Library and search"
-      className="w-[232px] xl:w-[296px] 2xl:w-[320px] shrink-0 flex flex-col min-h-0 border-r border-[var(--border-subtle)] bg-[var(--np-lyrics-bg)]/55 backdrop-blur-md"
+      className="w-[clamp(240px,24%,300px)] xl:w-[clamp(300px,24%,460px)] shrink-0 flex flex-col min-h-0 border-r border-[var(--border-subtle)] bg-[var(--np-lyrics-bg)]/55 backdrop-blur-md"
     >
       {/* Header */}
-      <div className="flex items-center justify-between gap-2 px-4 py-3.5 border-b border-[var(--border-subtle)] shrink-0">
+      <div className="flex items-center justify-between gap-2 px-[clamp(0.875rem,1.15vw,1.5rem)] py-[clamp(0.75rem,0.9vw,1.125rem)] border-b border-[var(--border-subtle)] shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <Library className="w-4 h-4 text-[var(--accent)] shrink-0" />
-          <h2 className="font-display text-sm font-bold text-[var(--text-primary)] truncate">
+          <Library className="w-[clamp(1rem,1.05vw,1.2rem)] h-[clamp(1rem,1.05vw,1.2rem)] text-[var(--accent)] shrink-0" />
+          <h2 className="font-display text-[clamp(0.875rem,0.75rem_+_0.24vw,1.125rem)] font-bold text-[var(--text-primary)] truncate">
             Library
           </h2>
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="flex items-center rounded-md bg-[var(--bg-primary)]/60 p-0.5 border border-[var(--border-subtle)]">
             <button
               type="button"
               onClick={() => setTab('all')}
-              className={`px-2 py-0.5 text-[11px] font-semibold rounded transition-colors cursor-pointer whitespace-nowrap ${
+              className={`px-2.5 py-0.5 text-[clamp(0.7rem,0.62rem_+_0.14vw,0.825rem)] font-semibold rounded transition-colors cursor-pointer whitespace-nowrap ${
                 tab === 'all'
                   ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -412,7 +414,7 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
             <button
               type="button"
               onClick={() => setTab('liked')}
-              className={`px-2 py-0.5 text-[11px] font-semibold rounded transition-colors cursor-pointer whitespace-nowrap ${
+              className={`px-2.5 py-0.5 text-[clamp(0.7rem,0.62rem_+_0.14vw,0.825rem)] font-semibold rounded transition-colors cursor-pointer whitespace-nowrap ${
                 tab === 'liked'
                   ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)]'
                   : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -434,22 +436,22 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
       </div>
 
       {/* Inline Search */}
-      <div className="px-3 py-2.5 border-b border-[var(--border-subtle)] shrink-0">
+      <div className="px-[clamp(0.75rem,1vw,1.25rem)] py-[clamp(0.6rem,0.75vw,0.9rem)] border-b border-[var(--border-subtle)] shrink-0">
         <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[var(--text-muted)]" />
+          <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={offline ? 'Filter offline library...' : 'Search library or online...'}
             aria-label="Search library or online"
-            className="w-full rounded-lg bg-[var(--bg-input)]/85 border border-[var(--border-subtle)] pl-8 pr-7 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
+            className="w-full rounded-lg bg-[var(--bg-input)]/85 border border-[var(--border-subtle)] pl-9 pr-8 py-[clamp(0.45rem,0.55vw,0.65rem)] text-[clamp(0.78rem,0.66rem_+_0.2vw,0.9375rem)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:outline-none"
           />
           {query && (
             <button
               type="button"
               onClick={() => setQuery('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
               aria-label="Clear search"
             >
               <X className="w-3.5 h-3.5" />
@@ -459,15 +461,15 @@ export const DesktopBrowsePane: React.FC<DesktopBrowsePaneProps> = ({onCollapse,
       </div>
 
       {/* Scrollable Track List */}
-      <div className="flex-1 overflow-y-auto px-2.5 py-2.5 space-y-4">
+      <div className="flex-1 overflow-y-auto px-[clamp(0.625rem,0.9vw,1.15rem)] py-[clamp(0.625rem,0.9vw,1.15rem)] space-y-4">
         {loadingLibrary ? (
-          <div className="flex items-center justify-center py-12 gap-2 text-xs text-[var(--text-secondary)]">
+          <div className="flex items-center justify-center py-12 gap-2 text-[clamp(0.78rem,0.66rem_+_0.2vw,0.9375rem)] text-[var(--text-secondary)]">
             <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
             <span>Loading library...</span>
           </div>
         ) : (
           <>
-            <section className="space-y-1" role="list" aria-label="Library tracks">
+            <section className="space-y-[clamp(0.2rem,0.3vw,0.45rem)]" role="list" aria-label="Library tracks">
               {filteredLibraryTracks.length === 0 ? (
                 <p className="px-2 py-4 text-xs text-[var(--text-muted)] text-center">
                   {query.trim()

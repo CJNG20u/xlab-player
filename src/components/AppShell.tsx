@@ -10,6 +10,8 @@ import {
   Maximize2,
   Mic2,
   MonitorSpeaker,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pause,
   Play,
   Plus,
@@ -128,7 +130,21 @@ const DesktopFullWidthProgressBar: React.FC<DesktopPlaybackScrubberProps> = Reac
     const progressPct = duration > 0 ? Math.min(100, (displayTime / duration) * 100) : 0;
 
     return (
-      <div className="xlab-desktop-scrubber-group relative w-full h-3 -mt-1.5 flex items-center group">
+      <div className="xlab-desktop-scrubber-group relative w-full h-4 -mt-2 flex items-center group">
+        {/* Visual full-width track: 3px at rest, 6px on hover/focus */}
+        <div className="relative w-full h-[3px] group-hover:h-[6px] group-focus-within:h-[6px] bg-[var(--slider-track)] transition-[height] duration-150">
+          <div
+            className="h-full bg-[var(--accent)]"
+            style={{width: `${progressPct}%`}}
+          />
+          {!disabled && (
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3 w-3 rounded-full bg-[var(--slider-thumb)] shadow-[0_2px_8px_rgba(0,0,0,0.45),0_0_0_3px_var(--accent-soft)] transition-transform duration-150 group-hover:scale-125 group-active:scale-135 group-focus-within:scale-125 group-focus-within:ring-2 group-focus-within:ring-[var(--focus-ring)]"
+              style={{left: `${progressPct}%`}}
+            />
+          )}
+        </div>
         <input
           type="range"
           min={0}
@@ -137,10 +153,7 @@ const DesktopFullWidthProgressBar: React.FC<DesktopPlaybackScrubberProps> = Reac
           value={Math.min(displayTime, duration || 1)}
           disabled={disabled}
           onChange={(e) => onSeek(parseFloat(e.target.value))}
-          className="xlab-desktop-scrubber w-full h-1 group-hover:h-1.5 transition-[height]"
-          style={{
-            background: `linear-gradient(to right, var(--accent) ${progressPct}%, var(--slider-track) ${progressPct}%)`,
-          }}
+          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-default"
           aria-label="Seek progress"
         />
       </div>
@@ -160,7 +173,7 @@ const DesktopTimeReadout: React.FC<DesktopTimeReadoutProps> = React.memo(
     const displayTime = isRemoteActive ? remoteTime : localTime;
 
     return (
-      <span className="font-mono text-[11px] tabular-nums text-[var(--text-secondary)] whitespace-nowrap select-none">
+      <span className="font-mono text-[clamp(0.8125rem,0.72rem_+_0.18vw,0.9375rem)] font-medium tabular-nums text-[var(--text-secondary)] whitespace-nowrap select-none">
         {formatDuration(displayTime)} / {formatDuration(duration)}
       </span>
     );
@@ -179,8 +192,11 @@ const AppShellInner: React.FC = () => {
     desktopLyricsVisible,
     setDesktopLyricsVisible,
     toggleDesktopLyrics,
+    sidebarCollapsed,
+    toggleSidebar,
     requestFocusQueue,
   } = useDesktopLayout();
+  const isSidebarCollapsed = isDesktop && sidebarCollapsed;
   const {user, isOfflineMode, logout} = useAuth();
   const {theme, baseThemeColor} = useTheme();
   const {
@@ -474,6 +490,7 @@ const AppShellInner: React.FC = () => {
     onToggleMute: handleToggleMute,
     onToggleLyrics: handleDesktopToggleLyrics,
     onFocusQueue: handleDesktopFocusQueue,
+    onToggleSidebar: toggleSidebar,
   });
 
   const handlePrimaryNavClick = useCallback(
@@ -510,19 +527,62 @@ const AppShellInner: React.FC = () => {
       <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Main Area: Sidebar (Desktop) + Scrollable Stage */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Desktop Fixed Left Sidebar (240px) */}
-        <aside className="hidden md:flex w-[240px] shrink-0 flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)]">
-          <div className="px-5 pt-6 pb-5">
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="text-left focus:outline-none"
-            >
-              <BrandLogo size="md" />
-            </button>
-          </div>
+        {/* Desktop Left Sidebar (240px expanded, 64px slim icon rail when collapsed on desktop only) */}
+        <aside
+          aria-label="Primary navigation"
+          className={`hidden md:flex shrink-0 flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)] overflow-hidden transition-[width] duration-200 ease-out motion-reduce:transition-none ${
+            isSidebarCollapsed ? 'w-[64px]' : 'w-[240px]'
+          }`}
+        >
+          {/* Logo + Desktop-only Sidebar Toggle */}
+          {isSidebarCollapsed ? (
+            <div className="flex flex-col items-center gap-2.5 pt-5 pb-4 px-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="flex items-center justify-center rounded-md focus:outline-none cursor-pointer"
+                title="xlabplayer"
+                aria-label="xlabplayer Home"
+              >
+                <BrandLogo size="md" showWordmark={false} />
+              </button>
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                aria-expanded={false}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                title="Expand sidebar"
+                aria-label="Expand sidebar"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2 px-5 pt-6 pb-5 shrink-0">
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="text-left focus:outline-none cursor-pointer min-w-0"
+              >
+                <BrandLogo size="md" />
+              </button>
+              {isDesktop && (
+                <button
+                  type="button"
+                  onClick={toggleSidebar}
+                  aria-expanded={true}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                  title="Collapse sidebar"
+                  aria-label="Collapse sidebar"
+                >
+                  <PanelLeftClose className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          )}
 
-          <nav className="px-3 space-y-1">
+          {/* Primary Navigation */}
+          <nav className={isSidebarCollapsed ? 'px-2 space-y-1.5 flex flex-col items-center' : 'px-3 space-y-1'}>
             {navItems.map((item) => {
               const Icon = item.icon;
               return (
@@ -531,95 +591,185 @@ const AppShellInner: React.FC = () => {
                   to={item.to}
                   end={item.end}
                   onClick={(e) => handlePrimaryNavClick(e, item.to)}
+                  title={isSidebarCollapsed ? item.label : undefined}
+                  aria-label={isSidebarCollapsed ? item.label : undefined}
                   className={({isActive}) =>
-                    `flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
-                      isActive
-                        ? 'bg-[var(--bg-elevated)] text-[var(--accent)]'
-                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
-                    }`
+                    isSidebarCollapsed
+                      ? `flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+                          isActive
+                            ? 'bg-[var(--bg-elevated)] text-[var(--accent)]'
+                            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
+                        }`
+                      : `flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
+                          isActive
+                            ? 'bg-[var(--bg-elevated)] text-[var(--accent)]'
+                            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
+                        }`
                   }
                 >
                   <Icon className="w-5 h-5 shrink-0" />
-                  <span>{item.label}</span>
+                  {!isSidebarCollapsed && <span>{item.label}</span>}
                 </NavLink>
               );
             })}
           </nav>
 
-          {/* Quick Playlist List */}
-          <div className="mt-6 flex flex-1 min-h-0 flex-col border-t border-[var(--border-subtle)] pt-4 px-3">
-            <div className="flex items-center justify-between px-3 mb-2">
-              <span className="text-xs font-semibold text-[var(--text-secondary)]">
-                {offline ? 'Offline Playlists' : 'Playlists'}
-              </span>
+          {/* Quick Playlist List / Collapsed Playlist Square Tiles */}
+          {isSidebarCollapsed ? (
+            <div className="mt-4 flex flex-1 min-h-0 flex-col items-center border-t border-[var(--border-subtle)] pt-3 px-2 gap-2">
               {!offline && (
                 <button
                   type="button"
                   onClick={() => setCreateOpen(true)}
-                  className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
                   title="Create playlist"
                   aria-label="Create playlist"
                 >
                   <Plus className="w-4 h-4" />
                 </button>
               )}
+              <div className="flex-1 w-full overflow-y-auto flex flex-col items-center gap-2 pb-2">
+                {playlists.map((pl) => {
+                  const firstCover = pl.covers?.find(Boolean) || null;
+                  const initial = (pl.name.trim()[0] || '?').toUpperCase();
+                  return (
+                    <NavLink
+                      key={pl.id}
+                      to={`/playlists/${pl.id}`}
+                      title={pl.name}
+                      aria-label={pl.name}
+                      className={({isActive}) =>
+                        `relative flex h-9 w-9 shrink-0 items-center justify-center rounded-md overflow-hidden transition-all ${
+                          isActive
+                            ? 'ring-2 ring-[var(--accent)] ring-offset-1 ring-offset-[var(--bg-sidebar)]'
+                            : 'opacity-85 hover:opacity-100 hover:ring-1 hover:ring-[var(--border-strong)]'
+                        }`
+                      }
+                    >
+                      {firstCover ? (
+                        <AlbumArt
+                          coverFile={firstCover}
+                          alt={pl.name}
+                          className="h-full w-full rounded-md"
+                          iconSize={15}
+                        />
+                      ) : (
+                        <span className="flex h-full w-full items-center justify-center bg-[var(--bg-elevated)] text-xs font-bold text-[var(--text-primary)] select-none">
+                          {initial}
+                        </span>
+                      )}
+                    </NavLink>
+                  );
+                })}
+              </div>
             </div>
-            <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
-              {playlists.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-[var(--text-muted)]">
-                  {offline ? 'No offline playlists cached' : 'No playlists yet'}
-                </p>
-              ) : (
-                playlists.map((pl) => (
-                  <NavLink
-                    key={pl.id}
-                    to={`/playlists/${pl.id}`}
-                    className={({isActive}) =>
-                      `flex items-center justify-between rounded-md px-3 py-2 text-sm transition-colors ${
-                        isActive
-                          ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium'
-                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
-                      }`
-                    }
+          ) : (
+            <div className="mt-6 flex flex-1 min-h-0 flex-col border-t border-[var(--border-subtle)] pt-4 px-3">
+              <div className="flex items-center justify-between px-3 mb-2">
+                <span className="text-xs font-semibold text-[var(--text-secondary)] whitespace-nowrap">
+                  {offline ? 'Offline Playlists' : 'Playlists'}
+                </span>
+                {!offline && (
+                  <button
+                    type="button"
+                    onClick={() => setCreateOpen(true)}
+                    className="flex h-7 w-7 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                    title="Create playlist"
+                    aria-label="Create playlist"
                   >
-                    <span className="truncate">{pl.name}</span>
-                    <span className="font-mono text-xs tabular-nums text-[var(--text-muted)] ml-2">
-                      {pl.track_count}
-                    </span>
-                  </NavLink>
-                ))
-              )}
+                    <Plus className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+              <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
+                {playlists.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-[var(--text-muted)]">
+                    {offline ? 'No offline playlists cached' : 'No playlists yet'}
+                  </p>
+                ) : (
+                  playlists.map((pl) => (
+                    <NavLink
+                      key={pl.id}
+                      to={`/playlists/${pl.id}`}
+                      className={({isActive}) =>
+                        `flex items-center justify-between rounded-md px-3 py-2 text-sm transition-colors ${
+                          isActive
+                            ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium'
+                            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
+                        }`
+                      }
+                    >
+                      <span className="truncate">{pl.name}</span>
+                      <span className="font-mono text-xs tabular-nums text-[var(--text-muted)] ml-2">
+                        {pl.track_count}
+                      </span>
+                    </NavLink>
+                  ))
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Sidebar Footer: PWA Install (if available) + User */}
-          <div className="border-t border-[var(--border-subtle)] p-3 space-y-2">
-            {isInstallable && !isInstalled && (
-              <button
-                type="button"
-                onClick={() => void install()}
-                className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors"
+          {isSidebarCollapsed ? (
+            <div className="border-t border-[var(--border-subtle)] py-3 px-2 flex flex-col items-center gap-2 shrink-0">
+              {isInstallable && !isInstalled && (
+                <button
+                  type="button"
+                  onClick={() => void install()}
+                  className="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-[var(--accent)] hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer"
+                  title="Install xlabplayer App"
+                  aria-label="Install xlabplayer App"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+              )}
+              <div
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-xs font-bold uppercase text-[var(--text-primary)] select-none"
+                title={user ? `${user.username} (${user.role})` : 'Account'}
+                aria-label={user ? `${user.username} (${user.role})` : 'Account'}
               >
-                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
-                Install xlabplayer App
-              </button>
-            )}
-            <div className="flex items-center justify-between rounded-md px-2.5 py-2">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-[var(--text-primary)] truncate">{user?.username}</p>
-                <p className="text-xs text-[var(--text-muted)] capitalize">{user?.role}</p>
+                {(user?.username?.trim()[0] || '?').toUpperCase()}
               </div>
               <button
                 type="button"
                 onClick={() => void logout()}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
+                className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
                 title="Sign out"
                 aria-label="Sign out"
               >
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
-          </div>
+          ) : (
+            <div className="border-t border-[var(--border-subtle)] p-3 space-y-2 shrink-0">
+              {isInstallable && !isInstalled && (
+                <button
+                  type="button"
+                  onClick={() => void install()}
+                  className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] transition-colors whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  Install xlabplayer App
+                </button>
+              )}
+              <div className="flex items-center justify-between rounded-md px-2.5 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-[var(--text-primary)] truncate">{user?.username}</p>
+                  <p className="text-xs text-[var(--text-muted)] capitalize">{user?.role}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void logout()}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                  title="Sign out"
+                  aria-label="Sign out"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
         </aside>
 
         {/* Main Scrollable Viewport */}
@@ -663,7 +813,7 @@ const AppShellInner: React.FC = () => {
             disabled={!displayTrack}
             onSeek={handleSeek}
           />
-          <div className="grid h-[78px] grid-cols-[minmax(240px,1fr)_auto_minmax(240px,1fr)] items-center gap-4 px-5">
+          <div className="grid h-[clamp(80px,5.2vw,96px)] grid-cols-[minmax(240px,1fr)_auto_minmax(240px,1fr)] items-center gap-4 px-[clamp(1.25rem,1.6vw,2rem)]">
             {/* Left: Mini Cover + Title + Artist + Heart/Save */}
             <div className="flex items-center gap-3.5 min-w-0">
               {displayTrack ? (
@@ -679,7 +829,7 @@ const AppShellInner: React.FC = () => {
                       externalUrl={displayTrack.coverUrl}
                       alt={displayTrack.title}
                       color={displayTrack.dominant_color}
-                      className="w-13 h-13 rounded-md shadow-md transition-transform group-hover:scale-[1.03]"
+                      className="w-[clamp(3.25rem,2.9rem_+_0.5vw,3.75rem)] h-[clamp(3.25rem,2.9rem_+_0.5vw,3.75rem)] rounded-md shadow-md transition-transform group-hover:scale-[1.03]"
                       iconSize={22}
                     />
                   </button>
@@ -687,13 +837,13 @@ const AppShellInner: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => navigate('/now-playing')}
-                      className="block max-w-full truncate text-sm font-semibold text-[var(--text-primary)] hover:underline text-left cursor-pointer"
+                      className="block max-w-full truncate text-[clamp(0.875rem,0.74rem_+_0.22vw,1.0625rem)] font-semibold text-[var(--text-primary)] hover:underline text-left cursor-pointer leading-snug"
                     >
                       {displayTrack.title}
                     </button>
                     <div className="flex items-center gap-1.5 min-w-0">
                       {isCurrentYouTube || remote.isRemoteActive ? (
-                        <span className="truncate text-xs text-[var(--text-secondary)]">
+                        <span className="truncate text-[clamp(0.75rem,0.65rem_+_0.18vw,0.9375rem)] text-[var(--text-secondary)]">
                           {displayTrack.artist}
                         </span>
                       ) : (
@@ -702,7 +852,7 @@ const AppShellInner: React.FC = () => {
                           onClick={() =>
                             navigate(`/?artist=${encodeURIComponent(displayTrack.artist)}`)
                           }
-                          className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left cursor-pointer"
+                          className="block max-w-full truncate text-[clamp(0.75rem,0.65rem_+_0.18vw,0.9375rem)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left cursor-pointer"
                         >
                           {displayTrack.artist}
                         </button>

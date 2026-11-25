@@ -183,9 +183,9 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
         aria-hidden="true"
       />
 
-      {/* Width-capped 3-pane desktop stage (max 1680px so 2560px+ screens never over-stretch) */}
-      <div className="relative z-10 flex flex-1 min-h-0 w-full max-w-[1680px] mx-auto">
-        {/* LEFT PANE (~320px, collapsible): Library / Search */}
+      {/* Full-width 3-pane desktop stage filling all space next to the sidebar */}
+      <div className="relative z-10 flex flex-1 min-h-0 w-full">
+        {/* LEFT PANE (~24%, min 300px, max 460px, collapsible): Library / Search */}
         {!browsePaneCollapsed && (
           <DesktopBrowsePane onCollapse={toggleBrowsePane} onToast={onFlashToast} />
         )}
@@ -196,8 +196,8 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
           className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden"
         >
           {/* Minimal Top Context & Actions Bar (No Queue button on desktop) */}
-          <header className="flex items-center justify-between gap-2 xl:gap-3 px-4 xl:px-6 py-3.5 border-b border-[var(--border-subtle)]/60 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
+          <header className="flex items-center justify-between gap-2 xl:gap-3 px-[clamp(1rem,1.6vw,2rem)] py-[clamp(0.75rem,0.9vw,1.125rem)] border-b border-[var(--border-subtle)]/60 shrink-0">
+            <div className="flex items-center gap-2.5 min-w-0">
               {browsePaneCollapsed && (
                 <button
                   type="button"
@@ -220,14 +220,14 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
               </button>
               {activeTrack && (
                 <div className="min-w-0 pl-1">
-                  <p className="text-[11px] font-medium text-[var(--text-secondary)] truncate">
+                  <p className="text-[clamp(0.7rem,0.62rem_+_0.14vw,0.85rem)] font-medium text-[var(--text-secondary)] truncate">
                     {isRemoteActive && remoteDeviceName
                       ? `Playing on ${remoteDeviceName}`
                       : isYouTubeTrack
                         ? 'Streaming Online'
                         : 'Playing from Library'}
                   </p>
-                  <p className="text-xs font-semibold text-[var(--text-primary)] truncate">
+                  <p className="text-[clamp(0.75rem,0.65rem_+_0.18vw,0.95rem)] font-semibold text-[var(--text-primary)] truncate">
                     {activeTrack.album || activeTrack.artist}
                   </p>
                 </div>
@@ -399,7 +399,7 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
                 userScrollPauseUntilRef.current = Date.now() + 3000;
               }}
               aria-label="Song lyrics"
-              className="relative flex-1 overflow-y-auto px-8 xl:px-14"
+              className="relative flex-1 overflow-y-auto px-[clamp(1.25rem,3vw,4rem)]"
               style={{
                 WebkitMaskImage:
                   'linear-gradient(to bottom, transparent 0%, black 10%, black 90%, transparent 100%)',
@@ -410,10 +410,12 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
               {lyricsLoading ? (
                 <div className="h-full flex flex-col items-center justify-center gap-3 text-[var(--text-secondary)]">
                   <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
-                  <span className="text-sm font-medium">Fetching lyrics...</span>
+                  <span className="text-[clamp(0.875rem,0.75rem_+_0.2vw,1.0625rem)] font-medium">
+                    Fetching lyrics...
+                  </span>
                 </div>
               ) : parsedLyrics?.isSynced ? (
-                <div className="max-w-2xl mx-auto py-28 space-y-5 xl:space-y-6">
+                <div className="max-w-[900px] mx-auto py-[clamp(5rem,10vh,9rem)] space-y-[clamp(1.15rem,1.45vw,2.25rem)]">
                   {parsedLyrics.lines.map((line, idx) => {
                     const isCurrent = idx === activeLyricIndex;
                     const isPast = activeLyricIndex >= 0 && idx < activeLyricIndex;
@@ -430,12 +432,12 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
                             onSeek(line.time);
                           }
                         }}
-                        className={`block w-full text-left font-display leading-snug transition-all duration-200 cursor-pointer focus-visible:outline-none focus-visible:underline rounded-lg px-2 py-1 -mx-2 hover:bg-white/[0.04] ${
+                        className={`block w-full text-center font-display leading-snug transition-all duration-200 cursor-pointer focus-visible:outline-none focus-visible:underline rounded-xl px-4 py-1.5 hover:bg-white/[0.04] ${
                           isCurrent
-                            ? 'text-2xl xl:text-3xl 2xl:text-[34px] font-extrabold text-[var(--np-lyric-current)] [filter:var(--np-lyric-current-filter)]'
+                            ? 'text-[clamp(1.55rem,0.9rem_+_1.15vw,2.85rem)] font-extrabold text-[var(--np-lyric-current)] [filter:var(--np-lyric-current-filter)]'
                             : isPast
-                              ? 'text-xl xl:text-2xl font-semibold text-[var(--np-lyric-past)] hover:text-[var(--np-lyric-past-hover)]'
-                              : 'text-xl xl:text-2xl font-semibold text-[var(--np-lyric-future)] hover:text-[var(--np-lyric-future-hover)]'
+                              ? 'text-[clamp(1.15rem,0.72rem_+_0.82vw,2.05rem)] font-semibold text-[var(--np-lyric-past)] hover:text-[var(--np-lyric-past-hover)]'
+                              : 'text-[clamp(1.15rem,0.72rem_+_0.82vw,2.05rem)] font-semibold text-[var(--np-lyric-future)] hover:text-[var(--np-lyric-future-hover)]'
                         }`}
                       >
                         {line.text}
@@ -444,11 +446,11 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
                   })}
                 </div>
               ) : parsedLyrics && parsedLyrics.lines.length > 0 ? (
-                <div className="max-w-2xl mx-auto py-16 space-y-4">
+                <div className="max-w-[900px] mx-auto py-[clamp(3.5rem,7vh,6.5rem)] space-y-[clamp(0.95rem,1.15vw,1.65rem)] text-center">
                   {parsedLyrics.lines.map((line, idx) => (
                     <p
                       key={idx}
-                      className="font-display text-xl xl:text-2xl leading-relaxed font-semibold text-[var(--np-lyric-plain)]"
+                      className="font-display text-[clamp(1.15rem,0.72rem_+_0.82vw,2rem)] leading-relaxed font-semibold text-[var(--np-lyric-plain)]"
                     >
                       {line.text}
                     </p>
@@ -458,8 +460,8 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
             </div>
           ) : (
             /* Fallback when no lyrics / instrumental / lyrics toggled off: large centered album art, title, and artist */
-            <div className="flex-1 flex flex-col items-center justify-center px-6 xl:px-8 py-6 text-center overflow-y-auto">
-              <div className="w-56 h-56 xl:w-72 xl:h-72 2xl:w-96 2xl:h-96 shrink-0">
+            <div className="flex-1 flex flex-col items-center justify-center px-[clamp(1.5rem,3vw,3.5rem)] py-6 text-center overflow-y-auto">
+              <div className="w-[clamp(14rem,22vw,26rem)] h-[clamp(14rem,22vw,26rem)] shrink-0">
                 <AlbumArt
                   coverFile={activeTrack.cover_file}
                   externalUrl={activeTrack.coverUrl}
@@ -470,22 +472,22 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
                 />
               </div>
 
-              <div className="mt-7 max-w-xl w-full space-y-2">
-                <h1 className="font-display text-3xl xl:text-4xl font-extrabold tracking-tight text-[var(--text-primary)] text-balance line-clamp-2">
+              <div className="mt-[clamp(1.5rem,2.2vw,2.5rem)] max-w-[900px] w-full space-y-2.5">
+                <h1 className="font-display text-[clamp(1.85rem,1.2rem_+_1.3vw,3.25rem)] font-extrabold tracking-tight text-[var(--text-primary)] text-balance line-clamp-2">
                   {activeTrack.title}
                 </h1>
-                <p className="text-base xl:text-lg font-medium text-[var(--text-secondary)] truncate">
+                <p className="text-[clamp(1rem,0.78rem_+_0.45vw,1.5rem)] font-medium text-[var(--text-secondary)] truncate">
                   {activeTrack.artist}
                 </p>
                 {activeTrack.album && (
-                  <p className="text-xs text-[var(--text-muted)] truncate">
+                  <p className="text-[clamp(0.75rem,0.66rem_+_0.18vw,0.95rem)] text-[var(--text-muted)] truncate">
                     {activeTrack.album}
                     {activeTrack.format ? ` · ${activeTrack.format.toUpperCase()}` : ''}
                     {activeTrack.bitrate ? ` · ${activeTrack.bitrate} kbps` : ''}
                   </p>
                 )}
                 {isInstrumental && desktopLyricsVisible && (
-                  <p className="pt-1 text-xs font-medium text-[var(--text-muted)]">
+                  <p className="pt-1 text-[clamp(0.75rem,0.66rem_+_0.18vw,0.95rem)] font-medium text-[var(--text-muted)]">
                     Instrumental track
                   </p>
                 )}
@@ -494,25 +496,25 @@ export const DesktopNowPlayingView: React.FC<DesktopNowPlayingViewProps> = ({
           )}
         </section>
 
-        {/* RIGHT PANE (~340px): Always-visible "Up next" */}
+        {/* RIGHT PANE (~26%, min 320px, max 500px): Always-visible "Up next" */}
         <aside
           ref={queuePaneRef}
           tabIndex={-1}
           aria-label="Up next queue"
-          className={`w-[244px] xl:w-[312px] 2xl:w-[340px] shrink-0 flex flex-col min-h-0 border-l border-[var(--border-subtle)] bg-[var(--np-lyrics-bg)]/55 backdrop-blur-md focus:outline-none transition-shadow ${
+          className={`w-[clamp(260px,26%,320px)] xl:w-[clamp(320px,26%,500px)] shrink-0 flex flex-col min-h-0 border-l border-[var(--border-subtle)] bg-[var(--np-lyrics-bg)]/55 backdrop-blur-md focus:outline-none transition-shadow ${
             queueFocusPulse
               ? 'ring-2 ring-inset ring-[var(--accent)]'
               : 'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]'
           }`}
         >
-          <div className="flex items-center justify-between px-4 py-3.5 border-b border-[var(--border-subtle)] shrink-0">
+          <div className="flex items-center justify-between px-[clamp(0.875rem,1.15vw,1.5rem)] py-[clamp(0.75rem,0.9vw,1.125rem)] border-b border-[var(--border-subtle)] shrink-0">
             <div className="flex items-center gap-2 min-w-0">
-              <ListMusic className="w-4 h-4 text-[var(--accent)] shrink-0" />
-              <h2 className="font-display text-sm font-bold text-[var(--text-primary)] truncate">
+              <ListMusic className="w-[clamp(1rem,1.05vw,1.2rem)] h-[clamp(1rem,1.05vw,1.2rem)] text-[var(--accent)] shrink-0" />
+              <h2 className="font-display text-[clamp(0.875rem,0.75rem_+_0.24vw,1.125rem)] font-bold text-[var(--text-primary)] truncate">
                 Up next
               </h2>
             </div>
-            <span className="font-mono text-xs tabular-nums text-[var(--text-muted)]">
+            <span className="font-mono text-[clamp(0.75rem,0.64rem_+_0.18vw,0.875rem)] tabular-nums text-[var(--text-muted)] shrink-0">
               {upcomingCount} {upcomingCount === 1 ? 'track' : 'tracks'}
             </span>
           </div>

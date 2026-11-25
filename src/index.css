@@ -490,62 +490,6 @@ input[type="range"].xlab-slider::-moz-range-thumb {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
-/* Desktop full-width edge scrubber on bottom playback bar */
-input[type="range"].xlab-desktop-scrubber {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-input[type="range"].xlab-desktop-scrubber:focus {
-  outline: none;
-}
-
-input[type="range"].xlab-desktop-scrubber::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 0;
-}
-
-input[type="range"].xlab-desktop-scrubber::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  height: 12px;
-  width: 12px;
-  border-radius: 9999px;
-  background: var(--slider-thumb);
-  margin-top: -4px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 0 3px var(--accent-soft);
-  opacity: 0;
-  transition: opacity 140ms ease, transform 140ms ease;
-}
-
-.xlab-desktop-scrubber-group:hover input[type="range"].xlab-desktop-scrubber::-webkit-slider-thumb,
-input[type="range"].xlab-desktop-scrubber:focus-visible::-webkit-slider-thumb {
-  opacity: 1;
-}
-
-input[type="range"].xlab-desktop-scrubber::-moz-range-track {
-  height: 4px;
-  border-radius: 0;
-}
-
-input[type="range"].xlab-desktop-scrubber::-moz-range-thumb {
-  height: 12px;
-  width: 12px;
-  border: none;
-  border-radius: 9999px;
-  background: var(--slider-thumb);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 0 3px var(--accent-soft);
-  opacity: 0;
-  transition: opacity 140ms ease, transform 140ms ease;
-}
-
-.xlab-desktop-scrubber-group:hover input[type="range"].xlab-desktop-scrubber::-moz-range-thumb,
-input[type="range"].xlab-desktop-scrubber:focus-visible::-moz-range-thumb {
-  opacity: 1;
-}
-
 .pt-safe {
   padding-top: env(safe-area-inset-top, 0px);
 }
