@@ -46,9 +46,9 @@
     --footer-bg: var(--bg-secondary);
     --miniplayer-bg: linear-gradient(90deg, var(--stage-tint, #1c3b29) 0%, #1c1c1c 100%);
     --miniplayer-border: rgba(255, 255, 255, 0.1);
-    --mobile-nav-glass-bg: rgba(18, 18, 18, 0.62);
-    --mobile-miniplayer-glass-bg: linear-gradient(90deg, rgba(28, 59, 41, 0.68) 0%, rgba(28, 28, 28, 0.68) 100%);
-    --mobile-glass-border: rgba(255, 255, 255, 0.10);
+    --mobile-nav-glass-bg: rgba(18, 18, 18, 0.40);
+    --mobile-miniplayer-glass-bg: linear-gradient(90deg, rgba(28, 59, 41, 0.44) 0%, rgba(28, 28, 28, 0.44) 100%);
+    --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
     --miniplayer-radius: 0.5rem;
     --miniplayer-inset: 0.5rem;
@@ -145,9 +145,9 @@
     --footer-bg: var(--bg-glass);
     --miniplayer-bg: rgba(28, 28, 30, 0.8);
     --miniplayer-border: rgba(255, 255, 255, 0.12);
-    --mobile-nav-glass-bg: rgba(28, 28, 30, 0.62);
-    --mobile-miniplayer-glass-bg: rgba(28, 28, 30, 0.68);
-    --mobile-glass-border: rgba(255, 255, 255, 0.10);
+    --mobile-nav-glass-bg: rgba(28, 28, 30, 0.38);
+    --mobile-miniplayer-glass-bg: rgba(28, 28, 30, 0.42);
+    --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
     --miniplayer-radius: 1rem;
     --miniplayer-inset: 0.625rem;
@@ -244,8 +244,8 @@
     --footer-bg: var(--bg-glass);
     --miniplayer-bg: rgba(255, 255, 255, 0.85);
     --miniplayer-border: rgba(0, 0, 0, 0.08);
-    --mobile-nav-glass-bg: rgba(255, 255, 255, 0.65);
-    --mobile-miniplayer-glass-bg: rgba(255, 255, 255, 0.70);
+    --mobile-nav-glass-bg: rgba(255, 255, 255, 0.50);
+    --mobile-miniplayer-glass-bg: rgba(255, 255, 255, 0.52);
     --mobile-glass-border: rgba(0, 0, 0, 0.10);
     --miniplayer-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
     --miniplayer-radius: 1rem;
@@ -343,9 +343,9 @@
     --footer-bg: var(--bg-secondary);
     --miniplayer-bg: rgba(17, 17, 17, 0.95);
     --miniplayer-border: rgba(255, 255, 255, 0.08);
-    --mobile-nav-glass-bg: rgba(6, 6, 8, 0.62);
-    --mobile-miniplayer-glass-bg: rgba(17, 17, 17, 0.68);
-    --mobile-glass-border: rgba(255, 255, 255, 0.10);
+    --mobile-nav-glass-bg: rgba(6, 6, 8, 0.40);
+    --mobile-miniplayer-glass-bg: rgba(17, 17, 17, 0.44);
+    --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
     --miniplayer-radius: 0.75rem;
     --miniplayer-inset: 0.625rem;
@@ -658,19 +658,21 @@ input[type="range"].xlab-slider::-moz-range-thumb {
 }
 
 /* Mobile-only translucent blur for bottom tab bar and mini player */
-@supports ((backdrop-filter: blur(20px)) or (-webkit-backdrop-filter: blur(20px))) {
+@supports ((backdrop-filter: blur(30px)) or (-webkit-backdrop-filter: blur(30px))) {
   .mobile-tab-bar-glass {
     background: var(--mobile-nav-glass-bg);
     border-top-color: var(--mobile-glass-border);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
-    backdrop-filter: blur(20px) saturate(160%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    -webkit-backdrop-filter: blur(30px) saturate(190%);
+    backdrop-filter: blur(30px) saturate(190%);
   }
 
   .mobile-mini-player-glass {
     background: var(--mobile-miniplayer-glass-bg);
     border-color: var(--mobile-glass-border);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
-    backdrop-filter: blur(20px) saturate(160%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), var(--miniplayer-shadow);
+    -webkit-backdrop-filter: blur(30px) saturate(190%);
+    backdrop-filter: blur(30px) saturate(190%);
   }
 }
 
