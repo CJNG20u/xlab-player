@@ -516,10 +516,10 @@ const AppShellInner: React.FC = () => {
   } as React.CSSProperties;
 
   const miniPlayerClassName =
-    'md:hidden fixed left-[var(--miniplayer-inset)] right-[var(--miniplayer-inset)] bottom-above-nav z-30 h-[64px] rounded-[var(--miniplayer-radius)] [background:var(--miniplayer-bg)] backdrop-blur-xl border border-[var(--miniplayer-border)] shadow-[var(--miniplayer-shadow)] overflow-hidden select-none';
+    'md:hidden fixed left-[var(--miniplayer-inset)] right-[var(--miniplayer-inset)] bottom-above-nav z-30 h-[64px] rounded-[var(--miniplayer-radius)] [background:var(--miniplayer-bg)] border border-[var(--miniplayer-border)] shadow-[var(--miniplayer-shadow)] overflow-hidden select-none mobile-mini-player-glass';
 
   const bottomNavClassName =
-    'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--nav-bg)] backdrop-blur-xl border-t border-[var(--nav-border)]';
+    'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--nav-bg)] border-t border-[var(--nav-border)] mobile-tab-bar-glass';
 
   return (
     <MainScrollProvider element={mainElement}>
