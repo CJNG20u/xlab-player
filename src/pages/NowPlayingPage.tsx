@@ -18,14 +18,13 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
-  Volume2,
-  VolumeX,
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
 import {AddToPlaylistModal} from '../components/AddToPlaylistModal';
 import {AlbumArt} from '../components/AlbumArt';
 import {DesktopNowPlayingView} from '../components/DesktopNowPlayingView';
+import {MobileNowPlayingView} from '../components/MobileNowPlayingView';
 import {useAuth} from '../context/AuthContext';
 import {usePlayer} from '../context/PlayerContext';
 import {useTheme} from '../context/ThemeContext';
@@ -98,10 +97,51 @@ function getTrackPlaylistActionKeys(track: Track): string[] {
   );
 }
 
+const MOBILE_PORTRAIT_MEDIA_QUERY = '(max-width: 767px) and (orientation: portrait)';
+
+function getIsMobilePortrait(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia(MOBILE_PORTRAIT_MEDIA_QUERY).matches;
+}
+
+function useMobilePortrait(): boolean {
+  const [matches, setMatches] = useState<boolean>(getIsMobilePortrait);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mql = window.matchMedia(MOBILE_PORTRAIT_MEDIA_QUERY);
+    const sync = () => setMatches(mql.matches);
+    sync();
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', sync);
+    } else if (typeof mql.addListener === 'function') {
+      mql.addListener(sync);
+    }
+    window.addEventListener('resize', sync);
+    window.addEventListener('orientationchange', sync);
+    return () => {
+      if (typeof mql.removeEventListener === 'function') {
+        mql.removeEventListener('change', sync);
+      } else if (typeof mql.removeListener === 'function') {
+        mql.removeListener(sync);
+      }
+      window.removeEventListener('resize', sync);
+      window.removeEventListener('orientationchange', sync);
+    };
+  }, []);
+
+  return matches;
+}
+
 export const NowPlayingPage: React.FC = () => {
   const navigate = useNavigate();
   useScrollReady(true);
   const isDesktop = useLayoutMode() === 'desktop';
+  const isMobilePortrait = useMobilePortrait();
   const {user, isOfflineMode} = useAuth();
   const isOnline = useOnlineStatus();
   const offline = !isOnline || isOfflineMode;
@@ -111,8 +151,6 @@ export const NowPlayingPage: React.FC = () => {
     currentTrack,
     isPlaying,
     duration,
-    volume,
-    isMuted,
     shuffle,
     repeat,
     lyricsOpen,
@@ -121,12 +159,11 @@ export const NowPlayingPage: React.FC = () => {
     radioMode,
     startRadio,
     stopRadio,
+    addToQueue,
     togglePlay,
     nextTrack,
     prevTrack,
     seek,
-    setVolume,
-    toggleMute,
     toggleShuffle,
     cycleRepeat,
     toggleLikeTrack,
@@ -169,8 +206,6 @@ export const NowPlayingPage: React.FC = () => {
   const activeIsPlaying = isRemoteActive ? Boolean(remote.targetState?.isPlaying) : isPlaying;
   const activeTime = isRemoteActive ? remote.extrapolatedPositionSec : localTime;
   const activeDuration = isRemoteActive ? remote.targetState?.track?.duration || 0 : duration;
-  const activeVolume = isRemoteActive ? (remote.targetState?.volume ?? 1) : volume;
-  const activeMuted = isRemoteActive ? Boolean(remote.targetState?.muted) : isMuted;
   const activeShuffle = isRemoteActive ? Boolean(remote.targetState?.shuffle) : shuffle;
   const activeRepeat: RepeatMode = isRemoteActive ? (remote.targetState?.repeat ?? 'off') : repeat;
 
@@ -208,25 +243,6 @@ export const NowPlayingPage: React.FC = () => {
     },
     [isRemoteActive, remote, seek]
   );
-
-  const handleSetVolume = useCallback(
-    (vol: number) => {
-      if (isRemoteActive) {
-        void remote.send('setVolume', {volume: vol});
-        return;
-      }
-      setVolume(vol);
-    },
-    [isRemoteActive, remote, setVolume]
-  );
-
-  const handleToggleMute = useCallback(() => {
-    if (isRemoteActive) {
-      void remote.send('mute', {muted: !activeMuted});
-      return;
-    }
-    toggleMute();
-  }, [activeMuted, isRemoteActive, remote, toggleMute]);
 
   const handleToggleShuffle = useCallback(() => {
     if (isRemoteActive) {
@@ -762,10 +778,91 @@ export const NowPlayingPage: React.FC = () => {
     );
   }
 
+  if (isMobilePortrait) {
+    return (
+      <>
+        <MobileNowPlayingView
+          activeTrack={activeTrack}
+          currentTrack={currentTrack}
+          isRemoteActive={isRemoteActive}
+          remoteDeviceName={remote.targetDevice?.name ?? null}
+          remoteIsPending={remote.isPending}
+          offline={offline}
+          canDownload={canDownload}
+          isLight={isLight}
+          isTidal={isTidal}
+          dominantTopHexColor={dominantTopHexColor}
+          coverUrl={coverUrl}
+          isYouTubeTrack={isYouTubeTrack}
+          ytSaveStatus={ytSaveStatus}
+          isAddingCurrentToPlaylist={isAddingCurrentToPlaylist}
+          actionToast={actionToast}
+          activeIsPlaying={activeIsPlaying}
+          activeTime={activeTime}
+          activeDuration={activeDuration}
+          activeShuffle={activeShuffle}
+          activeRepeat={activeRepeat}
+          radioMode={radioMode}
+          lyricsOpen={lyricsOpen}
+          lyricsLoading={lyricsLoading}
+          isInstrumental={Boolean(lyricsData?.instrumental)}
+          parsedLyrics={parsedLyrics}
+          activeLyricIndex={activeLyricIndex}
+          lyricsScrollRef={lyricsScrollRef}
+          lyricLineRefs={lyricLineRefs}
+          userScrollPauseUntilRef={userScrollPauseUntilRef}
+          artworkSwipe={artworkSwipe}
+          onClose={() => navigate(-1)}
+          onTogglePlay={handleTogglePlay}
+          onNext={handleNext}
+          onPrev={handlePrev}
+          onSeek={handleSeek}
+          onToggleShuffle={handleToggleShuffle}
+          onCycleRepeat={handleCycleRepeat}
+          onToggleLyrics={() => setLyricsOpen(!lyricsOpen)}
+          onOpenDevices={() => remote.setDeviceSheetOpen(true)}
+          onOpenQueue={() => setQueueOpen(true)}
+          onToggleLike={(id) => void toggleLikeTrack(id)}
+          onSaveToLibrary={() => void handleSaveToLibrary()}
+          onOpenPlaylistPicker={handleOpenPlaylistPicker}
+          onAddToQueue={() => {
+            if (!isRemoteActive && currentTrack) {
+              addToQueue(currentTrack);
+              flashToast('Added to queue');
+            }
+          }}
+          onToggleRadio={() => {
+            if (!currentTrack) return;
+            if (radioMode) {
+              stopRadio();
+              flashToast('Radio stopped');
+            } else {
+              startRadio(currentTrack);
+              flashToast('Starting radio...');
+            }
+          }}
+          onGoToArtist={() => navigate(`/?artist=${encodeURIComponent(activeTrack.artist)}`)}
+          onPlayHereQuick={() => void handlePlayHereQuick()}
+        />
+        <AddToPlaylistModal
+          open={Boolean(pickerTrack)}
+          trackIds={
+            pickerTrack && !pickerTrack.isYouTubeStream && typeof pickerTrack.id === 'number'
+              ? [pickerTrack.id]
+              : []
+          }
+          playlists={playlists}
+          onClose={() => setPickerTrack(null)}
+          onPick={pickerTrack?.isYouTubeStream ? handlePickYouTubePlaylist : undefined}
+          onSuccess={handleLibraryPlaylistSuccess}
+        />
+      </>
+    );
+  }
+
   const progressPct =
     activeDuration > 0 ? Math.min(100, (activeTime / activeDuration) * 100) : 0;
   const remaining = Math.max(0, (activeDuration || 0) - activeTime);
-  const volPct = (activeMuted ? 0 : activeVolume) * 100;
 
   return (
     <div
@@ -1271,36 +1368,6 @@ export const NowPlayingPage: React.FC = () => {
                 <Repeat className="w-5 h-5" />
               )}
             </button>
-          </div>
-
-          {/* Mobile Volume Slider */}
-          <div className="mt-6 flex md:hidden w-full max-w-xs items-center gap-3">
-            <button
-              type="button"
-              onClick={handleToggleMute}
-              className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              aria-label="Mute toggle"
-            >
-              {activeMuted || activeVolume === 0 ? (
-                <VolumeX className="w-4 h-4" />
-              ) : (
-                <Volume2 className="w-4 h-4" />
-              )}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={activeMuted ? 0 : activeVolume}
-              onChange={(e) => handleSetVolume(parseFloat(e.target.value))}
-              className="xlab-slider always-thumb flex-1 h-1"
-              style={{
-                background: `linear-gradient(to right, var(--accent) ${volPct}%, var(--slider-track) ${volPct}%)`,
-                borderRadius: '9999px',
-              }}
-              aria-label="Volume"
-            />
           </div>
         </div>
       </div>
