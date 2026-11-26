@@ -3,7 +3,7 @@ import {useEffect, useState} from 'react';
 export type LayoutMode = 'desktop' | 'mobile';
 
 export const DESKTOP_LAYOUT_MEDIA_QUERY =
-  '(min-width: 1024px) and (hover: hover) and (pointer: fine)';
+  '(min-width: 1600px), ((min-width: 1024px) and ((hover: hover) or (any-hover: hover) or (any-pointer: fine)))';
 
 export function getLayoutMode(): LayoutMode {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
