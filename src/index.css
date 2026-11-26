@@ -826,3 +826,38 @@ input[type="range"].xlab-slider::-moz-range-thumb {
   }
 }
 
+/* iOS standalone PWA only: fix WebKit black-translucent fixed-viewport bottom gap (Android untouched) */
+html.ios-pwa,
+html.ios-pwa body,
+html.ios-pwa #root {
+  height: var(--ios-pwa-height, 100vh);
+  min-height: var(--ios-pwa-height, 100vh);
+  max-height: var(--ios-pwa-height, 100vh);
+  overflow: hidden;
+}
+
+html.ios-pwa .app-shell-root {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: var(--ios-pwa-height, 100vh);
+}
+
+html.ios-pwa .mobile-bottom-nav {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html.ios-pwa .mobile-bottom-nav-row {
+  height: 52px;
+}
+
+html.ios-pwa .mobile-mini-player {
+  position: absolute;
+  bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+}
+
+

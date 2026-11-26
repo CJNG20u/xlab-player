@@ -43,6 +43,47 @@
           var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
           if (appleMeta) appleMeta.setAttribute('content', t === 'apple-light' ? 'default' : 'black-translucent');
           root.style.backgroundColor = topEdgeBgColor;
+          var isIosStandalone =
+            window.navigator.standalone === true ||
+            (window.matchMedia &&
+              window.matchMedia('(display-mode: standalone)').matches &&
+              /iP(hone|od|ad)/.test(window.navigator.userAgent));
+          if (isIosStandalone) {
+            root.classList.add('ios-pwa');
+            var syncIosPwaHeight = function () {
+              var isLandscape =
+                window.matchMedia && window.matchMedia('(orientation: landscape)').matches;
+              var sw = window.screen ? window.screen.width : 0;
+              var sh = window.screen ? window.screen.height : 0;
+              var expectedW = isLandscape ? Math.max(sw, sh) : Math.min(sw, sh);
+              var expectedH = isLandscape ? Math.min(sw, sh) : Math.max(sw, sh);
+              var h = window.innerHeight;
+              if (
+                expectedW > 0 &&
+                expectedH > 0 &&
+                Math.abs(window.innerWidth - expectedW) <= 2 &&
+                expectedH > h &&
+                expectedH - h <= 120
+              ) {
+                h = expectedH;
+              }
+              if (h > 0) {
+                root.style.setProperty('--ios-pwa-height', h + 'px');
+              }
+            };
+            syncIosPwaHeight();
+            window.addEventListener('resize', syncIosPwaHeight);
+            window.addEventListener('orientationchange', function () {
+              setTimeout(syncIosPwaHeight, 120);
+            });
+            window.addEventListener('pageshow', syncIosPwaHeight);
+            window.addEventListener('focusout', function () {
+              setTimeout(function () {
+                window.scrollTo(0, 0);
+                syncIosPwaHeight();
+              }, 80);
+            });
+          }
         } catch (e) {}
       })();
     </script>
