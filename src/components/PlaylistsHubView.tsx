@@ -708,7 +708,9 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
 
   const topSafeScrim = isLight
     ? `linear-gradient(to bottom, ${heroTopHex} 0%, ${heroTopHex}d9 12%, ${heroTopHex}73 24%, transparent 45%)`
-    : `linear-gradient(to bottom, ${heroTopHex} 0%, ${heroTopHex}d4 12%, ${heroTopHex}66 24%, transparent 46%)`;
+    : !isDesktop
+      ? `linear-gradient(to bottom, #000000 0px, #000000 env(safe-area-inset-top, 0px), ${heroTopHex}cc calc(env(safe-area-inset-top, 0px) + 44px), ${heroTopHex}55 calc(env(safe-area-inset-top, 0px) + 92px), transparent 58%)`
+      : `linear-gradient(to bottom, ${heroTopHex} 0%, ${heroTopHex}d4 12%, ${heroTopHex}66 24%, transparent 46%)`;
 
   const renderPlaylistCard = (pl: Playlist, keyPrefix: string) => {
     const isMenuOpen = menuState?.playlist.id === pl.id;
@@ -808,13 +810,13 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   };
 
   return (
-    <div className="min-h-full">
+    <div className="min-h-full bg-[var(--bg-primary)]">
       {/* FULL-BLEED IMMERSIVE TOP HERO CARD (extends behind status bar via env(safe-area-inset-top)) */}
       <section
         className="relative w-full overflow-hidden min-h-[350px] sm:min-h-[400px] lg:min-h-[430px] flex flex-col justify-between"
         style={{
           paddingTop: 'env(safe-area-inset-top, 0px)',
-          backgroundColor: heroTopHex,
+          backgroundColor: !isDesktop && !isLight ? '#000000' : heroTopHex,
         }}
       >
         {/* Full-bleed Artwork Backdrop */}

@@ -37,17 +37,12 @@
           root.setAttribute('data-theme', t);
           root.classList.toggle('dark', t !== 'apple-light');
           var tabBarColor = t === 'apple-light' ? '#ffffff' : '#000000';
-          var baseBgColor =
-            t === 'apple-light'
-              ? '#ffffff'
-              : t === 'spotify-dark'
-                ? '#121212'
-                : '#000000';
+          var topEdgeBgColor = t === 'apple-light' ? '#f3f3f7' : '#000000';
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute('content', tabBarColor);
           var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
           if (appleMeta) appleMeta.setAttribute('content', t === 'apple-light' ? 'default' : 'black-translucent');
-          root.style.backgroundColor = baseBgColor;
+          root.style.backgroundColor = topEdgeBgColor;
         } catch (e) {}
       })();
     </script>

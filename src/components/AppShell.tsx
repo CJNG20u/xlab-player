@@ -447,7 +447,7 @@ const AppShellInner: React.FC = () => {
     (location.pathname === '/library' && (isDesktop || (offline && playlists.length === 0)));
   const usesUnifiedHeader = !isNowPlayingPage && !isDynamicHeroLibraryRoute;
   const unifiedHeaderTopHex = getUnifiedPageHeaderTopHex(theme);
-  const unifiedHeaderGradient = `linear-gradient(180deg, ${unifiedHeaderTopHex} 0%, ${baseThemeColor} 240px, ${baseThemeColor} 100%)`;
+  const unifiedHeaderGradient = `linear-gradient(180deg, ${unifiedHeaderTopHex} 0px, ${unifiedHeaderTopHex} env(safe-area-inset-top, 0px), ${baseThemeColor} calc(240px + env(safe-area-inset-top, 0px)), ${baseThemeColor} 100%)`;
 
   // Claim mobile status bar color to match the exact first color stop of the unified header gradient.
   useStatusBarColor(unifiedHeaderTopHex, usesUnifiedHeader);
@@ -802,17 +802,39 @@ const AppShellInner: React.FC = () => {
         </aside>
 
         {/* Main Scrollable Viewport */}
-        <div className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[var(--bg-primary)] relative">
-          {/* Unified Full-Bleed Top-to-Bottom Header Gradient Backdrop (starts flush at y=0 behind status bar) */}
+        <div
+          className="flex flex-1 flex-col min-w-0 overflow-hidden bg-[var(--bg-primary)] relative"
+          style={
+            !isDesktop && !isNowPlayingPage
+              ? {
+                  backgroundImage: usesUnifiedHeader
+                    ? unifiedHeaderGradient
+                    : `linear-gradient(180deg, ${unifiedHeaderTopHex} 0%, ${unifiedHeaderTopHex} 50%, var(--bg-primary) 50%, var(--bg-primary) 100%)`,
+                }
+              : undefined
+          }
+        >
+          {/* Unified Full-Bleed Top-to-Bottom Header Gradient Backdrop (covers safe-area-inset-top at y=0) */}
+          {usesUnifiedHeader && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 z-0"
+              style={{
+                backgroundImage: unifiedHeaderGradient,
+                backgroundRepeat: 'no-repeat',
+              }}
+            />
+          )}
           <main
             ref={handleMainRef}
-            className={`flex-1 relative ${
+            className={`flex-1 relative z-10 ${
               isDesktop && isNowPlayingPage ? 'overflow-hidden' : 'overflow-y-auto'
             }`}
             style={{
-              backgroundColor: 'var(--bg-primary)',
-              backgroundImage: usesUnifiedHeader ? unifiedHeaderGradient : undefined,
-              backgroundRepeat: 'no-repeat',
+              backgroundColor:
+                usesUnifiedHeader || (!isDesktop && !isNowPlayingPage)
+                  ? 'transparent'
+                  : 'var(--bg-primary)',
             }}
           >
             <div

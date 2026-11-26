@@ -48,6 +48,7 @@
     --miniplayer-border: rgba(255, 255, 255, 0.1);
     --mobile-tab-bar-bg: #000000;
     --mobile-tab-bar-border: rgba(255, 255, 255, 0.08);
+    --page-top-edge-bg: #000000;
     --mobile-miniplayer-glass-bg: linear-gradient(90deg, rgba(28, 59, 41, 0.44) 0%, rgba(28, 28, 28, 0.44) 100%);
     --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -165,6 +166,7 @@
     --miniplayer-border: rgba(255, 255, 255, 0.12);
     --mobile-tab-bar-bg: #000000;
     --mobile-tab-bar-border: rgba(255, 255, 255, 0.08);
+    --page-top-edge-bg: #000000;
     --mobile-miniplayer-glass-bg: rgba(28, 28, 30, 0.42);
     --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -282,6 +284,7 @@
     --miniplayer-border: rgba(0, 0, 0, 0.08);
     --mobile-tab-bar-bg: #ffffff;
     --mobile-tab-bar-border: rgba(0, 0, 0, 0.08);
+    --page-top-edge-bg: #f3f3f7;
     --mobile-miniplayer-glass-bg: rgba(255, 255, 255, 0.52);
     --mobile-glass-border: rgba(0, 0, 0, 0.10);
     --miniplayer-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
@@ -399,6 +402,7 @@
     --miniplayer-border: rgba(255, 255, 255, 0.08);
     --mobile-tab-bar-bg: #000000;
     --mobile-tab-bar-border: rgba(255, 255, 255, 0.08);
+    --page-top-edge-bg: #000000;
     --mobile-miniplayer-glass-bg: rgba(17, 17, 17, 0.44);
     --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -491,6 +495,7 @@
 
   html,
   body {
+    background-color: var(--page-top-edge-bg);
     transition: background-color 300ms;
   }
 

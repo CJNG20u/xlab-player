@@ -12,8 +12,8 @@ export const THEME_BASE_COLORS = {
 // `<meta name="theme-color">`, `html/body` background, and the CSS top gradient
 // match pixel-for-pixel behind `env(safe-area-inset-top)` with zero seam.
 export const THEME_HEADER_TOP_COLORS = {
-  'spotify-dark': '#1c2520',
-  'apple-dark': '#141214',
+  'spotify-dark': '#000000',
+  'apple-dark': '#000000',
   'apple-light': '#f3f3f7',
   'tidal-dark': '#000000',
 } as const;
@@ -47,7 +47,7 @@ export function getUnifiedPageHeaderGradient(
 ): string {
   const topHex = getUnifiedPageHeaderTopHex(theme);
   const baseHex = getThemeBaseColor(theme);
-  return `linear-gradient(180deg, ${topHex} 0%, ${baseHex} 240px, ${baseHex} 100%)`;
+  return `linear-gradient(180deg, ${topHex} 0px, ${topHex} env(safe-area-inset-top, 0px), ${baseHex} calc(240px + env(safe-area-inset-top, 0px)), ${baseHex} 100%)`;
 }
 
 export function isUnifiedHeaderPath(pathname: string): boolean {
@@ -426,7 +426,10 @@ export function syncStatusBarColor(theme?: string | null): void {
       : typeof document !== 'undefined'
         ? document.documentElement.getAttribute('data-theme')
         : null;
-  setDocumentThemeColor(getMobileTabBarColor(activeTheme), getThemeBaseColor(activeTheme));
+  setDocumentThemeColor(
+    getMobileTabBarColor(activeTheme),
+    getUnifiedPageHeaderTopHex(activeTheme)
+  );
 }
 
 /**

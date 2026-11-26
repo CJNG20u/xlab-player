@@ -1648,7 +1648,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       ) : (
         // --- LIBRARY SONGS / LIKED / DOWNLOADED / CACHED / PLAYLISTS VIEW ---
         <div
-          className="min-h-full pb-36 md:pb-12"
+          className="min-h-full pb-36 md:pb-12 bg-[var(--bg-primary)]"
           style={{
             paddingBottom: showFloatingBatchBar
               ? 'calc(11.5rem + env(safe-area-inset-bottom, 0px))'
@@ -1664,9 +1664,17 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   '--hero-top-hex': heroTopHexColor,
                   '--hero-mid-hex': `${heroTopHexColor}88`,
                   ...(isTidal
-                    ? {}
+                    ? !isDesktop
+                      ? {
+                          background:
+                            'linear-gradient(180deg, #000000 0px, #000000 env(safe-area-inset-top, 0px), rgba(0, 0, 0, 0) calc(env(safe-area-inset-top, 0px) + 48px)), var(--home-hero-bg)',
+                        }
+                      : {}
                     : {
-                        background: `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
+                        background:
+                          !isDesktop && !isLight
+                            ? `linear-gradient(180deg, #000000 0px, #000000 env(safe-area-inset-top, 0px), ${heroTopHexColor} calc(env(safe-area-inset-top, 0px) + 56px), ${heroTopHexColor}88 55%, var(--bg-primary) 100%)`
+                            : `linear-gradient(180deg, ${heroTopHexColor} 0%, ${heroTopHexColor}88 42%, var(--bg-primary) 100%)`,
                       }),
                 } as React.CSSProperties
               }
