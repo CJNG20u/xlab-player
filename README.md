@@ -12,6 +12,14 @@ docker pull ghcr.io/cjng20u/xlab-player:latest
 
 Self-hosted Spotify-style music player and PWA for your NAS, with built-in yt-dlp search, inline audio preview, and automatic metadata tagging.
 
+## Why xlabplayer?
+
+- **Your music, your server.** Runs in Docker on your own hardware. No subscriptions, no accounts with a third party, no cloud.
+- **Everything in one player.** Your NAS library and YouTube streaming share one queue.
+- **Works on every device.** Installable PWA for iPhone, Android and PC, with lock-screen controls.
+- **Free to use and download.** Stream online and save songs to your own library.
+- **Made for your setup.** Lyrics, offline playback, playlists and multi-user roles.
+
 ## Features
 Local & NAS Audio Streaming: Streams .m4a, .opus, .flac, .mp3, .ogg, and .wav directly from your local drive or mounted NFS/SMB share with HTTP 206 byte-range seeking and instant library indexing.
 
