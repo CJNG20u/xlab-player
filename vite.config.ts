@@ -25,8 +25,8 @@ export default defineConfig(() => {
           short_name: 'xlabplayer',
           description:
             'Self-hosted music streaming and downloading Progressive Web App for Proxmox LXC and NAS libraries.',
-          theme_color: '#121212',
-          background_color: '#121212',
+          theme_color: '#000000',
+          background_color: '#000000',
           display: 'standalone',
           start_url: '/',
           scope: '/',

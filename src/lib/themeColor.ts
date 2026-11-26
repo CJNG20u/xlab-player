@@ -27,6 +27,12 @@ export function getThemeBaseColor(
   return THEME_BASE_COLORS['spotify-dark'];
 }
 
+export function getMobileTabBarColor(
+  theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark' | string | null | undefined
+): string {
+  return theme === 'apple-light' ? '#ffffff' : '#000000';
+}
+
 export function getUnifiedPageHeaderTopHex(
   theme: 'spotify-dark' | 'apple-dark' | 'apple-light' | 'tidal-dark' | string | null | undefined
 ): string {
@@ -364,12 +370,17 @@ export function computeLightTintedTopHex(
 }
 
 /**
- * Dynamically updates `<meta name="theme-color">` and root background backing so
- * Android Chrome and iOS Safari status bars match the active screen color.
+ * Dynamically updates `<meta name="theme-color">` to match the active mobile tab bar color
+ * (#000000 on dark themes, #ffffff on apple-light) and keeps html/body background aligned
+ * with the active theme base color.
  */
-export function setDocumentThemeColor(hexColor: string): void {
+export function setDocumentThemeColor(hexColor: string, rootBgColor?: string): void {
   if (typeof document === 'undefined') return;
-  const normalized = normalizeHexColor(hexColor, getActiveDocumentBaseThemeColor());
+  const baseBg = normalizeHexColor(
+    rootBgColor ?? getActiveDocumentBaseThemeColor(),
+    getActiveDocumentBaseThemeColor()
+  );
+  const normalizedMeta = normalizeHexColor(hexColor, '#000000');
 
   let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (!meta) {
@@ -377,10 +388,10 @@ export function setDocumentThemeColor(hexColor: string): void {
     meta.name = 'theme-color';
     document.head.appendChild(meta);
   }
-  meta.setAttribute('content', normalized);
-  document.documentElement.style.backgroundColor = normalized;
+  meta.setAttribute('content', normalizedMeta);
+  document.documentElement.style.backgroundColor = baseBg;
   if (document.body) {
-    document.body.style.backgroundColor = normalized;
+    document.body.style.backgroundColor = baseBg;
   }
 }
 
@@ -392,25 +403,30 @@ interface StatusBarClaim {
 const statusBarClaims: StatusBarClaim[] = [];
 
 /**
- * Returns the winning status-bar color: the most recently registered active claim,
- * or the active theme's base color if no claims are registered.
+ * Returns the active theme's tab bar color for `<meta name="theme-color">`.
  */
 export function getWinningStatusBarColor(theme?: string | null): string {
-  if (statusBarClaims.length > 0) {
-    return statusBarClaims[statusBarClaims.length - 1].hex;
-  }
-  if (theme !== undefined) {
-    return getThemeBaseColor(theme);
-  }
-  return getActiveDocumentBaseThemeColor();
+  const activeTheme =
+    theme !== undefined
+      ? theme
+      : typeof document !== 'undefined'
+        ? document.documentElement.getAttribute('data-theme')
+        : null;
+  return getMobileTabBarColor(activeTheme);
 }
 
 /**
- * Re-applies the winning status-bar color via `setDocumentThemeColor`.
- * Call after `data-theme` changes so fallback colors update immediately.
+ * Re-applies `<meta name="theme-color">` (tab bar color) and root base background color.
+ * Call after `data-theme` changes so Android navigation bar and root colors update immediately.
  */
 export function syncStatusBarColor(theme?: string | null): void {
-  setDocumentThemeColor(getWinningStatusBarColor(theme));
+  const activeTheme =
+    theme !== undefined
+      ? theme
+      : typeof document !== 'undefined'
+        ? document.documentElement.getAttribute('data-theme')
+        : null;
+  setDocumentThemeColor(getMobileTabBarColor(activeTheme), getThemeBaseColor(activeTheme));
 }
 
 /**

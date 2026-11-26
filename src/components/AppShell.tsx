@@ -537,12 +537,12 @@ const AppShellInner: React.FC = () => {
     'md:hidden fixed left-[var(--miniplayer-inset)] right-[var(--miniplayer-inset)] bottom-above-nav z-30 h-[64px] rounded-[var(--miniplayer-radius)] [background:var(--miniplayer-bg)] border border-[var(--miniplayer-border)] shadow-[var(--miniplayer-shadow)] overflow-hidden select-none mobile-mini-player-glass';
 
   const bottomNavClassName =
-    'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--nav-bg)] border-t border-[var(--nav-border)] mobile-tab-bar-glass';
+    'md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe bg-[var(--mobile-tab-bar-bg)] border-t border-[var(--mobile-tab-bar-border)]';
 
   return (
     <MainScrollProvider element={mainElement}>
       <MainScrollRestorationSync />
-      <div className="flex h-dvh w-screen flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+      <div className="fixed inset-0 flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Main Area: Sidebar (Desktop) + Scrollable Stage */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Desktop Left Sidebar (240px expanded, 64px slim icon rail when collapsed on desktop only) */}

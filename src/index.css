@@ -46,7 +46,8 @@
     --footer-bg: var(--bg-secondary);
     --miniplayer-bg: linear-gradient(90deg, var(--stage-tint, #1c3b29) 0%, #1c1c1c 100%);
     --miniplayer-border: rgba(255, 255, 255, 0.1);
-    --mobile-nav-glass-bg: rgba(18, 18, 18, 0.40);
+    --mobile-tab-bar-bg: #000000;
+    --mobile-tab-bar-border: rgba(255, 255, 255, 0.08);
     --mobile-miniplayer-glass-bg: linear-gradient(90deg, rgba(28, 59, 41, 0.44) 0%, rgba(28, 28, 28, 0.44) 100%);
     --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -162,7 +163,8 @@
     --footer-bg: var(--bg-glass);
     --miniplayer-bg: rgba(28, 28, 30, 0.8);
     --miniplayer-border: rgba(255, 255, 255, 0.12);
-    --mobile-nav-glass-bg: rgba(28, 28, 30, 0.38);
+    --mobile-tab-bar-bg: #000000;
+    --mobile-tab-bar-border: rgba(255, 255, 255, 0.08);
     --mobile-miniplayer-glass-bg: rgba(28, 28, 30, 0.42);
     --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -278,7 +280,8 @@
     --footer-bg: var(--bg-glass);
     --miniplayer-bg: rgba(255, 255, 255, 0.85);
     --miniplayer-border: rgba(0, 0, 0, 0.08);
-    --mobile-nav-glass-bg: rgba(255, 255, 255, 0.50);
+    --mobile-tab-bar-bg: #ffffff;
+    --mobile-tab-bar-border: rgba(0, 0, 0, 0.08);
     --mobile-miniplayer-glass-bg: rgba(255, 255, 255, 0.52);
     --mobile-glass-border: rgba(0, 0, 0, 0.10);
     --miniplayer-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
@@ -394,7 +397,8 @@
     --footer-bg: var(--bg-secondary);
     --miniplayer-bg: rgba(17, 17, 17, 0.95);
     --miniplayer-border: rgba(255, 255, 255, 0.08);
-    --mobile-nav-glass-bg: rgba(6, 6, 8, 0.40);
+    --mobile-tab-bar-bg: #000000;
+    --mobile-tab-bar-border: rgba(255, 255, 255, 0.08);
     --mobile-miniplayer-glass-bg: rgba(17, 17, 17, 0.44);
     --mobile-glass-border: rgba(255, 255, 255, 0.16);
     --miniplayer-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -476,6 +480,8 @@
   body,
   #root {
     height: 100%;
+    min-height: 100vh;
+    min-height: -webkit-fill-available;
     background-color: var(--bg-primary);
     color: var(--text-primary);
     font-family: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -725,16 +731,8 @@ input[type="range"].xlab-slider::-moz-range-thumb {
   :where(button, [role="button"]):not(:disabled):active { transform: none; }
 }
 
-/* Mobile-only translucent blur for bottom tab bar and mini player */
+/* Mobile-only translucent blur for mini player */
 @supports ((backdrop-filter: blur(30px)) or (-webkit-backdrop-filter: blur(30px))) {
-  .mobile-tab-bar-glass {
-    background: var(--mobile-nav-glass-bg);
-    border-top-color: var(--mobile-glass-border);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
-    -webkit-backdrop-filter: blur(30px) saturate(190%);
-    backdrop-filter: blur(30px) saturate(190%);
-  }
-
   .mobile-mini-player-glass {
     background: var(--mobile-miniplayer-glass-bg);
     border-color: var(--mobile-glass-border);
@@ -745,13 +743,6 @@ input[type="range"].xlab-slider::-moz-range-thumb {
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .mobile-tab-bar-glass {
-    background: var(--nav-bg);
-    border-top-color: var(--nav-border);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
-
   .mobile-mini-player-glass {
     background: var(--miniplayer-bg);
     border-color: var(--miniplayer-border);

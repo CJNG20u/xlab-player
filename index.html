@@ -9,7 +9,7 @@
     <meta property="og:description" content="Self-hosted music streaming and downloading Progressive Web App for Proxmox LXC and NAS libraries." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="theme-color" content="#121212" />
+    <meta name="theme-color" content="#000000" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -36,32 +36,18 @@
           var root = document.documentElement;
           root.setAttribute('data-theme', t);
           root.classList.toggle('dark', t !== 'apple-light');
-          var p = (window.location && window.location.pathname) || '/';
-          var isUnified =
-            p.indexOf('/playlists/') === 0 ||
-            p === '/discover' ||
-            p === '/search' ||
-            p === '/download' ||
-            p === '/settings';
-          var color =
-            t === 'tidal-dark'
-              ? '#000000'
-              : isUnified
-                ? t === 'apple-light'
-                  ? '#f3f3f7'
-                  : t === 'apple-dark'
-                    ? '#141214'
-                    : '#1c2520'
-                : t === 'apple-light'
-                  ? '#FFFFFF'
-                  : t === 'apple-dark'
-                    ? '#000000'
-                    : '#121212';
+          var tabBarColor = t === 'apple-light' ? '#ffffff' : '#000000';
+          var baseBgColor =
+            t === 'apple-light'
+              ? '#ffffff'
+              : t === 'spotify-dark'
+                ? '#121212'
+                : '#000000';
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute('content', color);
+          if (meta) meta.setAttribute('content', tabBarColor);
           var appleMeta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
           if (appleMeta) appleMeta.setAttribute('content', t === 'apple-light' ? 'default' : 'black-translucent');
-          root.style.backgroundColor = color;
+          root.style.backgroundColor = baseBgColor;
         } catch (e) {}
       })();
     </script>
