@@ -1,9 +1,9 @@
 import {
   Check,
-  Compass,
   Download,
   Heart,
   Home,
+  Library,
   ListMusic,
   Loader2,
   LogOut,
@@ -421,11 +421,10 @@ const AppShellInner: React.FC = () => {
   const volPct = (displayMuted ? 0 : displayVolume) * 100;
   const isNowPlayingPage = location.pathname === '/now-playing';
   const isHomePage = location.pathname === '/';
+  const isLibraryRoute =
+    location.pathname === '/library' || location.pathname.startsWith('/library/');
   const hasOwnBottomClearance =
-    isHomePage ||
-    location.pathname === '/discover' ||
-    location.pathname === '/search' ||
-    location.pathname.startsWith('/playlists');
+    isHomePage || isLibraryRoute || location.pathname.startsWith('/playlists');
   const stageTint = displayTrack?.dominant_color || '#1c3b29';
   const isCurrentYouTube = Boolean(displayTrack?.isYouTubeStream);
   const currentYtSaveStatus =
@@ -439,8 +438,14 @@ const AppShellInner: React.FC = () => {
     flashShellToast(res.message);
   }, [currentTrack, flashShellToast, saveYouTubeTrackToLibrary]);
 
-  const isPlaylistsRootPage = location.pathname === '/playlists';
-  const usesUnifiedHeader = !isNowPlayingPage && !isHomePage && !isPlaylistsRootPage;
+  const isDynamicHeroLibraryRoute =
+    location.pathname === '/library/songs' ||
+    location.pathname === '/library/liked' ||
+    location.pathname === '/library/downloaded' ||
+    location.pathname === '/library/cached' ||
+    location.pathname === '/library/playlists' ||
+    (location.pathname === '/library' && (isDesktop || (offline && playlists.length === 0)));
+  const usesUnifiedHeader = !isNowPlayingPage && !isDynamicHeroLibraryRoute;
   const unifiedHeaderTopHex = getUnifiedPageHeaderTopHex(theme);
   const unifiedHeaderGradient = `linear-gradient(180deg, ${unifiedHeaderTopHex} 0%, ${baseThemeColor} 240px, ${baseThemeColor} 100%)`;
 
@@ -503,10 +508,23 @@ const AppShellInner: React.FC = () => {
     [location, mainElement, navigate]
   );
 
+  const handleToggleNowPlaying = useCallback(() => {
+    if (isNowPlayingPage) {
+      if (typeof window !== 'undefined' && window.history.length > 1) {
+        navigate(-1);
+      } else {
+        navigate('/');
+      }
+    } else {
+      navigate('/now-playing');
+    }
+  }, [isNowPlayingPage, navigate]);
+
+  const activeTabGroup = getTabGroup(location.pathname);
+
   const navItems = [
     {to: '/', label: 'Home', icon: Home, end: true},
-    {to: '/playlists', label: 'Playlists', icon: ListMusic, end: false},
-    {to: '/discover', label: 'Discover', icon: Compass, end: false},
+    {to: '/library', label: 'Library', icon: Library, end: false},
     {to: '/settings', label: 'Settings', icon: Settings, end: false},
   ];
 
@@ -585,6 +603,7 @@ const AppShellInner: React.FC = () => {
           <nav className={isSidebarCollapsed ? 'px-2 space-y-1.5 flex flex-col items-center' : 'px-3 space-y-1'}>
             {navItems.map((item) => {
               const Icon = item.icon;
+              const isSelected = activeTabGroup === item.to;
               return (
                 <NavLink
                   key={item.to}
@@ -593,15 +612,16 @@ const AppShellInner: React.FC = () => {
                   onClick={(e) => handlePrimaryNavClick(e, item.to)}
                   title={isSidebarCollapsed ? item.label : undefined}
                   aria-label={isSidebarCollapsed ? item.label : undefined}
-                  className={({isActive}) =>
+                  aria-current={isSelected ? 'page' : undefined}
+                  className={() =>
                     isSidebarCollapsed
                       ? `flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
-                          isActive
+                          isSelected
                             ? 'bg-[var(--bg-elevated)] text-[var(--accent)]'
                             : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
                         }`
                       : `flex items-center gap-3.5 rounded-md px-3 py-2.5 text-sm font-semibold transition-colors whitespace-nowrap ${
-                          isActive
+                          isSelected
                             ? 'bg-[var(--bg-elevated)] text-[var(--accent)]'
                             : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]'
                         }`
@@ -666,9 +686,18 @@ const AppShellInner: React.FC = () => {
           ) : (
             <div className="mt-6 flex flex-1 min-h-0 flex-col border-t border-[var(--border-subtle)] pt-4 px-3">
               <div className="flex items-center justify-between px-3 mb-2">
-                <span className="text-xs font-semibold text-[var(--text-secondary)] whitespace-nowrap">
+                <NavLink
+                  to="/library/playlists"
+                  className={({isActive}) =>
+                    `text-xs font-semibold whitespace-nowrap transition-colors ${
+                      isActive
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`
+                  }
+                >
                   {offline ? 'Offline Playlists' : 'Playlists'}
-                </span>
+                </NavLink>
                 {!offline && (
                   <button
                     type="button"
@@ -850,7 +879,7 @@ const AppShellInner: React.FC = () => {
                         <button
                           type="button"
                           onClick={() =>
-                            navigate(`/?artist=${encodeURIComponent(displayTrack.artist)}`)
+                            navigate(`/library/songs?artist=${encodeURIComponent(displayTrack.artist)}`)
                           }
                           className="block max-w-full truncate text-[clamp(0.75rem,0.65rem_+_0.18vw,0.9375rem)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left cursor-pointer"
                         >
@@ -1079,14 +1108,14 @@ const AppShellInner: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => navigate(isNowPlayingPage ? '/' : '/now-playing')}
+                onClick={handleToggleNowPlaying}
                 className={`p-2 rounded-full hover:bg-[var(--bg-elevated)] transition-colors cursor-pointer ${
                   isNowPlayingPage
                     ? 'text-[var(--accent)]'
                     : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
                 title={isNowPlayingPage ? 'Close Now Playing' : 'Expand Now Playing'}
-                aria-label="Expand Now Playing"
+                aria-label={isNowPlayingPage ? 'Close Now Playing' : 'Expand Now Playing'}
               >
                 <Maximize2 className="w-4 h-4" />
               </button>
@@ -1131,7 +1160,7 @@ const AppShellInner: React.FC = () => {
                     <button
                       type="button"
                       onClick={() =>
-                        navigate(`/?artist=${encodeURIComponent(displayTrack.artist)}`)
+                        navigate(`/library/songs?artist=${encodeURIComponent(displayTrack.artist)}`)
                       }
                       className="block max-w-full truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline text-left"
                     >
@@ -1369,14 +1398,14 @@ const AppShellInner: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => navigate(isNowPlayingPage ? '/' : '/now-playing')}
+            onClick={handleToggleNowPlaying}
             className={`p-2 transition-colors ${
               isNowPlayingPage
                 ? 'text-[var(--accent)]'
                 : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
-            title="Expand Now Playing"
-            aria-label="Expand Now Playing"
+            title={isNowPlayingPage ? 'Close Now Playing' : 'Expand Now Playing'}
+            aria-label={isNowPlayingPage ? 'Close Now Playing' : 'Expand Now Playing'}
           >
             <Maximize2 className="w-4 h-4" />
           </button>
@@ -1518,24 +1547,26 @@ const AppShellInner: React.FC = () => {
         </div>
       )}
 
-      {/* Mobile 4-Tab Bottom Navigation Bar (60px + safe-area-inset-bottom) */}
+      {/* Mobile 3-Tab Bottom Navigation Bar (60px + safe-area-inset-bottom) */}
       {!isNowPlayingPage && (
-        <nav className={bottomNavClassName}>
+        <nav className={bottomNavClassName} aria-label="Primary navigation">
           <div
             className="grid h-[60px] items-center"
             style={{gridTemplateColumns: `repeat(${navItems.length}, minmax(0, 1fr))`}}
           >
             {navItems.map((item) => {
               const Icon = item.icon;
+              const isSelected = activeTabGroup === item.to;
               return (
                 <NavLink
                   key={item.to}
                   to={item.to}
                   end={item.end}
                   onClick={(e) => handlePrimaryNavClick(e, item.to)}
-                  className={({isActive}) =>
+                  aria-current={isSelected ? 'page' : undefined}
+                  className={() =>
                     `flex flex-col items-center justify-center gap-1 h-full text-[11px] font-medium transition-colors ${
-                      isActive ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
+                      isSelected ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
                     }`
                   }
                 >
@@ -1589,7 +1620,7 @@ const AppShellInner: React.FC = () => {
       {offline && (
         <button
           type="button"
-          onClick={() => navigate('/')}
+          onClick={() => navigate('/library')}
           className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-md bg-amber-500 px-3.5 py-2 text-xs font-semibold text-black shadow-lg hover:bg-amber-400 transition-colors"
         >
           <WifiOff className="w-4 h-4 shrink-0" />

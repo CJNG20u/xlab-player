@@ -758,7 +758,7 @@ export const NowPlayingPage: React.FC = () => {
         <div className="mt-6 flex items-center gap-3">
           <button
             type="button"
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/library')}
             className="rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
           >
             Go to Library
@@ -841,7 +841,9 @@ export const NowPlayingPage: React.FC = () => {
               flashToast('Starting radio...');
             }
           }}
-          onGoToArtist={() => navigate(`/?artist=${encodeURIComponent(activeTrack.artist)}`)}
+          onGoToArtist={() =>
+            navigate(`/library/songs?artist=${encodeURIComponent(activeTrack.artist)}`)
+          }
           onPlayHereQuick={() => void handlePlayHereQuick()}
         />
         <AddToPlaylistModal
@@ -1172,7 +1174,7 @@ export const NowPlayingPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() =>
-                      navigate(`/?artist=${encodeURIComponent(activeTrack.artist)}`)
+                      navigate(`/library/songs?artist=${encodeURIComponent(activeTrack.artist)}`)
                     }
                     className="font-medium text-[var(--text-primary)] opacity-90 hover:text-[var(--accent)] hover:underline truncate"
                   >

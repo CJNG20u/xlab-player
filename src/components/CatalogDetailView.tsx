@@ -1452,7 +1452,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                 type="button"
                 onClick={onBack}
                 className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors"
-                aria-label="Back to Discover"
+                aria-label="Back to Home"
               >
                 <ChevronLeft className="w-5 h-5" />
               </button>
@@ -1491,12 +1491,12 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
             type="button"
             onClick={onBack}
             className="inline-flex min-h-[44px] items-center gap-2 rounded-full pr-4 pl-1.5 text-sm font-semibold text-[var(--text-primary)] hover:text-[var(--accent)] transition-colors"
-            aria-label="Back to Discover"
+            aria-label="Back to Home"
           >
             <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)]">
               <ChevronLeft className="w-5 h-5" />
             </span>
-            <span>Back to Discover</span>
+            <span>Back to Home</span>
           </button>
 
           <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-8 text-center space-y-3">
@@ -1541,7 +1541,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                   type="button"
                   onClick={onBack}
                   className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                  aria-label="Back to Discover"
+                  aria-label="Back to Home"
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
@@ -1809,7 +1809,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                   type="button"
                   onClick={onBack}
                   className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white hover:bg-black/65 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                  aria-label="Back to Discover"
+                  aria-label="Back to Home"
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
@@ -1829,7 +1829,7 @@ export const CatalogDetailView: React.FC<CatalogDetailViewProps> = ({
                 <div className="min-w-0 flex-1 text-center sm:text-left space-y-2.5">
                   <div className="inline-flex items-center gap-2 justify-center sm:justify-start">
                     <span className="rounded-md bg-[var(--accent-soft)] border border-[var(--accent)]/35 px-2 py-0.5 text-[11px] font-semibold tracking-wide text-[var(--accent)]">
-                      Discover
+                      Home
                     </span>
                     <span className="text-xs font-medium text-[var(--text-secondary)]">
                       Artist

@@ -46,10 +46,11 @@ export function getUnifiedPageHeaderGradient(
 
 export function isUnifiedHeaderPath(pathname: string): boolean {
   return (
+    pathname === '/' ||
+    pathname === '/library' ||
+    pathname === '/library/artists' ||
+    pathname === '/library/albums' ||
     pathname.startsWith('/playlists/') ||
-    pathname === '/discover' ||
-    pathname === '/search' ||
-    pathname === '/download' ||
     pathname === '/settings'
   );
 }

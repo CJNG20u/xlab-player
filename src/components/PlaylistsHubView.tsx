@@ -209,6 +209,8 @@ interface PlaylistsHubViewProps {
   onDeletePlaylist: (playlistId: number) => Promise<void>;
   onNavigateHomeTab: (tab: 'liked' | 'recent' | 'offline' | 'all') => void;
   playlistDownloadJobs?: Map<number, YouTubePlaylistJob>;
+  mobileBackToLibrary?: () => void;
+  desktopNavBar?: React.ReactNode;
 }
 
 export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
@@ -230,6 +232,8 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   onDeletePlaylist,
   onNavigateHomeTab,
   playlistDownloadJobs,
+  mobileBackToLibrary,
+  desktopNavBar,
 }) => {
   const {theme, isLight, isTidal} = useTheme();
   const isDesktop = useLayoutMode() === 'desktop';
@@ -847,24 +851,48 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
         />
 
         {/* Top Safe-Area Header Row */}
-        <div className="relative z-10 w-full max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 pt-3.5 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <span className="font-display text-lg sm:text-xl font-extrabold tracking-tight text-[var(--hub-header-text)] [filter:var(--hub-header-filter)]">
-              {offline ? 'Offline Playlists' : 'Playlists'}
-            </span>
-          </div>
-
-          {!offline && (
-            <button
-              type="button"
-              onClick={onOpenCreatePlaylist}
-              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full px-3.5 sm:px-4 text-xs font-bold backdrop-blur-md transition-all whitespace-nowrap shrink-0 bg-[var(--hub-btn-bg)] hover:bg-[var(--hub-btn-bg-hover)] text-[var(--hub-btn-text)] border border-[var(--hub-btn-border)] shadow-[var(--hub-btn-shadow)]"
-              aria-label="Create Playlist"
-            >
-              <Plus className="w-4 h-4 stroke-[2.5]" />
-              <span>Create Playlist</span>
-            </button>
+        <div className="relative z-10 w-full max-w-[1680px] mx-auto px-4 sm:px-6 lg:px-8 pt-3.5 space-y-2">
+          {!isDesktop && mobileBackToLibrary && (
+            <div>
+              <button
+                type="button"
+                onClick={mobileBackToLibrary}
+                className="inline-flex min-h-[44px] -ml-2 items-center gap-1 rounded-full pl-1 pr-3 text-base font-medium text-[var(--hub-header-text)] [filter:var(--hub-header-filter)] active:opacity-70 transition-opacity"
+                aria-label="Back to Library"
+              >
+                <ChevronLeft className="w-6 h-6 -mr-0.5" />
+                <span>Library</span>
+              </button>
+            </div>
           )}
+
+          {isDesktop && desktopNavBar ? (
+            <div className="pb-1">{desktopNavBar}</div>
+          ) : null}
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <span
+                className={`font-display font-extrabold tracking-tight text-[var(--hub-header-text)] [filter:var(--hub-header-filter)] ${
+                  !isDesktop ? 'text-[30px] leading-tight' : 'text-lg sm:text-xl'
+                }`}
+              >
+                {offline ? 'Offline Playlists' : 'Playlists'}
+              </span>
+            </div>
+
+            {!offline && (
+              <button
+                type="button"
+                onClick={onOpenCreatePlaylist}
+                className="inline-flex h-10 min-h-[44px] items-center justify-center gap-1.5 rounded-full px-3.5 sm:px-4 text-xs font-bold backdrop-blur-md transition-all whitespace-nowrap shrink-0 bg-[var(--hub-btn-bg)] hover:bg-[var(--hub-btn-bg-hover)] text-[var(--hub-btn-text)] border border-[var(--hub-btn-border)] shadow-[var(--hub-btn-shadow)]"
+                aria-label="Create Playlist"
+              >
+                <Plus className="w-4 h-4 stroke-[2.5]" />
+                <span>Create Playlist</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Bottom Hero Footer: Eyebrow + Bold Title + Subtitle | Circular Accent Play Button */}

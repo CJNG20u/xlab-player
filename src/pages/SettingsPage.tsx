@@ -814,7 +814,7 @@ export const SettingsPage: React.FC = () => {
               Listening data
             </h2>
             <p className="text-xs text-[var(--text-secondary)]">
-              Use your plays, completions, and early skips to gently personalize Autoplay, Radio, and Discover.
+              Use your plays, completions, and early skips to gently personalize Autoplay, Radio, and Home recommendations.
             </p>
           </div>
         </div>

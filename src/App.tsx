@@ -5,6 +5,7 @@ import {AppShell} from './components/AppShell';
 import {AuthProvider, useAuth} from './context/AuthContext';
 import {PlayerProvider} from './context/PlayerContext';
 import {ThemeProvider} from './context/ThemeContext';
+import {useOnlineStatus} from './hooks/useOnlineStatus';
 import {PlaylistsLibraryPage} from './pages/PlaylistsLibraryPage';
 
 const AuthPage = lazy(() => import('./pages/AuthPage').then((m) => ({default: m.AuthPage})));
@@ -25,6 +26,15 @@ const FullScreenLoader: React.FC = () => (
   </div>
 );
 
+const HomeRoute: React.FC = () => {
+  const {isOfflineMode} = useAuth();
+  const isOnline = useOnlineStatus();
+  if (!isOnline || isOfflineMode) {
+    return <Navigate to="/library" replace />;
+  }
+  return <DiscoverPage />;
+};
+
 const AuthenticatedRoutes: React.FC = () => {
   const {user, loading} = useAuth();
 
@@ -44,13 +54,21 @@ const AuthenticatedRoutes: React.FC = () => {
     <PlayerProvider>
       <Routes>
         <Route element={<AppShell />}>
-          <Route path="/" element={<PlaylistsLibraryPage />} />
-          <Route path="/playlists" element={<PlaylistsLibraryPage />} />
+          <Route path="/" element={<HomeRoute />} />
+          <Route path="/library" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/songs" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/liked" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/downloaded" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/cached" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/artists" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/albums" element={<PlaylistsLibraryPage />} />
+          <Route path="/library/playlists" element={<PlaylistsLibraryPage />} />
+          <Route path="/playlists" element={<Navigate to="/library/playlists" replace />} />
           <Route path="/playlists/:id" element={<PlaylistsLibraryPage />} />
           <Route path="/now-playing" element={<NowPlayingPage />} />
-          <Route path="/discover" element={<DiscoverPage />} />
-          <Route path="/search" element={<Navigate to="/discover" replace />} />
-          <Route path="/download" element={<Navigate to="/discover" replace />} />
+          <Route path="/discover" element={<Navigate to="/" replace />} />
+          <Route path="/search" element={<Navigate to="/" replace />} />
+          <Route path="/download" element={<Navigate to="/" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

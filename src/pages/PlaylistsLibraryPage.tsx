@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   CheckSquare,
+  ChevronLeft,
   Clock,
   Copy,
   FileDown,
@@ -30,6 +31,8 @@ import {AlbumArt, PlaylistMosaic} from '../components/AlbumArt';
 import {ConfirmDeleteModal} from '../components/ConfirmDeleteModal';
 import {CreatePlaylistModal} from '../components/CreatePlaylistModal';
 import {DuplicatesPanel} from '../components/DuplicatesPanel';
+import {LibraryAlbumsView, LibraryArtistsView} from '../components/LibraryArtistsAlbumsView';
+import {LibraryEntryView} from '../components/LibraryEntryView';
 import {PlaylistsHubView, recordRecentPlaylistId} from '../components/PlaylistsHubView';
 import {RenamePlaylistModal} from '../components/RenamePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
@@ -74,6 +77,15 @@ import {
 
 type LibraryTab = 'all' | 'liked' | 'recent' | 'offline' | 'playlists';
 type HomeViewTab = Exclude<LibraryTab, 'playlists'>;
+type LibrarySection =
+  | 'entry'
+  | 'songs'
+  | 'liked'
+  | 'downloaded'
+  | 'cached'
+  | 'artists'
+  | 'albums'
+  | 'playlists';
 
 const HOME_VIEW_META: Record<
   HomeViewTab,
@@ -101,11 +113,35 @@ const HOME_VIEW_META: Record<
   },
 };
 
-function getTimeOfDayGreeting(now = new Date()): string {
-  const hour = now.getHours();
-  if (hour >= 5 && hour < 12) return 'Good morning';
-  if (hour >= 12 && hour < 18) return 'Good afternoon';
-  return 'Good evening';
+const HOME_TAB_TO_PATH: Record<HomeViewTab, string> = {
+  all: '/library/songs',
+  liked: '/library/liked',
+  recent: '/library/downloaded',
+  offline: '/library/cached',
+};
+
+function resolveLibrarySection(
+  pathname: string,
+  isDesktop: boolean,
+  offline: boolean,
+  hasOfflinePlaylists: boolean
+): LibrarySection {
+  if (pathname === '/library/playlists' || pathname === '/playlists') return 'playlists';
+  if (pathname === '/library/cached') return 'cached';
+  if (pathname === '/library/artists') return offline ? 'cached' : 'artists';
+  if (pathname === '/library/albums') return offline ? 'cached' : 'albums';
+  if (pathname === '/library/liked') return offline ? 'cached' : 'liked';
+  if (pathname === '/library/downloaded') return offline ? 'cached' : 'downloaded';
+  if (pathname === '/library/songs') return offline ? 'cached' : 'songs';
+
+  // Root /library
+  if (isDesktop) {
+    return offline ? 'cached' : 'songs';
+  }
+  if (offline) {
+    return hasOfflinePlaylists ? 'entry' : 'cached';
+  }
+  return 'entry';
 }
 
 function formatHumanDuration(seconds: number): string {
@@ -149,16 +185,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
     recentlyDownloadedTracks,
   } = usePlayer();
   const {isLight, isTidal, baseThemeColor} = useTheme();
+  const isDesktop = useLayoutMode() === 'desktop';
 
   const canDeleteTracks = !offline && (user?.role === 'admin' || Boolean(user?.can_download));
-  const isPlaylistsRoot = location.pathname === '/playlists';
   const artistFilter = searchParams.get('artist') || '';
+  const albumFilter = searchParams.get('album') || '';
 
-  const [activeTab, setActiveTab] = useState<LibraryTab>(() => {
-    if (isPlaylistsRoot) return 'playlists';
-    if (typeof navigator !== 'undefined' && !navigator.onLine) return 'offline';
-    return 'all';
-  });
   const [searchQuery, setSearchQuery] = useState('');
   const [tracks, setTracks] = useState<Track[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -172,24 +204,23 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<Playlist | null>(null);
-  const [greeting, setGreeting] = useState<string>(() => getTimeOfDayGreeting());
   const [searchOpen, setSearchOpen] = useState(false);
   const [heroSampledColor, setHeroSampledColor] = useState<string | null>(null);
   const [heroOfflineCoverUrl, setHeroOfflineCoverUrl] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    const syncGreeting = () => setGreeting(getTimeOfDayGreeting());
-    const intervalId = window.setInterval(syncGreeting, 60_000);
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') syncGreeting();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, []);
+  const librarySection: LibrarySection = useMemo(
+    () => resolveLibrarySection(location.pathname, isDesktop, offline, playlists.length > 0),
+    [isDesktop, location.pathname, offline, playlists.length]
+  );
+
+  const activeTab: LibraryTab = useMemo(() => {
+    if (librarySection === 'playlists') return 'playlists';
+    if (librarySection === 'liked') return 'liked';
+    if (librarySection === 'downloaded') return 'recent';
+    if (librarySection === 'cached') return 'offline';
+    return 'all';
+  }, [librarySection]);
 
   // Multi-select & batch action state
   const [selectionMode, setSelectionMode] = useState(false);
@@ -290,21 +321,6 @@ export const PlaylistsLibraryPage: React.FC = () => {
     return () => document.removeEventListener('mousedown', onDocClick);
   }, []);
 
-  useEffect(() => {
-    if (isPlaylistsRoot && !playlistIdParam) {
-      setActiveTab('playlists');
-    } else if (location.pathname === '/' && activeTab === 'playlists') {
-      setActiveTab(offline ? 'offline' : 'all');
-    }
-  }, [isPlaylistsRoot, location.pathname, playlistIdParam, offline]);
-
-  // Automatically boot into Offline Library when disconnected
-  useEffect(() => {
-    if (offline && !playlistIdParam && activeTab !== 'playlists' && activeTab !== 'offline') {
-      setActiveTab('offline');
-    }
-  }, [offline, playlistIdParam, activeTab]);
-
   // Abort any in-flight playlist download on unmount
   useEffect(() => {
     return () => {
@@ -323,7 +339,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
         recordRecentPlaylistId(numericId);
       }
     }
-  }, [playlistIdParam, activeTab, artistFilter]);
+  }, [playlistIdParam, librarySection, artistFilter, albumFilter]);
 
   const loadPlaylists = useCallback(async () => {
     if (offline) {
@@ -362,7 +378,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
   const loadContent = useCallback(async () => {
     const seq = ++loadSeqRef.current;
     const targetRouteKey = currentRouteKey;
-    const viewKey = `${targetRouteKey}|${activeTab}`;
+    const viewKey = `${targetRouteKey}|${librarySection}`;
     if (loadedViewKeyRef.current !== viewKey) {
       setLoading(true);
     }
@@ -391,22 +407,32 @@ export const PlaylistsLibraryPage: React.FC = () => {
             setTracks(cached?.tracks ?? []);
           }
         }
+      } else if (librarySection === 'entry') {
+        setActivePlaylist(null);
       } else if (activeTab === 'offline' || offline) {
         setActivePlaylist(null);
         const cachedTracks = await getOfflineTracks();
         if (loadSeqRef.current !== seq) return;
-        const filteredByArtist = artistFilter
-          ? cachedTracks.filter(
-              (t) => t.artist.toLowerCase() === artistFilter.toLowerCase()
-            )
-          : cachedTracks;
-        setTracks(filteredByArtist);
+        setTracks(cachedTracks);
       } else {
         setActivePlaylist(null);
-        const filterParam =
-          activeTab === 'liked' ? 'liked' : activeTab === 'recent' ? 'recent' : 'all';
+        const isArtistsOrAlbums = librarySection === 'artists' || librarySection === 'albums';
+        const filterParam = isArtistsOrAlbums
+          ? 'all'
+          : activeTab === 'liked'
+            ? 'liked'
+            : activeTab === 'recent'
+              ? 'recent'
+              : 'all';
         const qs = new URLSearchParams({filter: filterParam});
-        if (artistFilter) qs.set('artist', artistFilter);
+        if (
+          !isArtistsOrAlbums &&
+          !albumFilter &&
+          artistFilter &&
+          artistFilter.trim().toLowerCase() !== 'unknown artist'
+        ) {
+          qs.set('artist', artistFilter);
+        }
         try {
           const res = await apiFetch<{tracks: Track[]}>(`/api/tracks?${qs.toString()}`);
           if (loadSeqRef.current !== seq) return;
@@ -428,7 +454,16 @@ export const PlaylistsLibraryPage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [playlistIdParam, activeTab, artistFilter, loadPlaylists, offline, currentRouteKey]);
+  }, [
+    playlistIdParam,
+    librarySection,
+    activeTab,
+    artistFilter,
+    albumFilter,
+    loadPlaylists,
+    offline,
+    currentRouteKey,
+  ]);
 
   useEffect(() => {
     void loadContent();
@@ -444,7 +479,12 @@ export const PlaylistsLibraryPage: React.FC = () => {
     });
   }, [activeTab, offline, loadContent]);
 
-  const isHomeView = !playlistIdParam && activeTab !== 'playlists';
+  const isHomeView =
+    !playlistIdParam &&
+    (librarySection === 'songs' ||
+      librarySection === 'liked' ||
+      librarySection === 'downloaded' ||
+      librarySection === 'cached');
   const activeHomeTab: HomeViewTab = activeTab === 'playlists' ? 'all' : activeTab;
 
   const filteredTracks = useMemo(() => {
@@ -453,6 +493,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       isHomeView &&
       (activeHomeTab === 'all' || activeHomeTab === 'recent') &&
       !artistFilter &&
+      !albumFilter &&
       !offline &&
       recentlyDownloadedTracks.length > 0
     ) {
@@ -466,9 +507,31 @@ export const PlaylistsLibraryPage: React.FC = () => {
     }
 
     let list = baseList;
+    if (isHomeView && artistFilter) {
+      const targetArtist = artistFilter.trim().toLowerCase();
+      list = list.filter((t) => {
+        const trackArtist = (t.artist || '').trim().toLowerCase();
+        if (targetArtist === 'unknown artist') {
+          return trackArtist === '' || trackArtist === 'unknown artist';
+        }
+        return trackArtist === targetArtist;
+      });
+    }
+
+    if (isHomeView && albumFilter) {
+      const targetAlbum = albumFilter.trim().toLowerCase();
+      list = list.filter((t) => {
+        const trackAlbum = (t.album || '').trim().toLowerCase();
+        if (targetAlbum === 'unknown album') {
+          return trackAlbum === '' || trackAlbum === 'unknown album';
+        }
+        return trackAlbum === targetAlbum;
+      });
+    }
+
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      list = baseList.filter(
+      list = list.filter(
         (t) =>
           t.title.toLowerCase().includes(q) ||
           t.artist.toLowerCase().includes(q) ||
@@ -476,7 +539,21 @@ export const PlaylistsLibraryPage: React.FC = () => {
       );
     }
 
-    // Sort "Songs" (default Home tab) by most recently played first,
+    // Album view: keep tracks in track_number order if known, otherwise alphabetically by title
+    if (isHomeView && albumFilter) {
+      return [...list].sort((a, b) => {
+        const numA =
+          typeof a.track_number === 'number' && a.track_number > 0 ? a.track_number : null;
+        const numB =
+          typeof b.track_number === 'number' && b.track_number > 0 ? b.track_number : null;
+        if (numA !== null && numB !== null && numA !== numB) return numA - numB;
+        if (numA !== null && numB === null) return -1;
+        if (numA === null && numB !== null) return 1;
+        return a.title.localeCompare(b.title, undefined, {sensitivity: 'base'});
+      });
+    }
+
+    // Sort "Songs" by most recently played first,
     // merging persisted SQLite play_history, localStorage history, and live playback.
     if (isHomeView && activeHomeTab === 'all') {
       const localHistory = getLocalPlayHistory();
@@ -551,6 +628,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
     isHomeView,
     activeHomeTab,
     artistFilter,
+    albumFilter,
     offline,
     lastPlayed,
   ]);
@@ -762,7 +840,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
       bumpLibraryRefresh();
       flashToast('Playlist deleted');
       if (playlistIdParam && Number(playlistIdParam) === targetPlaylistId) {
-        navigate('/playlists');
+        navigate('/library/playlists');
       }
     } catch (err) {
       flashToast(err instanceof Error ? err.message : 'Could not delete playlist');
@@ -825,25 +903,41 @@ export const PlaylistsLibraryPage: React.FC = () => {
   };
 
   const handleArtistClick = (artist: string) => {
-    setSearchParams({artist});
-    if (playlistIdParam) {
-      navigate(`/?artist=${encodeURIComponent(artist)}`);
-    } else {
-      setActiveTab('all');
-    }
+    navigate(`/library/songs?artist=${encodeURIComponent(artist)}`);
   };
 
   const homeFilterPills: Array<{id: HomeViewTab; label: string}> = useMemo(
     () =>
       offline
-        ? [{id: 'offline', label: 'Offline'}]
+        ? [{id: 'offline', label: 'Cached'}]
         : [
             {id: 'all', label: 'Songs'},
-            {id: 'liked', label: 'Liked Songs'},
-            {id: 'recent', label: 'Recently Downloaded'},
-            {id: 'offline', label: 'Offline'},
+            {id: 'liked', label: 'Liked'},
+            {id: 'recent', label: 'Downloaded'},
+            {id: 'offline', label: 'Cached'},
           ],
     [offline]
+  );
+
+  const desktopLibraryChips: Array<{section: LibrarySection; label: string; to: string}> = useMemo(
+    () =>
+      offline
+        ? [
+            {section: 'cached', label: 'Cached', to: '/library/cached'},
+            ...(playlists.length > 0
+              ? [{section: 'playlists' as const, label: 'Playlists', to: '/library/playlists'}]
+              : []),
+          ]
+        : [
+            {section: 'songs', label: 'Songs', to: '/library/songs'},
+            {section: 'liked', label: 'Liked', to: '/library/liked'},
+            {section: 'downloaded', label: 'Downloaded', to: '/library/downloaded'},
+            {section: 'cached', label: 'Cached', to: '/library/cached'},
+            {section: 'artists', label: 'Artists', to: '/library/artists'},
+            {section: 'albums', label: 'Albums', to: '/library/albums'},
+            {section: 'playlists', label: 'Playlists', to: '/library/playlists'},
+          ],
+    [offline, playlists.length]
   );
 
   // Determine active hero track (prefer active/playing track so swipes immediately update cover & gradient)
@@ -883,10 +977,10 @@ export const PlaylistsLibraryPage: React.FC = () => {
       if (homeFilterPills.length <= 1) return;
       const idx = homeFilterPills.findIndex((p) => p.id === activeHomeTab);
       const nextIdx = (idx + direction + homeFilterPills.length) % homeFilterPills.length;
-      setSearchParams({});
-      setActiveTab(homeFilterPills[nextIdx].id);
+      const nextTab = homeFilterPills[nextIdx].id;
+      navigate(HOME_TAB_TO_PATH[nextTab]);
     },
-    [activeHomeTab, homeFilterPills, setSearchParams]
+    [activeHomeTab, homeFilterPills, navigate]
   );
 
   // Resolve offline cover blob URL when disconnected so offscreen color sampling still works offline
@@ -1014,9 +1108,65 @@ export const PlaylistsLibraryPage: React.FC = () => {
     playTrack(randomTrack, filteredTracks);
   }, [filteredTracks, playTrack, shuffle, toggleShuffle]);
 
-  const isDesktop = useLayoutMode() === 'desktop';
-  const activeHomeTitle = artistFilter || HOME_VIEW_META[activeHomeTab].title;
+  const activeHomeTitle = albumFilter || artistFilter || HOME_VIEW_META[activeHomeTab].title;
+  const mobileBackTarget =
+    (location.state as {from?: string} | null)?.from === '/library/artists'
+      ? {to: '/library/artists', label: 'Artists'}
+      : (location.state as {from?: string} | null)?.from === '/library/albums'
+        ? {to: '/library/albums', label: 'Albums'}
+        : {to: '/library', label: 'Library'};
+  const showMobileBackToLibrary =
+    !isDesktop && !(offline && playlists.length === 0 && librarySection === 'cached');
   const showFloatingBatchBar = selectionMode && selectedIdArray.length > 0;
+
+  const desktopLibraryChipBar = (
+    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+      <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
+        {offline ? 'Offline Library' : 'Library'}
+      </h1>
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-1 px-1">
+        {desktopLibraryChips.map((chip) => {
+          const isActive = librarySection === chip.section;
+          return (
+            <button
+              key={chip.section}
+              type="button"
+              onClick={() => navigate(chip.to)}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                isActive
+                  ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-sm'
+                  : 'bg-[var(--chip-bg)] text-[var(--chip-text)] hover:bg-[var(--chip-bg-hover)] border border-[var(--chip-border)]'
+              }`}
+            >
+              {chip.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const desktopPlaylistsChipsOnly = (
+    <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-1 px-1">
+      {desktopLibraryChips.map((chip) => {
+        const isActive = librarySection === chip.section;
+        return (
+          <button
+            key={chip.section}
+            type="button"
+            onClick={() => navigate(chip.to)}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer backdrop-blur-md ${
+              isActive
+                ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-sm'
+                : 'bg-[var(--hub-btn-bg)] text-[var(--hub-btn-text)] hover:bg-[var(--hub-btn-bg-hover)] border border-[var(--hub-btn-border)]'
+            }`}
+          >
+            {chip.label}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
     <>
@@ -1039,8 +1189,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
         >
           <button
             type="button"
-            onClick={() => navigate('/playlists')}
-            className="inline-flex items-center gap-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] mb-6 transition-colors"
+            onClick={() => navigate('/library/playlists')}
+            className="inline-flex min-h-[44px] items-center gap-2 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] mb-4 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             Back to Playlists
@@ -1056,7 +1206,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               <p className="text-base font-semibold text-[var(--text-primary)]">Playlist not found</p>
               <button
                 type="button"
-                onClick={() => navigate('/playlists')}
+                onClick={() => navigate('/library/playlists')}
                 className="mt-4 rounded-full bg-[var(--btn-contrast-bg)] px-5 py-2 text-sm font-bold text-[var(--btn-contrast-text)]"
               >
                 Return to Playlists
@@ -1358,7 +1508,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       </p>
                       <button
                         type="button"
-                        onClick={() => navigate('/')}
+                        onClick={() => navigate('/library/songs')}
                         className="mt-5 rounded-full bg-[var(--btn-contrast-bg)] px-6 py-2.5 text-sm font-bold text-[var(--btn-contrast-text)] hover:scale-105 transition-transform"
                       >
                         Browse Library
@@ -1458,8 +1608,45 @@ export const PlaylistsLibraryPage: React.FC = () => {
             </>
           )}
         </div>
+      ) : librarySection === 'entry' ? (
+        // --- MOBILE LIBRARY ENTRY SCREEN (/library on mobile only) ---
+        <LibraryEntryView
+          offline={offline}
+          hasOfflinePlaylists={playlists.length > 0}
+          onOpenCreatePlaylist={() => setCreateOpen(true)}
+          onOpenDuplicates={() => setDuplicatesOpen(true)}
+        />
+      ) : librarySection === 'artists' ? (
+        // --- LIBRARY ARTISTS VIEW (/library/artists) ---
+        <LibraryArtistsView
+          tracks={tracks}
+          loading={loading}
+          isDesktop={isDesktop}
+          desktopHeader={desktopLibraryChipBar}
+          onBack={() => navigate('/library')}
+          onSelectArtist={(artistName) =>
+            navigate(`/library/songs?artist=${encodeURIComponent(artistName)}`, {
+              state: {from: '/library/artists'},
+            })
+          }
+        />
+      ) : librarySection === 'albums' ? (
+        // --- LIBRARY ALBUMS VIEW (/library/albums) ---
+        <LibraryAlbumsView
+          tracks={tracks}
+          loading={loading}
+          isDesktop={isDesktop}
+          desktopHeader={desktopLibraryChipBar}
+          onBack={() => navigate('/library')}
+          onSelectAlbum={(albumTitle, artistName) =>
+            navigate(
+              `/library/songs?album=${encodeURIComponent(albumTitle)}&artist=${encodeURIComponent(artistName)}`,
+              {state: {from: '/library/albums'}}
+            )
+          }
+        />
       ) : (
-        // --- MAIN HOME & PLAYLISTS VIEW ---
+        // --- LIBRARY SONGS / LIKED / DOWNLOADED / CACHED / PLAYLISTS VIEW ---
         <div
           className="min-h-full pb-36 md:pb-12"
           style={{
@@ -1468,7 +1655,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               : 'calc(8.5rem + env(safe-area-inset-bottom, 0px))',
           }}
         >
-          {/* DYNAMIC GRADIENT HERO HEADER (Home View Only — extends cleanly behind status bar) */}
+          {/* DYNAMIC GRADIENT HERO HEADER (Songs / Liked / Downloaded / Cached — extends cleanly behind status bar) */}
           {isHomeView ? (
             <div
               className="relative pt-safe transition-colors duration-500 [background:var(--home-hero-bg)]"
@@ -1521,35 +1708,46 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   </div>
                 )}
 
-                {/* Top Row: Time-of-Day Greeting + Sleek Compact Filter Pills */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <p className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-[var(--text-primary)]">
-                    {offline ? 'Offline Mode' : greeting}
-                  </p>
+                {/* Top Row: Desktop Library Header + 7 Filter Chips | Mobile Back-to-Library Chevron */}
+                {isDesktop ? (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <p className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-[var(--text-primary)]">
+                      {offline ? 'Offline Library' : 'Library'}
+                    </p>
 
-                  <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-1 px-1">
-                    {homeFilterPills.map((pill) => {
-                      const isActive = activeHomeTab === pill.id;
-                      return (
-                        <button
-                          key={pill.id}
-                          type="button"
-                          onClick={() => {
-                            setSearchParams({});
-                            setActiveTab(pill.id);
-                          }}
-                          className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                            isActive
-                              ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-sm'
-                              : 'bg-[var(--chip-bg)] text-[var(--chip-text)] hover:bg-[var(--chip-bg-hover)] border border-[var(--chip-border)]'
-                          }`}
-                        >
-                          {pill.label}
-                        </button>
-                      );
-                    })}
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-1 px-1">
+                      {desktopLibraryChips.map((chip) => {
+                        const isActive = librarySection === chip.section;
+                        return (
+                          <button
+                            key={chip.section}
+                            type="button"
+                            onClick={() => navigate(chip.to)}
+                            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              isActive
+                                ? 'bg-[var(--accent)] text-[var(--accent-contrast)] shadow-sm'
+                                : 'bg-[var(--chip-bg)] text-[var(--chip-text)] hover:bg-[var(--chip-bg-hover)] border border-[var(--chip-border)]'
+                            }`}
+                          >
+                            {chip.label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
+                ) : showMobileBackToLibrary ? (
+                  <div className="-mt-1">
+                    <button
+                      type="button"
+                      onClick={() => navigate(mobileBackTarget.to)}
+                      className="inline-flex min-h-[44px] -ml-2 items-center gap-1 rounded-full pl-1 pr-3 text-base font-medium text-[var(--accent)] active:opacity-70 transition-opacity"
+                      aria-label={`Back to ${mobileBackTarget.label}`}
+                    >
+                      <ChevronLeft className="w-6 h-6 -mr-0.5" />
+                      <span>{mobileBackTarget.label}</span>
+                    </button>
+                  </div>
+                ) : null}
 
                 {/* Centered 220x220 Hero Cover Showcase (1:1 Swipe Left/Right to Skip Track) + Right-Edge Peek Card */}
                 <div className="relative flex items-center justify-center pt-1 pb-2 overflow-hidden -mx-4 px-4 sm:mx-0 sm:px-0 select-none">
@@ -1629,10 +1827,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
 
                 {/* Left-Aligned Active View Title & Compact Metadata */}
                 <div className="space-y-1">
-                  <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)] truncate">
+                  <h1 className="font-display text-[30px] sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)] truncate leading-tight">
                     {activeHomeTitle}
                   </h1>
-                  {activeHomeTab === 'all' && !artistFilter ? (
+                  {albumFilter && artistFilter && (
+                    <p className="text-sm font-medium text-[var(--text-secondary)] truncate">
+                      {artistFilter}
+                    </p>
+                  )}
+                  {activeHomeTab === 'all' && !artistFilter && !albumFilter ? (
                     totalDuration > 0 ? (
                       <p className="text-xs sm:text-sm text-[var(--text-secondary)]">
                         <span className="font-mono tabular-nums">
@@ -1739,11 +1942,24 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       </button>
                     )}
 
+                    {albumFilter && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchParams(artistFilter ? {artist: artistFilter} : {})}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-[var(--surface-overlay)] border border-[var(--border-subtle)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--surface-overlay-hover)] shrink-0"
+                        aria-label={`Clear album filter ${albumFilter}`}
+                      >
+                        <span className="truncate max-w-[140px]">{albumFilter}</span>
+                        <X className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                      </button>
+                    )}
+
                     {artistFilter && (
                       <button
                         type="button"
-                        onClick={() => setSearchParams({})}
+                        onClick={() => setSearchParams(albumFilter ? {album: albumFilter} : {})}
                         className="inline-flex items-center gap-1.5 rounded-full bg-[var(--surface-overlay)] border border-[var(--border-subtle)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--surface-overlay-hover)] shrink-0"
+                        aria-label={`Clear artist filter ${artistFilter}`}
                       >
                         <span className="truncate max-w-[120px]">{artistFilter}</span>
                         <X className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
@@ -1812,7 +2028,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               </div>
             </div>
           ) : (
-            /* IMMERSIVE FULL-BLEED PLAYLISTS HUB (/playlists) */
+            /* IMMERSIVE FULL-BLEED PLAYLISTS HUB (/library/playlists) */
             <PlaylistsHubView
               playlists={playlists}
               tracks={tracks}
@@ -1832,33 +2048,29 @@ export const PlaylistsLibraryPage: React.FC = () => {
               onExportM3u={handleExportM3u}
               onDeletePlaylist={handleDeletePlaylist}
               onNavigateHomeTab={(tab) => {
-                setSearchParams({});
-                setActiveTab(tab);
-                navigate('/');
+                navigate(HOME_TAB_TO_PATH[tab]);
               }}
+              mobileBackToLibrary={!isDesktop ? () => navigate('/library') : undefined}
+              desktopNavBar={isDesktop ? desktopPlaylistsChipsOnly : undefined}
             />
           )}
 
-          {/* Content Stage for Home Views (Starts Immediately Below Home Hero Action Bar) */}
+          {/* Content Stage for Library Track Views (Starts Immediately Below Hero Action Bar) */}
           {isHomeView && (
           <div className={`px-4 sm:px-6 lg:px-8 ${isDesktop ? 'max-w-[1680px]' : 'max-w-7xl'} mx-auto`}>
-            {/* Desktop-only responsive quick-access cards grid so Home fills wide screens */}
-            {isDesktop && !searchQuery && !artistFilter && (playlists.length > 0 || tracks.length > 0) && (
+            {/* Desktop-only responsive quick-access cards grid so Library fills wide screens */}
+            {isDesktop && !searchQuery && !artistFilter && !albumFilter && (playlists.length > 0 || tracks.length > 0) && (
               <section aria-label="Quick collections" className="mb-6">
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
                   {!offline && (
                     <div
                       role="button"
                       tabIndex={0}
-                      onClick={() => {
-                        setSearchParams({});
-                        setActiveTab('liked');
-                      }}
+                      onClick={() => navigate('/library/liked')}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
-                          setSearchParams({});
-                          setActiveTab('liked');
+                          navigate('/library/liked');
                         }
                       }}
                       className={`group flex items-center gap-3 rounded-lg border p-2 pr-3 transition-colors cursor-pointer ${
@@ -1885,15 +2097,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     <div
                       role="button"
                       tabIndex={0}
-                      onClick={() => {
-                        setSearchParams({});
-                        setActiveTab('recent');
-                      }}
+                      onClick={() => navigate('/library/downloaded')}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
-                          setSearchParams({});
-                          setActiveTab('recent');
+                          navigate('/library/downloaded');
                         }
                       }}
                       className={`group flex items-center gap-3 rounded-lg border p-2 pr-3 transition-colors cursor-pointer ${
@@ -1920,15 +2128,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     <div
                       role="button"
                       tabIndex={0}
-                      onClick={() => {
-                        setSearchParams({});
-                        setActiveTab('offline');
-                      }}
+                      onClick={() => navigate('/library/cached')}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
-                          setSearchParams({});
-                          setActiveTab('offline');
+                          navigate('/library/cached');
                         }
                       }}
                       className={`group flex items-center gap-3 rounded-lg border p-2 pr-3 transition-colors cursor-pointer ${
@@ -2011,7 +2215,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   <Library className="w-10 h-10 text-[var(--text-muted)] mx-auto" />
                 )}
                 <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
-                  {searchQuery || artistFilter
+                  {searchQuery || artistFilter || albumFilter
                     ? 'No matching tracks found'
                     : activeTab === 'offline' || offline
                       ? 'No offline music downloaded yet'
@@ -2020,7 +2224,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         : 'Your music library is empty'}
                 </h2>
                 <p className="text-sm text-[var(--text-secondary)] max-w-md mx-auto">
-                  {searchQuery || artistFilter
+                  {searchQuery || artistFilter || albumFilter
                     ? 'Try adjusting your search or clearing the active filter.'
                     : activeTab === 'offline' || offline
                       ? 'Tap the download button next to any track, or open a playlist and tap Download Playlist Offline to listen without an internet connection.'
@@ -2030,6 +2234,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
                 </p>
                 {!searchQuery &&
                   !artistFilter &&
+                  !albumFilter &&
                   activeTab !== 'liked' &&
                   activeTab !== 'offline' &&
                   !offline && (
@@ -2037,11 +2242,11 @@ export const PlaylistsLibraryPage: React.FC = () => {
                       {(user?.can_download || user?.role === 'admin') && (
                         <button
                           type="button"
-                          onClick={() => navigate('/discover')}
+                          onClick={() => navigate('/')}
                           className="inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                         >
                           <Search className="w-4 h-4" />
-                          Discover Music & Download
+                          Explore Home & Download
                         </button>
                       )}
                       {user?.role === 'admin' && (

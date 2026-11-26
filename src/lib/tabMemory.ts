@@ -1,6 +1,6 @@
 import type {Location, NavigateFunction} from 'react-router-dom';
 
-export type PrimaryTabRoot = '/' | '/playlists' | '/discover' | '/settings';
+export type PrimaryTabRoot = '/' | '/library' | '/settings';
 
 const tabMemory = new Map<PrimaryTabRoot, string>();
 
@@ -10,8 +10,14 @@ const tabMemory = new Map<PrimaryTabRoot, string>();
  */
 export function getTabGroup(pathname: string): PrimaryTabRoot | null {
   if (pathname === '/') return '/';
-  if (pathname === '/playlists' || pathname.startsWith('/playlists/')) return '/playlists';
-  if (pathname === '/discover' || pathname.startsWith('/discover/')) return '/discover';
+  if (
+    pathname === '/library' ||
+    pathname.startsWith('/library/') ||
+    pathname === '/playlists' ||
+    pathname.startsWith('/playlists/')
+  ) {
+    return '/library';
+  }
   if (pathname === '/settings' || pathname.startsWith('/settings/')) return '/settings';
   return null;
 }

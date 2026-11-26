@@ -24,7 +24,9 @@ Automatic Cover Cropping & Tag Embedding: Powered by yt-dlp and ffmpeg to extrac
 
 Synced .lrc & Embedded Lyrics: Reads sidecar .lrc files live alongside embedded audio lyrics.
 
-Playlists & .m3u / .m3u8 Sync: Create and manage playlists in-app, auto-import .m3u/.m3u8 playlists from your music library, and export any playlist back to <MUSIC_DIR>/Playlists/.
+Navigation & Library Organization: Primary navigation across **Home** (personalized recommendations, new releases, and search), **Library** (Playlists, Artists, Albums, Songs, Downloaded, Liked, and Cached tracks), and **Settings**.
+
+Playlists & .m3u / .m3u8 Sync: Create and manage playlists inside Library, auto-import .m3u/.m3u8 playlists from your music library, and export any playlist back to <MUSIC_DIR>/Playlists/.
 
 Installable PWA with MediaSession Controls: Responsive desktop and mobile web app with offline shell caching and native lock-screen, Bluetooth, and CarPlay/Android Auto playback controls.
 

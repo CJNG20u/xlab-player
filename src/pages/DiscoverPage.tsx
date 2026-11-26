@@ -43,6 +43,7 @@ import {
   prefetchYouTubeStreams,
 } from '../lib/api';
 import {useBackClose} from '../lib/backStack';
+import {getTimeOfDayGreeting} from '../lib/greeting';
 import {useScrollReady} from '../lib/scrollHistory';
 import {scrollMainToTop} from '../lib/tabMemory';
 import {
@@ -796,6 +797,20 @@ export const DiscoverPage: React.FC = () => {
   );
 
   const [query, setQuery] = useState(initialQueryFromUrl);
+  const [greeting, setGreeting] = useState<string>(() => getTimeOfDayGreeting());
+
+  useEffect(() => {
+    const syncGreeting = () => setGreeting(getTimeOfDayGreeting());
+    const intervalId = window.setInterval(syncGreeting, 60_000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') syncGreeting();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   const lastPlayedArtistKey = useMemo(
     () => normalizeArtistSeedKey(lastPlayed?.artist, lastPlayed?.title),
@@ -951,7 +966,7 @@ export const DiscoverPage: React.FC = () => {
       } catch (err) {
         if (discoverRequestIdRef.current !== reqId) return;
         setDiscoverError(
-          err instanceof Error ? err.message : 'Could not load Discover recommendations'
+          err instanceof Error ? err.message : 'Could not load Home recommendations'
         );
       } finally {
         if (discoverRequestIdRef.current === reqId) {
@@ -1814,7 +1829,7 @@ export const DiscoverPage: React.FC = () => {
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-[var(--text-primary)]">
-            Discover
+            {greeting}
           </h1>
         </div>
 
@@ -1825,7 +1840,7 @@ export const DiscoverPage: React.FC = () => {
               onClick={() => void loadDiscoverFeed(true)}
               disabled={discoverLoading || discoverRefreshing}
               title="Refresh recommendations"
-              aria-label="Refresh Discover recommendations"
+              aria-label="Refresh Home recommendations"
               className="inline-flex h-10 items-center gap-2 rounded-full bg-[var(--bg-secondary)] border border-[var(--border-subtle)] px-3.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] disabled:opacity-50 transition-colors whitespace-nowrap"
             >
               <RefreshCw
@@ -1930,7 +1945,7 @@ export const DiscoverPage: React.FC = () => {
               <WifiOff className="w-6 h-6 text-[var(--warn-text)] mx-auto" />
               <p className="text-sm font-medium text-[var(--text-primary)]">Offline Mode</p>
               <p className="text-xs text-[var(--text-secondary)]">
-                Reconnect to search online and browse Discover recommendations. Use Home or Library
+                Reconnect to search online and browse Home recommendations. Use Library
                 for offline cached tracks.
               </p>
             </div>
@@ -1939,7 +1954,7 @@ export const DiscoverPage: React.FC = () => {
           ) : discoverError && !hasAnyDiscoverShelf ? (
             <div className="rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-subtle)] p-6 text-center space-y-3">
               <p className="text-sm font-semibold text-[var(--text-primary)]">
-                Couldn&apos;t load Discover recommendations
+                Couldn&apos;t load Home recommendations
               </p>
               <p className="text-xs text-[var(--text-secondary)] max-w-md mx-auto">
                 {discoverError}
