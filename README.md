@@ -264,6 +264,7 @@ Playlists are **private by default**. Each playlist shows a lock (private) or gl
 - Playlists imported from local `.m3u` / `.m3u8` files belong to the admin and start private. Open a playlist's menu, choose **Edit**, and set it to **Public** to share it.
 - Change visibility when you create a playlist, or later with **Edit** (the pencil on the playlist page, or the playlist's menu).
 - **Share with specific people:** while a playlist is private, **Edit** (or the create dialog) shows a list of listeners you can tick. Those people can see and play the playlist and its songs, but cannot change it; everyone else still cannot see it. Untick someone to hide it from them again. Shared playlists show a people icon. Admins already see everything, so they are not in the list.
+- **Duplicate a playlist:** open a playlist's menu and choose **Duplicate**. You get your own private copy (named "… (copy)") that you can rename, change and share however you like. Sharing and visibility are not copied, local `.m3u` links are not copied, and songs you cannot access are skipped. Works on your own, public and shared playlists.
 - When upgrading from an older version, all existing playlists become private, so listeners stop seeing local playlists until you make them public or share them.
 
 ### Limiting what a listener can browse

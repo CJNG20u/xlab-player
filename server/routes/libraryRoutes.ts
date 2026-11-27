@@ -695,6 +695,61 @@ libraryRouter.post('/playlists', requireAuth, (req: AuthRequest, res) => {
   res.status(201).json({playlist});
 });
 
+// Copies a playlist you can see into a new private playlist that you own, so you can share it on
+// your own terms. Local .m3u links, sharing and visibility are not copied, and songs you cannot
+// see are skipped.
+libraryRouter.post('/playlists/:id/duplicate', requireAuth, (req: AuthRequest, res) => {
+  const sourceId = Number(req.params.id);
+  if (!Number.isInteger(sourceId) || sourceId <= 0) {
+    res.status(400).json({error: 'Invalid playlist id'});
+    return;
+  }
+  const source = db
+    .prepare('SELECT id, user_id, name, description, visibility FROM playlists WHERE id = ?')
+    .get(sourceId) as
+    | {id: number; user_id: number; name: string; description: string | null; visibility: string | null}
+    | undefined;
+  if (!source || !canViewPlaylistWithShares(db, req.user!, source)) {
+    res.status(404).json({error: 'Playlist not found'});
+    return;
+  }
+
+  const requestedName = typeof req.body?.name === 'string' ? req.body.name.replace(/[\r\n]/g, '').trim() : '';
+  const name = (requestedName || `${source.name} (copy)`).slice(0, 100);
+  const sourceTrackIds = (
+    db
+      .prepare('SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC, id ASC')
+      .all(sourceId) as Array<{track_id: number}>
+  ).map((r) => r.track_id);
+
+  const copyTx = db.transaction(() => {
+    const info = db
+      .prepare("INSERT INTO playlists (user_id, name, description, visibility, source) VALUES (?, ?, ?, 'private', 'manual')")
+      .run(req.user!.id, name, (source.description || '').slice(0, 300));
+    const newId = Number(info.lastInsertRowid);
+    const insert = db.prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)');
+    let position = 0;
+    let skipped = 0;
+    for (const trackId of sourceTrackIds) {
+      if (!isTrackVisibleToUser(db, req.user!, trackId)) {
+        skipped += 1;
+        continue;
+      }
+      insert.run(newId, trackId, position++);
+    }
+    return {newId, copied: position, skipped};
+  });
+  const {newId, copied, skipped} = copyTx();
+
+  const playlist = db
+    .prepare(
+      `SELECT p.*, u.username AS owner_username
+       FROM playlists p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = ?`
+    )
+    .get(newId) as Record<string, unknown>;
+  res.status(201).json({playlist: {...playlist, shared_with: []}, copiedCount: copied, skippedCount: skipped});
+});
+
 libraryRouter.get('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
   const playlistId = Number(req.params.id);
   const playlist = db

@@ -289,6 +289,25 @@ export const PlaylistsLibraryPage: React.FC = () => {
     activePlaylistServerJob?.state,
   ]);
 
+  const handleDuplicatePlaylist = async (source: Playlist) => {
+    try {
+      const res = await apiFetch<{playlist: Playlist; copiedCount: number; skippedCount: number}>(
+        `/api/playlists/${source.id}/duplicate`,
+        {method: 'POST', body: JSON.stringify({})}
+      );
+      setPlaylists((prev) => [{...res.playlist, track_count: res.copiedCount, covers: source.covers}, ...prev]);
+      bumpLibraryRefresh();
+      flashToast(
+        res.skippedCount > 0
+          ? `Copied ${res.copiedCount} songs (${res.skippedCount} you can't access were skipped)`
+          : 'Playlist copied. Edit it to change who can see it.'
+      );
+      navigate(`/playlists/${res.playlist.id}`);
+    } catch (err) {
+      flashToast(err instanceof Error ? err.message : 'Could not copy playlist');
+    }
+  };
+
   const flashToast = useCallback((msg: string) => {
     setPageToast(msg);
     setTimeout(() => setPageToast(null), 3200);
@@ -2073,6 +2092,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               canEditPlaylist={canEditPlaylist}
               currentUserId={user?.id}
               onRenamePlaylist={setRenameTarget}
+              onDuplicatePlaylist={(pl) => void handleDuplicatePlaylist(pl)}
               onExportM3u={handleExportM3u}
               onDeletePlaylist={handleDeletePlaylist}
               onNavigateHomeTab={(tab) => {

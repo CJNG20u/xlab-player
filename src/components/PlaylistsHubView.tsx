@@ -2,6 +2,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Copy,
   Disc3,
   FileDown,
   Globe,
@@ -210,6 +211,7 @@ interface PlaylistsHubViewProps {
   canEditPlaylist: (playlist: Playlist) => boolean;
   currentUserId?: number;
   onRenamePlaylist: (playlist: Playlist) => void;
+  onDuplicatePlaylist: (playlist: Playlist) => void;
   onExportM3u: (playlist: Playlist) => Promise<void>;
   onDeletePlaylist: (playlistId: number) => Promise<void>;
   onNavigateHomeTab: (tab: 'liked' | 'recent' | 'offline' | 'all') => void;
@@ -234,6 +236,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   canEditPlaylist,
   currentUserId,
   onRenamePlaylist,
+  onDuplicatePlaylist,
   onExportM3u,
   onDeletePlaylist,
   onNavigateHomeTab,
@@ -1158,6 +1161,18 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
               <span>Edit</span>
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => {
+              const target = menuState.playlist;
+              setMenuState(null);
+              onDuplicatePlaylist(target);
+            }}
+            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+          >
+            <Copy className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
+            <span>Duplicate</span>
+          </button>
           <button
             type="button"
             onClick={() => {
