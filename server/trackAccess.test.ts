@@ -22,6 +22,7 @@ function makeDb(): DatabaseSync {
     CREATE TABLE playlist_tracks (id INTEGER PRIMARY KEY, playlist_id INTEGER, track_id INTEGER);
     CREATE TABLE liked_tracks (user_id INTEGER, track_id INTEGER);
     CREATE TABLE user_tracks (user_id INTEGER, track_id INTEGER);
+    CREATE TABLE playlist_shares (playlist_id INTEGER, user_id INTEGER);
     INSERT INTO tracks (id, title) VALUES
       (1,'Road Trip Song'),(2,'Alice Private Song'),(3,'Bob Liked Song'),
       (4,'Alice Download'),(5,'Admin Only Song'),(6,'Admin Private Playlist Song');
@@ -117,4 +118,13 @@ test('admins keep every search hint untouched', () => {
   const db = makeDb();
   const body = {items: [{duplicateTrack: {id: 5, title: 'Admin Only Song'}}]};
   assert.equal(scrubHiddenDuplicateHints(db as TrackAccessDb, admin, body).items[0].duplicateTrack?.id, 5);
+});
+
+test('a playlist shared with a user reveals its songs to that user only', () => {
+  const db = makeDb();
+  db.exec('INSERT INTO playlist_shares (playlist_id, user_id) VALUES (12, 3)');
+  assert.equal(isTrackVisibleToUser(db as TrackAccessDb, bob, 6), true);
+  assert.equal(isTrackVisibleToUser(db as TrackAccessDb, alice, 6), false);
+  db.exec('DELETE FROM playlist_shares WHERE playlist_id = 12');
+  assert.equal(isTrackVisibleToUser(db as TrackAccessDb, bob, 6), false);
 });

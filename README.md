@@ -263,13 +263,14 @@ Playlists are **private by default**. Each playlist shows a lock (private) or gl
 - **Admins** see every playlist, including other users' private ones, and can edit, delete or change the visibility of any of them.
 - Playlists imported from local `.m3u` / `.m3u8` files belong to the admin and start private. Open a playlist's menu, choose **Edit**, and set it to **Public** to share it.
 - Change visibility when you create a playlist, or later with **Edit** (the pencil on the playlist page, or the playlist's menu).
-- When upgrading from an older version, all existing playlists become private, so listeners stop seeing local playlists until you make them public.
+- **Share with specific people:** while a playlist is private, **Edit** (or the create dialog) shows a list of listeners you can tick. Those people can see and play the playlist and its songs, but cannot change it; everyone else still cannot see it. Untick someone to hide it from them again. Shared playlists show a people icon. Admins already see everything, so they are not in the list.
+- When upgrading from an older version, all existing playlists become private, so listeners stop seeing local playlists until you make them public or share them.
 
 ### Limiting what a listener can browse
 
 By default a listener can browse the whole music library. In **Settings → Users** each listener has a **Whole Library** switch (and new users have a "Can browse the whole library" checkbox). Turn it off and that listener only sees:
 
-- songs in **public** playlists and in their **own** playlists,
+- songs in **public** playlists, playlists **shared with them**, and their **own** playlists,
 - songs they have **liked**, and
 - songs they **downloaded or uploaded** themselves.
 

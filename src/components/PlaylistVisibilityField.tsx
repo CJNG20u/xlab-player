@@ -68,3 +68,18 @@ export const PlaylistVisibilityField: React.FC<PlaylistVisibilityFieldProps> = (
     </div>
   </fieldset>
 );
+
+export type PlaylistAudience = 'public' | 'shared' | 'private';
+
+/**
+ * What to show on a playlist's badge. Owners and admins get the real share list; anyone else only
+ * sees a private playlist because it was shared with them.
+ */
+export function playlistAudience(playlist: {
+  visibility?: 'private' | 'public';
+  shared_with?: number[];
+}): PlaylistAudience {
+  if (playlist.visibility === 'public') return 'public';
+  if (playlist.shared_with === undefined) return 'shared';
+  return playlist.shared_with.length > 0 ? 'shared' : 'private';
+}

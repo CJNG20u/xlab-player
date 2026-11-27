@@ -3,6 +3,7 @@ import React, {useState} from 'react';
 import {apiFetch} from '../lib/api';
 import {useBackClose} from '../lib/backStack';
 import type {Playlist} from '../types';
+import {PlaylistSharePicker} from './PlaylistSharePicker';
 import {PlaylistVisibilityField, type PlaylistVisibility} from './PlaylistVisibilityField';
 
 interface CreatePlaylistModalProps {
@@ -19,6 +20,7 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [visibility, setVisibility] = useState<PlaylistVisibility>('private');
+  const [sharedWith, setSharedWith] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,10 +38,19 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
         method: 'POST',
         body: JSON.stringify({name: name.trim(), description: description.trim(), visibility}),
       });
+      let savedShares: number[] = [];
+      if (visibility === 'private' && sharedWith.length > 0) {
+        await apiFetch(`/api/playlists/${res.playlist.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({shared_with: sharedWith}),
+        });
+        savedShares = sharedWith;
+      }
       setName('');
       setDescription('');
       setVisibility('private');
-      onCreated({...res.playlist, track_count: 0, covers: []});
+      setSharedWith([]);
+      onCreated({...res.playlist, track_count: 0, covers: [], shared_with: savedShares});
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create playlist');
@@ -102,6 +113,10 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
             onChange={setVisibility}
             disabled={submitting}
           />
+
+          {visibility === 'private' && (
+            <PlaylistSharePicker value={sharedWith} onChange={setSharedWith} disabled={submitting} />
+          )}
 
           {error && <p className="text-sm text-[var(--danger-text)]">{error}</p>}
 

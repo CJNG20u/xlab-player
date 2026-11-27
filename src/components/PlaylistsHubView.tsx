@@ -17,6 +17,7 @@ import {
   Shuffle,
   Sparkles,
   Trash2,
+  Users,
 } from 'lucide-react';
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useTheme} from '../context/ThemeContext';
@@ -32,6 +33,7 @@ import {
 import type {Playlist, Track, YouTubePlaylistJob} from '../types';
 import {getOfflineCoverBlobUrl} from '../utils/offlineStore';
 import {PlaylistMosaic} from './AlbumArt';
+import {playlistAudience} from './PlaylistVisibilityField';
 
 const RECENT_PLAYLISTS_STORAGE_KEY = 'xlabplayer-recent-playlists';
 
@@ -731,7 +733,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
     const isOthersPlaylist =
       currentUserId !== undefined && pl.user_id !== currentUserId && Boolean(pl.owner_username);
     const subtitleWithOwner = isOthersPlaylist ? `${subtitleText} · by ${pl.owner_username}` : subtitleText;
-    const isPublic = pl.visibility === 'public';
+    const audience = playlistAudience(pl);
 
     return (
       <div
@@ -773,9 +775,21 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
 
           <div
             className="absolute top-2 right-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-white ring-1 ring-white/15 backdrop-blur-md"
-            title={isPublic ? 'Public: everyone with an account can see it' : 'Private: only you and admins can see it'}
+            title={
+              audience === 'public'
+                ? 'Public: everyone with an account can see it'
+                : audience === 'shared'
+                  ? 'Shared: only the people it is shared with can see it'
+                  : 'Private: only you and admins can see it'
+            }
           >
-            {isPublic ? <Globe className="w-3 h-3" aria-label="Public" /> : <Lock className="w-3 h-3" aria-label="Private" />}
+            {audience === 'public' ? (
+              <Globe className="w-3 h-3" aria-label="Public" />
+            ) : audience === 'shared' ? (
+              <Users className="w-3 h-3" aria-label="Shared" />
+            ) : (
+              <Lock className="w-3 h-3" aria-label="Private" />
+            )}
           </div>
 
           <button

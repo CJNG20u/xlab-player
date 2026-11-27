@@ -3,7 +3,7 @@
  *
  *  - Admins, and users whose "whole library" switch is on, see every track.
  *  - Everyone else sees only tracks that are:
- *      1. in one of their own playlists, or in any playlist marked public,
+ *      1. in one of their own playlists, in any playlist marked public, or in a playlist shared with them,
  *      2. liked by them, or
  *      3. added by them (downloaded or uploaded; recorded in user_tracks).
  *
@@ -45,10 +45,11 @@ export function visibleTrackClause(user: TrackAccessUser, alias = 't'): VisibleT
   }
   const sql =
     `(EXISTS (SELECT 1 FROM playlist_tracks vpt JOIN playlists vp ON vp.id = vpt.playlist_id` +
-    ` WHERE vpt.track_id = ${alias}.id AND (vp.user_id = ? OR vp.visibility = 'public'))` +
+    ` WHERE vpt.track_id = ${alias}.id AND (vp.user_id = ? OR vp.visibility = 'public'` +
+    ` OR EXISTS (SELECT 1 FROM playlist_shares vps WHERE vps.playlist_id = vp.id AND vps.user_id = ?)))` +
     ` OR EXISTS (SELECT 1 FROM liked_tracks vlt WHERE vlt.track_id = ${alias}.id AND vlt.user_id = ?)` +
     ` OR EXISTS (SELECT 1 FROM user_tracks vut WHERE vut.track_id = ${alias}.id AND vut.user_id = ?))`;
-  return {sql, params: [user.id, user.id, user.id]};
+  return {sql, params: [user.id, user.id, user.id, user.id]};
 }
 
 export function isTrackVisibleToUser(db: TrackAccessDb, user: TrackAccessUser, trackId: number): boolean {

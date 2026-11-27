@@ -333,6 +333,19 @@ db.exec(`
       AND user_id IN (SELECT id FROM users) AND track_id IN (SELECT id FROM tracks);
 `);
 
+// Playlists can be shared with specific users (in addition to private/public).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS playlist_shares (
+    playlist_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (playlist_id, user_id),
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_playlist_shares_user ON playlist_shares(user_id);
+`);
+
 /** Records that a user added (downloaded/uploaded) a track, so it stays visible to them. */
 export function claimTrackForUser(userId: number | null | undefined, trackId: number | null | undefined): void {
   if (!userId || !trackId) return;

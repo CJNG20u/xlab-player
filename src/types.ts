@@ -55,6 +55,8 @@ export interface Playlist {
   m3u_path?: string | null;
   /** private = only the owner and admins can see it; public = every signed-in user can see it. */
   visibility?: 'private' | 'public';
+  /** User ids a private playlist is shared with. Only sent to the owner and admins. */
+  shared_with?: number[];
   created_at: string;
   updated_at: string;
   owner_username?: string;

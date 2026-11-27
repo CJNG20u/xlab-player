@@ -23,6 +23,7 @@ import {
   Shuffle,
   Square,
   Trash2,
+  Users,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -36,6 +37,7 @@ import {DuplicatesPanel} from '../components/DuplicatesPanel';
 import {LibraryAlbumsView, LibraryArtistsView} from '../components/LibraryArtistsAlbumsView';
 import {LibraryEntryView} from '../components/LibraryEntryView';
 import {PlaylistsHubView, recordRecentPlaylistId} from '../components/PlaylistsHubView';
+import {playlistAudience} from '../components/PlaylistVisibilityField';
 import {RenamePlaylistModal} from '../components/RenamePlaylistModal';
 import {TrackTable} from '../components/TrackTable';
 import {useAuth} from '../context/AuthContext';
@@ -1264,12 +1266,18 @@ export const PlaylistsLibraryPage: React.FC = () => {
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="inline-flex items-center gap-1">
-                      {activePlaylist.visibility === 'public' ? (
+                      {playlistAudience(activePlaylist) === 'public' ? (
                         <Globe className="w-3 h-3" aria-hidden="true" />
+                      ) : playlistAudience(activePlaylist) === 'shared' ? (
+                        <Users className="w-3 h-3" aria-hidden="true" />
                       ) : (
                         <Lock className="w-3 h-3" aria-hidden="true" />
                       )}
-                      {activePlaylist.visibility === 'public' ? 'Public' : 'Private'}
+                      {playlistAudience(activePlaylist) === 'public'
+                        ? 'Public'
+                        : playlistAudience(activePlaylist) === 'shared'
+                          ? 'Shared'
+                          : 'Private'}
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="font-mono tabular-nums">
@@ -2383,12 +2391,16 @@ export const PlaylistsLibraryPage: React.FC = () => {
       <RenamePlaylistModal
         playlist={renameTarget}
         onClose={() => setRenameTarget(null)}
-        onRenamed={(renamedPlaylist, newName, visibility) => {
+        onRenamed={(renamedPlaylist, newName, visibility, sharedWith) => {
           setPlaylists((prev) =>
-            prev.map((pl) => (pl.id === renamedPlaylist.id ? {...pl, name: newName, visibility} : pl))
+            prev.map((pl) =>
+              pl.id === renamedPlaylist.id ? {...pl, name: newName, visibility, shared_with: sharedWith} : pl
+            )
           );
           setActivePlaylist((prev) =>
-            prev && prev.id === renamedPlaylist.id ? {...prev, name: newName, visibility} : prev
+            prev && prev.id === renamedPlaylist.id
+              ? {...prev, name: newName, visibility, shared_with: sharedWith}
+              : prev
           );
           bumpLibraryRefresh();
           flashToast('Playlist saved');

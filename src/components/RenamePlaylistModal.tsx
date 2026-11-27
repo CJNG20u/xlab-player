@@ -3,12 +3,18 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {apiFetch} from '../lib/api';
 import {useBackClose} from '../lib/backStack';
 import type {Playlist} from '../types';
+import {PlaylistSharePicker} from './PlaylistSharePicker';
 import {PlaylistVisibilityField, type PlaylistVisibility} from './PlaylistVisibilityField';
 
 interface RenamePlaylistModalProps {
   playlist: Playlist | null;
   onClose: () => void;
-  onRenamed: (playlist: Playlist, newName: string, visibility: PlaylistVisibility) => void;
+  onRenamed: (
+    playlist: Playlist,
+    newName: string,
+    visibility: PlaylistVisibility,
+    sharedWith: number[]
+  ) => void;
 }
 
 export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
@@ -18,6 +24,7 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [visibility, setVisibility] = useState<PlaylistVisibility>('private');
+  const [sharedWith, setSharedWith] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -34,6 +41,7 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
     if (!playlist) return;
     setName(playlist.name);
     setVisibility(playlist.visibility === 'public' ? 'public' : 'private');
+    setSharedWith(playlist.shared_with ?? []);
     setError(null);
     const frame = window.requestAnimationFrame(() => {
       inputRef.current?.focus();
@@ -58,7 +66,12 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
 
   const cleanedName = name.replace(/[\r\n]/g, '').trim();
   const currentVisibility: PlaylistVisibility = playlist.visibility === 'public' ? 'public' : 'private';
-  const isUnchanged = cleanedName === playlist.name.trim() && visibility === currentVisibility;
+  const originalShares = [...(playlist.shared_with ?? [])].sort((a, b) => a - b);
+  const currentShares = [...sharedWith].sort((a, b) => a - b);
+  const sharesUnchanged =
+    originalShares.length === currentShares.length && originalShares.every((id, i) => id === currentShares[i]);
+  const isUnchanged =
+    cleanedName === playlist.name.trim() && visibility === currentVisibility && sharesUnchanged;
   const canSave = !submitting && cleanedName.length > 0 && !isUnchanged;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -69,9 +82,9 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
     try {
       await apiFetch(`/api/playlists/${playlist.id}`, {
         method: 'PUT',
-        body: JSON.stringify({name: cleanedName, visibility}),
+        body: JSON.stringify({name: cleanedName, visibility, shared_with: sharedWith}),
       });
-      onRenamed(playlist, cleanedName, visibility);
+      onRenamed(playlist, cleanedName, visibility, sharedWith);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save playlist');
@@ -138,6 +151,10 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
             onChange={setVisibility}
             disabled={submitting}
           />
+
+          {visibility === 'private' && (
+            <PlaylistSharePicker value={sharedWith} onChange={setSharedWith} disabled={submitting} />
+          )}
 
           {error && <p className="text-sm text-[var(--danger-text)]">{error}</p>}
 

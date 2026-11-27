@@ -5,7 +5,14 @@ import path from 'path';
 import {type AuthRequest, requireAuth} from '../auth.ts';
 import {COVERS_DIR, db, getMusicDir} from '../db.ts';
 import {hasFullLibrary, isTrackVisibleToUser, visibleTrackClause} from '../trackAccess.ts';
-import {canManagePlaylist, canViewPlaylist, parseVisibility} from '../playlistAccess.ts';
+import {
+  canManagePlaylist,
+  canViewPlaylistWithShares,
+  getPlaylistShareIds,
+  parseShareIds,
+  parseVisibility,
+  replacePlaylistShares,
+} from '../playlistAccess.ts';
 import {deviceHub} from '../deviceHub.ts';
 import {
   DuplicateResolveError,
@@ -619,10 +626,11 @@ libraryRouter.get('/playlists', requireAuth, (req: AuthRequest, res) => {
        LEFT JOIN users u ON u.id = p.user_id
        LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
        WHERE p.user_id = ? OR ? = 'admin' OR p.visibility = 'public'
+          OR EXISTS (SELECT 1 FROM playlist_shares ps WHERE ps.playlist_id = p.id AND ps.user_id = ?)
        GROUP BY p.id
        ORDER BY p.updated_at DESC, p.id DESC`
     )
-    .all(req.user!.id, req.user!.role) as Array<{
+    .all(req.user!.id, req.user!.role, req.user!.id) as Array<{
     id: number;
     user_id: number;
     name: string;
@@ -647,7 +655,8 @@ libraryRouter.get('/playlists', requireAuth, (req: AuthRequest, res) => {
 
   const enriched = playlists.map((p) => {
     const covers = (coversStmt.all(p.id) as Array<{cover_file: string}>).map((c) => c.cover_file);
-    return {...p, covers};
+    const shared_with = canManagePlaylist(req.user!, p) ? getPlaylistShareIds(db, p.id) : undefined;
+    return {...p, covers, ...(shared_with ? {shared_with} : {})};
   });
 
   // Also include summary counts for virtual collections
@@ -697,7 +706,7 @@ libraryRouter.get('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
     )
     .get(playlistId) as Record<string, unknown> | undefined;
 
-  if (!playlist || !canViewPlaylist(req.user!, playlist as {user_id: number; visibility?: string})) {
+  if (!playlist || !canViewPlaylistWithShares(db, req.user!, playlist as {id: number; user_id: number; visibility?: string})) {
     // Same answer for "missing" and "not yours" so private playlists can't be probed
     res.status(404).json({error: 'Playlist not found'});
     return;
@@ -725,7 +734,27 @@ libraryRouter.get('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
     new Set(tracks.map((t) => t.cover_file ?? null).filter((c): c is string => Boolean(c)))
   ).slice(0, 4);
 
-  res.json({playlist: {...playlist, covers, track_count: tracks.length}, tracks});
+  const sharedWith = canManagePlaylist(req.user!, playlist as {user_id: number})
+    ? getPlaylistShareIds(db, playlistId)
+    : undefined;
+  res.json({
+    playlist: {
+      ...playlist,
+      covers,
+      track_count: tracks.length,
+      ...(sharedWith ? {shared_with: sharedWith} : {}),
+    },
+    tracks,
+  });
+});
+
+// Lets playlist owners pick who to share with. Only ids and usernames; admins are left out because
+// they already see every playlist.
+libraryRouter.get('/users/directory', requireAuth, (req: AuthRequest, res) => {
+  const users = db
+    .prepare("SELECT id, username FROM users WHERE role != 'admin' AND id != ? ORDER BY username COLLATE NOCASE ASC")
+    .all(req.user!.id) as Array<{id: number; username: string}>;
+  res.json({users});
 });
 
 libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) => {
@@ -749,7 +778,7 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
       }
     | undefined;
 
-  if (!existing || !canViewPlaylist(req.user!, existing)) {
+  if (!existing || !canViewPlaylistWithShares(db, req.user!, existing)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
@@ -772,9 +801,20 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
     return;
   }
 
+  const hasSharedField =
+    req.body !== null &&
+    typeof req.body === 'object' &&
+    Object.prototype.hasOwnProperty.call(req.body, 'shared_with') &&
+    req.body.shared_with !== undefined;
+  const nextShareIds = hasSharedField ? parseShareIds(req.body.shared_with) : null;
+  if (hasSharedField && nextShareIds === null) {
+    res.status(400).json({error: 'shared_with must be a list of user ids'});
+    return;
+  }
+
   const rawName = hasNameField ? req.body.name : existing.name;
   const name = String(rawName).replace(/[\r\n]/g, '').trim();
-  if (!name || (!hasNameField && !hasVisibilityField)) {
+  if (!name || (!hasNameField && !hasVisibilityField && !hasSharedField)) {
     res.status(400).json({error: 'Playlist name is required'});
     return;
   }
@@ -806,6 +846,9 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
   db.prepare(
     "UPDATE playlists SET name = ?, description = ?, visibility = ?, updated_at = datetime('now') WHERE id = ?"
   ).run(name, description, nextVisibility, playlistId);
+  if (nextShareIds !== null) {
+    replacePlaylistShares(db, {id: playlistId, user_id: existing.user_id}, nextShareIds);
+  }
 
   const updated = db
     .prepare(
@@ -817,7 +860,10 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
     )
     .get(playlistId);
 
-  res.json({ok: true, playlist: updated});
+  res.json({
+    ok: true,
+    playlist: {...(updated as Record<string, unknown>), shared_with: getPlaylistShareIds(db, playlistId)},
+  });
 });
 
 libraryRouter.delete('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
@@ -826,7 +872,7 @@ libraryRouter.delete('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
     .prepare('SELECT id, user_id, visibility FROM playlists WHERE id = ?')
     .get(playlistId) as {id: number; user_id: number; visibility: string | null} | undefined;
 
-  if (!existing || !canViewPlaylist(req.user!, existing)) {
+  if (!existing || !canViewPlaylistWithShares(db, req.user!, existing)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
@@ -1048,7 +1094,7 @@ libraryRouter.post('/playlists/:id/tracks', requireAuth, async (req: AuthRequest
         visibility: string | null;
       }
     | undefined;
-  if (!playlist || !canViewPlaylist(req.user!, playlist)) {
+  if (!playlist || !canViewPlaylistWithShares(db, req.user!, playlist)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
@@ -1122,7 +1168,7 @@ libraryRouter.post('/playlists/:id/export-m3u', requireAuth, async (req: AuthReq
     | {id: number; name: string; user_id: number; visibility: string | null}
     | undefined;
 
-  if (!playlist || !canViewPlaylist(req.user!, playlist)) {
+  if (!playlist || !canViewPlaylistWithShares(db, req.user!, playlist)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
@@ -1197,7 +1243,7 @@ libraryRouter.delete(
           visibility: string | null;
         }
       | undefined;
-    if (!playlist || !canViewPlaylist(req.user!, playlist)) {
+    if (!playlist || !canViewPlaylistWithShares(db, req.user!, playlist)) {
       res.status(404).json({error: 'Playlist not found'});
       return;
     }
