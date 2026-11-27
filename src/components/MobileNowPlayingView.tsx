@@ -820,7 +820,17 @@ export const MobileNowPlayingView: React.FC<MobileNowPlayingViewProps> = ({
       {coverUrl && (
         <div
           className="pointer-events-none absolute inset-0 blur-3xl scale-110 bg-cover bg-center opacity-[var(--np-backdrop-opacity)]"
-          style={{backgroundImage: `url("${coverUrl}")`}}
+          style={{
+            backgroundImage: `url("${coverUrl}")`,
+            // Dark themes: a rich, saturated blurred cover (Apple Music style) instead of a flat muddy tint.
+            ...(!isLight && !isTidal
+              ? {
+                  opacity: 0.62,
+                  filter: 'blur(56px) saturate(175%)',
+                  transform: 'scale(1.5)',
+                }
+              : undefined),
+          }}
           aria-hidden="true"
         />
       )}
@@ -828,6 +838,19 @@ export const MobileNowPlayingView: React.FC<MobileNowPlayingViewProps> = ({
         className="pointer-events-none absolute inset-0 [background:var(--np-scrim)]"
         aria-hidden="true"
       />
+
+      {/* Dark themes: pure black at the very top fading into the cover colors (no seam under the status bar) */}
+      {!isLight && !isTidal && (
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0"
+          style={{
+            height: 'calc(env(safe-area-inset-top, 0px) + 240px)',
+            background:
+              'linear-gradient(180deg, #000000 0%, rgba(0, 0, 0, 0.72) 22%, rgba(0, 0, 0, 0.3) 62%, rgba(0, 0, 0, 0) 100%)',
+          }}
+          aria-hidden="true"
+        />
+      )}
 
       {/* Pure OLED black overlay for lyrics mode with 250ms cross-fade */}
       <div
