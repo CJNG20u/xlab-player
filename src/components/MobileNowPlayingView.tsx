@@ -783,7 +783,11 @@ export const MobileNowPlayingView: React.FC<MobileNowPlayingViewProps> = ({
           '--np-top-hex': dominantTopHexColor,
           background: isTidal
             ? dominantTopHexColor
-            : `linear-gradient(180deg, ${dominantTopHexColor} 0%, var(--bg-primary) ${isLight ? '76%' : '72%'})`,
+            : isLight
+              ? `linear-gradient(180deg, ${dominantTopHexColor} 0%, var(--bg-primary) 76%)`
+              : // Dark themes: start pure black at the very top (same edge as the Playlists hero),
+                // then blend into the dominant cover color so there is no seam under the status bar.
+                `linear-gradient(180deg, #000000 0px, color-mix(in srgb, ${dominantTopHexColor} 40%, #000000) calc(env(safe-area-inset-top, 0px) + 30px), ${dominantTopHexColor} calc(env(safe-area-inset-top, 0px) + 220px), var(--bg-primary) 72%)`,
           transform: dismissOffsetY > 0 ? `translateY(${dismissOffsetY}px)` : undefined,
           opacity: sheetOpacity,
           transition: sheetTransition,

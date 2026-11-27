@@ -509,7 +509,9 @@ export const NowPlayingPage: React.FC = () => {
   }, [baseThemeColor, activeTrack, effectiveDominantColor, isLight, isTidal]);
 
   // Claim mobile status bar color matching the exact first stop of the Now Playing top gradient
-  useStatusBarColor(dominantTopHexColor);
+  // On mobile dark themes the top of the screen starts pure black and fades into the cover color,
+  // so the status bar / PWA frame color is black too (no seam at the safe-area edge).
+  useStatusBarColor(isMobilePortrait && !isLight ? '#000000' : dominantTopHexColor);
 
   useEffect(() => {
     setOfflineCoverBackdrop(null);
