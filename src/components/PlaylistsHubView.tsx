@@ -4,9 +4,11 @@ import {
   Clock,
   Disc3,
   FileDown,
+  Globe,
   HardDriveDownload,
   Heart,
   Loader2,
+  Lock,
   MoreHorizontal,
   Music2,
   Pencil,
@@ -204,6 +206,7 @@ interface PlaylistsHubViewProps {
   onPlayTracks: (trackList: Track[], shufflePlay?: boolean) => void;
   onOpenCreatePlaylist: () => void;
   canEditPlaylist: (playlist: Playlist) => boolean;
+  currentUserId?: number;
   onRenamePlaylist: (playlist: Playlist) => void;
   onExportM3u: (playlist: Playlist) => Promise<void>;
   onDeletePlaylist: (playlistId: number) => Promise<void>;
@@ -227,6 +230,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
   onPlayTracks,
   onOpenCreatePlaylist,
   canEditPlaylist,
+  currentUserId,
   onRenamePlaylist,
   onExportM3u,
   onDeletePlaylist,
@@ -724,6 +728,10 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
           : pl.source === 'm3u'
             ? `M3U · ${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`
             : `${pl.track_count} ${pl.track_count === 1 ? 'track' : 'tracks'}`;
+    const isOthersPlaylist =
+      currentUserId !== undefined && pl.user_id !== currentUserId && Boolean(pl.owner_username);
+    const subtitleWithOwner = isOthersPlaylist ? `${subtitleText} · by ${pl.owner_username}` : subtitleText;
+    const isPublic = pl.visibility === 'public';
 
     return (
       <div
@@ -763,6 +771,13 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
             </div>
           )}
 
+          <div
+            className="absolute top-2 right-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-white ring-1 ring-white/15 backdrop-blur-md"
+            title={isPublic ? 'Public: everyone with an account can see it' : 'Private: only you and admins can see it'}
+          >
+            {isPublic ? <Globe className="w-3 h-3" aria-label="Public" /> : <Lock className="w-3 h-3" aria-label="Private" />}
+          </div>
+
           <button
             type="button"
             onClick={(e) => {
@@ -781,7 +796,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
             <p className="text-sm font-bold text-[var(--text-primary)] truncate leading-snug">
               {pl.name}
             </p>
-            <p className="mt-0.5 text-xs text-[var(--text-secondary)] truncate">{subtitleText}</p>
+            <p className="mt-0.5 text-xs text-[var(--text-secondary)] truncate">{subtitleWithOwner}</p>
           </div>
 
           {!offline && (
@@ -1126,7 +1141,7 @@ export const PlaylistsHubView: React.FC<PlaylistsHubViewProps> = ({
               className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
             >
               <Pencil className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
-              <span>Rename</span>
+              <span>Edit</span>
             </button>
           )}
           <button

@@ -3,6 +3,7 @@ import React, {useState} from 'react';
 import {apiFetch} from '../lib/api';
 import {useBackClose} from '../lib/backStack';
 import type {Playlist} from '../types';
+import {PlaylistVisibilityField, type PlaylistVisibility} from './PlaylistVisibilityField';
 
 interface CreatePlaylistModalProps {
   open: boolean;
@@ -17,6 +18,7 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [visibility, setVisibility] = useState<PlaylistVisibility>('private');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,10 +34,11 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
     try {
       const res = await apiFetch<{playlist: Playlist}>('/api/playlists', {
         method: 'POST',
-        body: JSON.stringify({name: name.trim(), description: description.trim()}),
+        body: JSON.stringify({name: name.trim(), description: description.trim(), visibility}),
       });
       setName('');
       setDescription('');
+      setVisibility('private');
       onCreated({...res.playlist, track_count: 0, covers: []});
       onClose();
     } catch (err) {
@@ -92,6 +95,13 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
               className="w-full rounded-md bg-[var(--bg-input)] px-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none resize-none"
             />
           </div>
+
+          <PlaylistVisibilityField
+            idPrefix="create-playlist"
+            value={visibility}
+            onChange={setVisibility}
+            disabled={submitting}
+          />
 
           {error && <p className="text-sm text-[var(--danger-text)]">{error}</p>}
 

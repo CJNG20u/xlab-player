@@ -302,6 +302,11 @@ if (!playlistColNames.has('source')) {
 if (!playlistColNames.has('m3u_path')) {
   db.exec('ALTER TABLE playlists ADD COLUMN m3u_path TEXT');
 }
+// Playlists are private to their owner unless the owner (or an admin) marks them public.
+// Existing playlists, including those imported from local .m3u files, become private on upgrade.
+if (!playlistColNames.has('visibility')) {
+  db.exec("ALTER TABLE playlists ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
+}
 db.exec(
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_m3u_path ON playlists(m3u_path) WHERE m3u_path IS NOT NULL'
 );

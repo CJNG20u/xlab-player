@@ -3,11 +3,12 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {apiFetch} from '../lib/api';
 import {useBackClose} from '../lib/backStack';
 import type {Playlist} from '../types';
+import {PlaylistVisibilityField, type PlaylistVisibility} from './PlaylistVisibilityField';
 
 interface RenamePlaylistModalProps {
   playlist: Playlist | null;
   onClose: () => void;
-  onRenamed: (playlist: Playlist, newName: string) => void;
+  onRenamed: (playlist: Playlist, newName: string, visibility: PlaylistVisibility) => void;
 }
 
 export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
@@ -16,6 +17,7 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
   onRenamed,
 }) => {
   const [name, setName] = useState('');
+  const [visibility, setVisibility] = useState<PlaylistVisibility>('private');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -31,6 +33,7 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
   useEffect(() => {
     if (!playlist) return;
     setName(playlist.name);
+    setVisibility(playlist.visibility === 'public' ? 'public' : 'private');
     setError(null);
     const frame = window.requestAnimationFrame(() => {
       inputRef.current?.focus();
@@ -54,7 +57,8 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
   if (!playlist) return null;
 
   const cleanedName = name.replace(/[\r\n]/g, '').trim();
-  const isUnchanged = cleanedName === playlist.name.trim();
+  const currentVisibility: PlaylistVisibility = playlist.visibility === 'public' ? 'public' : 'private';
+  const isUnchanged = cleanedName === playlist.name.trim() && visibility === currentVisibility;
   const canSave = !submitting && cleanedName.length > 0 && !isUnchanged;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -65,12 +69,12 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
     try {
       await apiFetch(`/api/playlists/${playlist.id}`, {
         method: 'PUT',
-        body: JSON.stringify({name: cleanedName}),
+        body: JSON.stringify({name: cleanedName, visibility}),
       });
-      onRenamed(playlist, cleanedName);
+      onRenamed(playlist, cleanedName, visibility);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not rename playlist');
+      setError(err instanceof Error ? err.message : 'Could not save playlist');
     } finally {
       setSubmitting(false);
     }
@@ -94,7 +98,7 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
             id="rename-playlist-title"
             className="font-display text-xl font-bold text-[var(--text-primary)]"
           >
-            Rename Playlist
+            Edit Playlist
           </h2>
           <button
             type="button"
@@ -127,6 +131,13 @@ export const RenamePlaylistModal: React.FC<RenamePlaylistModalProps> = ({
               className="w-full rounded-md bg-[var(--bg-input)] px-3.5 py-2.5 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] border border-[var(--border-subtle)] focus:border-[var(--accent)] focus:outline-none"
             />
           </div>
+
+          <PlaylistVisibilityField
+            idPrefix="edit-playlist"
+            value={visibility}
+            onChange={setVisibility}
+            disabled={submitting}
+          />
 
           {error && <p className="text-sm text-[var(--danger-text)]">{error}</p>}
 

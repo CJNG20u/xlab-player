@@ -51,6 +51,8 @@ export interface Playlist {
   description: string;
   source?: 'manual' | 'm3u';
   m3u_path?: string | null;
+  /** private = only the owner and admins can see it; public = every signed-in user can see it. */
+  visibility?: 'private' | 'public';
   created_at: string;
   updated_at: string;
   owner_username?: string;

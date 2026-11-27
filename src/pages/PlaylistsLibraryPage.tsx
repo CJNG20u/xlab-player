@@ -7,11 +7,13 @@ import {
   Clock,
   Copy,
   FileDown,
+  Globe,
   HardDriveDownload,
   Heart,
   Library,
   ListPlus,
   Loader2,
+  Lock,
   MoreHorizontal,
   Pencil,
   Play,
@@ -1239,8 +1241,8 @@ export const PlaylistsLibraryPage: React.FC = () => {
                         type="button"
                         onClick={() => setRenameTarget(activePlaylist)}
                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-secondary)]/80 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition-colors"
-                        aria-label="Rename playlist"
-                        title="Rename playlist"
+                        aria-label="Edit playlist"
+                        title="Edit playlist"
                       >
                         <Pencil className="w-4 h-4" />
                       </button>
@@ -1259,6 +1261,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
                   <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)] pt-1">
                     <span className="font-semibold text-[var(--text-primary)]">
                       {activePlaylist.owner_username || user?.username}
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span className="inline-flex items-center gap-1">
+                      {activePlaylist.visibility === 'public' ? (
+                        <Globe className="w-3 h-3" aria-hidden="true" />
+                      ) : (
+                        <Lock className="w-3 h-3" aria-hidden="true" />
+                      )}
+                      {activePlaylist.visibility === 'public' ? 'Public' : 'Private'}
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="font-mono tabular-nums">
@@ -2052,6 +2063,7 @@ export const PlaylistsLibraryPage: React.FC = () => {
               onPlayTracks={handlePlayTrackCollection}
               onOpenCreatePlaylist={() => setCreateOpen(true)}
               canEditPlaylist={canEditPlaylist}
+              currentUserId={user?.id}
               onRenamePlaylist={setRenameTarget}
               onExportM3u={handleExportM3u}
               onDeletePlaylist={handleDeletePlaylist}
@@ -2371,15 +2383,15 @@ export const PlaylistsLibraryPage: React.FC = () => {
       <RenamePlaylistModal
         playlist={renameTarget}
         onClose={() => setRenameTarget(null)}
-        onRenamed={(renamedPlaylist, newName) => {
+        onRenamed={(renamedPlaylist, newName, visibility) => {
           setPlaylists((prev) =>
-            prev.map((pl) => (pl.id === renamedPlaylist.id ? {...pl, name: newName} : pl))
+            prev.map((pl) => (pl.id === renamedPlaylist.id ? {...pl, name: newName, visibility} : pl))
           );
           setActivePlaylist((prev) =>
-            prev && prev.id === renamedPlaylist.id ? {...prev, name: newName} : prev
+            prev && prev.id === renamedPlaylist.id ? {...prev, name: newName, visibility} : prev
           );
           bumpLibraryRefresh();
-          flashToast('Playlist renamed');
+          flashToast('Playlist saved');
         }}
       />
 

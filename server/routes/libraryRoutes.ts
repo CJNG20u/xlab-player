@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import {type AuthRequest, requireAuth} from '../auth.ts';
 import {COVERS_DIR, db, getMusicDir} from '../db.ts';
+import {canManagePlaylist, canViewPlaylist, parseVisibility} from '../playlistAccess.ts';
 import {deviceHub} from '../deviceHub.ts';
 import {
   DuplicateResolveError,
@@ -591,13 +592,13 @@ libraryRouter.delete('/tracks/:id', requireAuth, async (req: AuthRequest, res) =
 libraryRouter.get('/playlists', requireAuth, (req: AuthRequest, res) => {
   const playlists = db
     .prepare(
-      `SELECT p.id, p.user_id, p.name, p.description, p.source, p.m3u_path, p.created_at, p.updated_at,
+      `SELECT p.id, p.user_id, p.name, p.description, p.source, p.m3u_path, p.visibility, p.created_at, p.updated_at,
               u.username AS owner_username,
               COUNT(pt.id) AS track_count
        FROM playlists p
        LEFT JOIN users u ON u.id = p.user_id
        LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
-       WHERE p.user_id = ? OR ? = 'admin' OR p.source = 'm3u'
+       WHERE p.user_id = ? OR ? = 'admin' OR p.visibility = 'public'
        GROUP BY p.id
        ORDER BY p.updated_at DESC, p.id DESC`
     )
@@ -608,6 +609,7 @@ libraryRouter.get('/playlists', requireAuth, (req: AuthRequest, res) => {
     description: string;
     source: 'manual' | 'm3u';
     m3u_path: string | null;
+    visibility: 'private' | 'public';
     created_at: string;
     updated_at: string;
     owner_username: string;
@@ -642,6 +644,7 @@ libraryRouter.get('/playlists', requireAuth, (req: AuthRequest, res) => {
 libraryRouter.post('/playlists', requireAuth, (req: AuthRequest, res) => {
   const name = String(req.body?.name || '').trim();
   const description = String(req.body?.description || '').trim();
+  const visibility = parseVisibility(req.body?.visibility) ?? 'private';
 
   if (!name) {
     res.status(400).json({error: 'Playlist name is required'});
@@ -649,8 +652,8 @@ libraryRouter.post('/playlists', requireAuth, (req: AuthRequest, res) => {
   }
 
   const info = db
-    .prepare('INSERT INTO playlists (user_id, name, description) VALUES (?, ?, ?)')
-    .run(req.user!.id, name.slice(0, 100), description.slice(0, 300));
+    .prepare('INSERT INTO playlists (user_id, name, description, visibility) VALUES (?, ?, ?, ?)')
+    .run(req.user!.id, name.slice(0, 100), description.slice(0, 300), visibility);
 
   const playlist = db
     .prepare('SELECT * FROM playlists WHERE id = ?')
@@ -669,7 +672,8 @@ libraryRouter.get('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
     )
     .get(playlistId) as Record<string, unknown> | undefined;
 
-  if (!playlist) {
+  if (!playlist || !canViewPlaylist(req.user!, playlist as {user_id: number; visibility?: string})) {
+    // Same answer for "missing" and "not yours" so private playlists can't be probed
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
@@ -707,7 +711,7 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
   }
 
   const existing = db
-    .prepare('SELECT id, user_id, name, description, source, m3u_path FROM playlists WHERE id = ?')
+    .prepare('SELECT id, user_id, name, description, source, m3u_path, visibility FROM playlists WHERE id = ?')
     .get(playlistId) as
     | {
         id: number;
@@ -716,21 +720,36 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
         description: string | null;
         source: string | null;
         m3u_path: string | null;
+        visibility: string | null;
       }
     | undefined;
 
-  if (!existing) {
+  if (!existing || !canViewPlaylist(req.user!, existing)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
-  if (existing.user_id !== req.user!.id && req.user!.role !== 'admin') {
+  if (!canManagePlaylist(req.user!, existing)) {
     res.status(403).json({error: 'Not allowed to edit this playlist'});
     return;
   }
 
-  const rawName = typeof req.body?.name === 'string' ? req.body.name : '';
-  const name = rawName.replace(/[\r\n]/g, '').trim();
-  if (!name) {
+  const hasNameField = typeof req.body?.name === 'string';
+  const hasVisibilityField =
+    req.body !== null &&
+    typeof req.body === 'object' &&
+    Object.prototype.hasOwnProperty.call(req.body, 'visibility') &&
+    req.body.visibility !== undefined;
+  const nextVisibility = hasVisibilityField
+    ? parseVisibility(req.body.visibility)
+    : ((existing.visibility === 'public' ? 'public' : 'private') as 'public' | 'private');
+  if (!nextVisibility) {
+    res.status(400).json({error: 'Visibility must be "private" or "public"'});
+    return;
+  }
+
+  const rawName = hasNameField ? req.body.name : existing.name;
+  const name = String(rawName).replace(/[\r\n]/g, '').trim();
+  if (!name || (!hasNameField && !hasVisibilityField)) {
     res.status(400).json({error: 'Playlist name is required'});
     return;
   }
@@ -748,7 +767,7 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
     ? String(req.body.description ?? '').trim().slice(0, 300)
     : existing.description || '';
 
-  if (existing.source === 'm3u' && existing.m3u_path) {
+  if (existing.source === 'm3u' && existing.m3u_path && name !== existing.name) {
     try {
       await updateM3uPlaylistNameOnDisk(existing.m3u_path, name);
     } catch {
@@ -760,12 +779,12 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
   }
 
   db.prepare(
-    "UPDATE playlists SET name = ?, description = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(name, description, playlistId);
+    "UPDATE playlists SET name = ?, description = ?, visibility = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(name, description, nextVisibility, playlistId);
 
   const updated = db
     .prepare(
-      `SELECT p.id, p.user_id, p.name, p.description, p.source, p.m3u_path, p.created_at, p.updated_at,
+      `SELECT p.id, p.user_id, p.name, p.description, p.source, p.m3u_path, p.visibility, p.created_at, p.updated_at,
               u.username AS owner_username
        FROM playlists p
        LEFT JOIN users u ON u.id = p.user_id
@@ -779,14 +798,14 @@ libraryRouter.put('/playlists/:id', requireAuth, async (req: AuthRequest, res) =
 libraryRouter.delete('/playlists/:id', requireAuth, (req: AuthRequest, res) => {
   const playlistId = Number(req.params.id);
   const existing = db
-    .prepare('SELECT id, user_id FROM playlists WHERE id = ?')
-    .get(playlistId) as {id: number; user_id: number} | undefined;
+    .prepare('SELECT id, user_id, visibility FROM playlists WHERE id = ?')
+    .get(playlistId) as {id: number; user_id: number; visibility: string | null} | undefined;
 
-  if (!existing) {
+  if (!existing || !canViewPlaylist(req.user!, existing)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
-  if (existing.user_id !== req.user!.id && req.user!.role !== 'admin') {
+  if (!canManagePlaylist(req.user!, existing)) {
     res.status(403).json({error: 'Not allowed to delete this playlist'});
     return;
   }
@@ -994,16 +1013,22 @@ libraryRouter.post('/playlists/:id/tracks', requireAuth, async (req: AuthRequest
   }
 
   const playlist = db
-    .prepare('SELECT id, user_id, source, m3u_path FROM playlists WHERE id = ?')
+    .prepare('SELECT id, user_id, source, m3u_path, visibility FROM playlists WHERE id = ?')
     .get(playlistId) as
-    | {id: number; user_id: number; source: 'manual' | 'm3u'; m3u_path: string | null}
+    | {
+        id: number;
+        user_id: number;
+        source: 'manual' | 'm3u';
+        m3u_path: string | null;
+        visibility: string | null;
+      }
     | undefined;
-  if (!playlist) {
+  if (!playlist || !canViewPlaylist(req.user!, playlist)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
   const canModifyM3u = playlist.source === 'm3u' && req.user!.can_download;
-  if (playlist.user_id !== req.user!.id && req.user!.role !== 'admin' && !canModifyM3u) {
+  if (!canManagePlaylist(req.user!, playlist) && !canModifyM3u) {
     res.status(403).json({error: 'Not allowed to modify this playlist'});
     return;
   }
@@ -1067,10 +1092,12 @@ libraryRouter.post('/playlists/:id/tracks', requireAuth, async (req: AuthRequest
 libraryRouter.post('/playlists/:id/export-m3u', requireAuth, async (req: AuthRequest, res) => {
   const playlistId = Number(req.params.id);
   const playlist = db
-    .prepare('SELECT id, name FROM playlists WHERE id = ?')
-    .get(playlistId) as {id: number; name: string} | undefined;
+    .prepare('SELECT id, name, user_id, visibility FROM playlists WHERE id = ?')
+    .get(playlistId) as
+    | {id: number; name: string; user_id: number; visibility: string | null}
+    | undefined;
 
-  if (!playlist) {
+  if (!playlist || !canViewPlaylist(req.user!, playlist)) {
     res.status(404).json({error: 'Playlist not found'});
     return;
   }
@@ -1135,16 +1162,22 @@ libraryRouter.delete(
     const trackId = Number(req.params.trackId);
 
     const playlist = db
-      .prepare('SELECT id, user_id, source, m3u_path FROM playlists WHERE id = ?')
+      .prepare('SELECT id, user_id, source, m3u_path, visibility FROM playlists WHERE id = ?')
       .get(playlistId) as
-      | {id: number; user_id: number; source: 'manual' | 'm3u'; m3u_path: string | null}
+      | {
+          id: number;
+          user_id: number;
+          source: 'manual' | 'm3u';
+          m3u_path: string | null;
+          visibility: string | null;
+        }
       | undefined;
-    if (!playlist) {
+    if (!playlist || !canViewPlaylist(req.user!, playlist)) {
       res.status(404).json({error: 'Playlist not found'});
       return;
     }
     const canModifyM3u = playlist.source === 'm3u' && req.user!.can_download;
-    if (playlist.user_id !== req.user!.id && req.user!.role !== 'admin' && !canModifyM3u) {
+    if (!canManagePlaylist(req.user!, playlist) && !canModifyM3u) {
       res.status(403).json({error: 'Not allowed to modify this playlist'});
       return;
     }

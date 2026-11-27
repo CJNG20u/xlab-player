@@ -255,6 +255,18 @@ sudo systemctl status xlabplayer
 2. Navigate to **Settings** to verify your **Music Directory** (defaults to `/music` in Docker or `MUSIC_DIR` from `.env`), inspect mount health/permissions, and run **Scan Library** to index tracks and `.m3u`/`.m3u8` playlists.
 3. *(Optional)* In **Settings**, create additional **Listener** accounts, toggle per-user download permissions, or upload a Netscape-format `cookies.txt` file for age-restricted or rate-limited YouTube downloads.
 
+### Playlist privacy
+
+Playlists are **private by default**. Each playlist shows a lock (private) or globe (public) icon.
+
+- **Listeners** see their own playlists plus any playlist its owner has made **public**. They can play public playlists but cannot change them.
+- **Admins** see every playlist, including other users' private ones, and can edit, delete or change the visibility of any of them.
+- Playlists imported from local `.m3u` / `.m3u8` files belong to the admin and start private. Open a playlist's menu, choose **Edit**, and set it to **Public** to share it.
+- Change visibility when you create a playlist, or later with **Edit** (the pencil on the playlist page, or the playlist's menu).
+- When upgrading from an older version, all existing playlists become private, so listeners stop seeing local playlists until you make them public.
+
+The music library itself (all tracks, search, albums) is still visible to every signed-in user; only playlists are scoped.
+
 ### Updating `xlabplayer`
 
 **Docker Compose:**
