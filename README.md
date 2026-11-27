@@ -55,6 +55,8 @@ Background & Lock-Screen Playback: Persistent HTML5 audio engine integrated with
 
 Multi-User Roles & cookies.txt Support: Separate admin and listener roles, per-user download permissions, direct local audio uploads, and Netscape-format cookies.txt management for resilient YouTube downloads and streams.
 
+Private Playlists & Per-User Library Access: Playlists are private by default and can be made public, shared with specific listeners, or duplicated into your own private copy. Each listener can be limited to only the songs in public or shared playlists plus their own likes and downloads (see **Playlist privacy** below).
+
 Zero-Cloud Architecture: Runs completely locally in Docker with persistent /music volume mapping and zero external AI or third-party cloud API dependencies.
 
 ---
