@@ -1,4 +1,15 @@
-# xlabplayer
+<h1 align="center">xlabplayer</h1>
+
+<p align="center">
+  <img src="public/icon.svg" width="128" alt="xlabplayer logo">
+</p>
+
+<p align="center"><b>Your music, your server, plus YouTube.</b></p>
+
+<p align="center"><a href="#quick-start--docker-compose-recommended">Install</a> · <a href="#features">Features</a> · <a href="#why-xlabplayer">Why xlabplayer</a> · <a href="#updating-xlabplayer">Updating</a></p>
+
+xlabplayer is a music player you run at home. Point it at your own library, search and stream from YouTube, and save songs you want to keep. Open it on your iPhone, Android or PC and install it like an app. No subscription, and your library stays on your own server.
+
 
 [![Docker image](https://github.com/CJNG20u/xlab-player/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/CJNG20u/xlab-player/pkgs/container/xlab-player)
 
