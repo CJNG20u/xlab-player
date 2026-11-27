@@ -303,18 +303,20 @@ adminRouter.get('/yt-debug-compare/:videoId', requireAdmin, async (req, res) => 
 // User management
 adminRouter.get('/users', requireAdmin, (_req, res) => {
   const rows = db
-    .prepare('SELECT id, username, role, can_download, created_at FROM users ORDER BY id ASC')
+    .prepare('SELECT id, username, role, can_download, full_library, created_at FROM users ORDER BY id ASC')
     .all() as Array<{
     id: number;
     username: string;
     role: 'admin' | 'listener';
     can_download: number;
+    full_library: number;
     created_at: string;
   }>;
   res.json({
     users: rows.map((u) => ({
       ...u,
       can_download: Boolean(u.can_download) || u.role === 'admin',
+      full_library: Boolean(u.full_library) || u.role === 'admin',
     })),
   });
 });
@@ -324,6 +326,7 @@ adminRouter.post('/users', requireAdmin, (req, res) => {
   const password = String(req.body?.password || '');
   const role = req.body?.role === 'admin' ? 'admin' : 'listener';
   const canDownload = role === 'admin' ? 1 : req.body?.can_download ? 1 : 0;
+  const fullLibrary = role === 'admin' ? 1 : req.body?.full_library ? 1 : 0;
 
   if (username.length < 3 || username.length > 32) {
     res.status(400).json({error: 'Username must be between 3 and 32 characters'});
@@ -336,19 +339,24 @@ adminRouter.post('/users', requireAdmin, (req, res) => {
 
   try {
     const info = db
-      .prepare('INSERT INTO users (username, password_hash, role, can_download) VALUES (?, ?, ?, ?)')
-      .run(username, hashPassword(password), role, canDownload);
+      .prepare('INSERT INTO users (username, password_hash, role, can_download, full_library) VALUES (?, ?, ?, ?, ?)')
+      .run(username, hashPassword(password), role, canDownload, fullLibrary);
     const created = db
-      .prepare('SELECT id, username, role, can_download, created_at FROM users WHERE id = ?')
+      .prepare('SELECT id, username, role, can_download, full_library, created_at FROM users WHERE id = ?')
       .get(info.lastInsertRowid) as {
       id: number;
       username: string;
       role: 'admin' | 'listener';
       can_download: number;
+      full_library: number;
       created_at: string;
     };
     res.status(201).json({
-      user: {...created, can_download: Boolean(created.can_download) || created.role === 'admin'},
+      user: {
+        ...created,
+        can_download: Boolean(created.can_download) || created.role === 'admin',
+        full_library: Boolean(created.full_library) || created.role === 'admin',
+      },
     });
   } catch {
     res.status(409).json({error: 'A user with that username already exists'});
@@ -388,6 +396,13 @@ adminRouter.put('/users/:id', requireAdmin, (req: AuthRequest, res) => {
   if (typeof req.body?.can_download === 'boolean') {
     db.prepare('UPDATE users SET can_download = ? WHERE id = ?').run(
       req.body.can_download ? 1 : 0,
+      targetId
+    );
+  }
+
+  if (typeof req.body?.full_library === 'boolean') {
+    db.prepare('UPDATE users SET full_library = ? WHERE id = ?').run(
+      req.body.full_library ? 1 : 0,
       targetId
     );
   }

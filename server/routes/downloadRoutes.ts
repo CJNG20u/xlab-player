@@ -1,9 +1,11 @@
-import {Router} from 'express';
+import {type NextFunction, type Request, type Response, Router} from 'express';
 import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
 import {type AuthRequest, requireAuth, requireDownloadPermission} from '../auth.ts';
-import {db, getMusicDir, recordPlayHistory} from '../db.ts';
+import {type AuthUser, resolveUserFromRequest} from '../auth.ts';
+import {claimTrackForUser, db, getMusicDir, recordPlayHistory} from '../db.ts';
+import {hasFullLibrary, scrubHiddenDuplicateHints} from '../trackAccess.ts';
 import {
   getCatalogAlbumDetail,
   getCatalogArtistDetail,
@@ -43,6 +45,21 @@ import {AUDIO_EXTENSIONS, indexSingleFile} from '../scanner.ts';
 
 export const downloadRouter = Router();
 export const discoverRouter = Router();
+
+// Search/peek results flag songs that are "already in your library". For users limited to part of
+// the library, drop that hint for songs they cannot see so it does not reveal what is hidden.
+function scrubForLimitedUsers(req: Request, res: Response, next: NextFunction): void {
+  const user: AuthUser | null = resolveUserFromRequest(req);
+  if (!user || hasFullLibrary(user)) {
+    next();
+    return;
+  }
+  const originalJson = res.json.bind(res);
+  res.json = ((body?: unknown) => originalJson(scrubHiddenDuplicateHints(db, user, body))) as typeof res.json;
+  next();
+}
+downloadRouter.use(scrubForLimitedUsers);
+discoverRouter.use(scrubForLimitedUsers);
 
 const PLAYLIST_SEARCH_ROUTE_TIMEOUT_MS = 5000;
 
@@ -632,14 +649,21 @@ downloadRouter.post('/start', requireDownloadPermission, (req: AuthRequest, res)
   res.status(201).json({jobs: created});
 });
 
-downloadRouter.get('/jobs', requireDownloadPermission, (_req, res) => {
-  res.json({jobs: getDownloadJobs(), musicDir: getMusicDir()});
+downloadRouter.get('/jobs', requireDownloadPermission, (req: AuthRequest, res) => {
+  res.json({jobs: getDownloadJobs(req.user), musicDir: getMusicDir()});
 });
 
-downloadRouter.delete('/jobs/:id', requireDownloadPermission, (req, res) => {
+downloadRouter.delete('/jobs/:id', requireDownloadPermission, (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({error: 'Invalid download job ID'});
+    return;
+  }
+  const jobOwner = db.prepare('SELECT user_id FROM download_jobs WHERE id = ?').get(id) as
+    | {user_id: number | null}
+    | undefined;
+  if (jobOwner && req.user!.role !== 'admin' && jobOwner.user_id !== req.user!.id) {
+    res.status(404).json({error: 'Download job not found'});
     return;
   }
   cancelDownloadJob(id);
@@ -648,7 +672,8 @@ downloadRouter.delete('/jobs/:id', requireDownloadPermission, (req, res) => {
   res.json({ok: true});
 });
 
-downloadRouter.get('/events', requireDownloadPermission, (req, res) => {
+downloadRouter.get('/events', requireDownloadPermission, (req: AuthRequest, res) => {
+  const viewer = req.user!;
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -659,9 +684,11 @@ downloadRouter.get('/events', requireDownloadPermission, (req, res) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  send('init', {jobs: getDownloadJobs()});
+  send('init', {jobs: getDownloadJobs(viewer)});
 
-  const onJob = (job: DownloadJobRow) => send('job', job);
+  const onJob = (job: DownloadJobRow) => {
+    if (viewer.role === 'admin' || job.user_id === viewer.id) send('job', job);
+  };
   const onDeleted = (payload: {id: number}) => send('deleted', payload);
 
   downloadEvents.on('job', onJob);
@@ -698,6 +725,7 @@ downloadRouter.post('/upload', requireDownloadPermission, (req: AuthRequest, res
         const result = await indexSingleFile(file.path, musicDir);
         const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(result.id);
         if (track) indexedTracks.push(track);
+        claimTrackForUser(req.user!.id, result.id);
       } catch {
         // Continue indexing remaining files
       }

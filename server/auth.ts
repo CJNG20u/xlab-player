@@ -8,6 +8,7 @@ export interface AuthUser {
   username: string;
   role: 'admin' | 'listener';
   can_download: boolean;
+  full_library: boolean;
   created_at: string;
 }
 
@@ -70,13 +71,14 @@ export function resolveUserFromRequest(req: Request): AuthUser | null {
     const userId = Number(payload?.sub);
     if (!Number.isFinite(userId)) return null;
     const row = db
-      .prepare('SELECT id, username, role, can_download, created_at FROM users WHERE id = ?')
+      .prepare('SELECT id, username, role, can_download, full_library, created_at FROM users WHERE id = ?')
       .get(userId) as
       | {
           id: number;
           username: string;
           role: 'admin' | 'listener';
           can_download: number;
+          full_library: number;
           created_at: string;
         }
       | undefined;
@@ -86,6 +88,7 @@ export function resolveUserFromRequest(req: Request): AuthUser | null {
       username: row.username,
       role: row.role,
       can_download: Boolean(row.can_download) || row.role === 'admin',
+      full_library: Boolean(row.full_library) || row.role === 'admin',
       created_at: row.created_at,
     };
   } catch {

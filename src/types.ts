@@ -3,6 +3,8 @@ export interface User {
   username: string;
   role: 'admin' | 'listener';
   can_download: boolean;
+  /** When false, a listener only sees songs in public/own playlists plus ones they liked or added. */
+  full_library?: boolean;
   created_at: string;
 }
 

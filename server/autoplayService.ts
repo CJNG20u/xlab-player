@@ -16,6 +16,7 @@ import {
 } from './autoplay.ts';
 import {getCatalogRelatedArtistsWithTopTracks} from './catalog.ts';
 import {db} from './db.ts';
+import {isTrackVisibleToUser, visibleTrackClause} from './trackAccess.ts';
 import {getListeningProfileForUser} from './listeningProfile.ts';
 import {
   getCachedTrackVideoId,
@@ -67,12 +68,6 @@ const getLibraryTrackByIdStmt = db.prepare(
    WHERE id = ?`
 );
 
-const getAllLibraryTracksStmt = db.prepare(
-  `SELECT id, rel_path, title, artist, album, track_number, year, duration,
-          format, bitrate, size_bytes, cover_file, dominant_color, added_at
-   FROM tracks`
-);
-
 const getLikedTrackIdsStmt = db.prepare(
   'SELECT track_id FROM liked_tracks WHERE user_id = ?'
 );
@@ -100,7 +95,10 @@ function withDeadline<T>(
   });
 }
 
-function enrichTrackInputFromDb(item: AutoplayContextTrackInput): AutoplayContextTrackInput {
+function enrichTrackInputFromDb(
+  item: AutoplayContextTrackInput,
+  canSeeTrack: (trackId: number) => boolean = () => true
+): AutoplayContextTrackInput {
   const numericTrackId =
     typeof item.trackId === 'number' && Number.isInteger(item.trackId) && item.trackId > 0
       ? item.trackId
@@ -116,7 +114,7 @@ function enrichTrackInputFromDb(item: AutoplayContextTrackInput): AutoplayContex
       : 0;
   let videoId = (item.videoId || '').trim();
 
-  if (numericTrackId !== null && (!title || !artist)) {
+  if (numericTrackId !== null && (!title || !artist) && canSeeTrack(numericTrackId)) {
     const row = getLibraryTrackByIdStmt.get(numericTrackId) as LibraryTrackInput | undefined;
     if (row) {
       if (!title) title = row.title;
@@ -147,9 +145,12 @@ function enrichTrackInputFromDb(item: AutoplayContextTrackInput): AutoplayContex
  */
 function buildEffectiveContext(
   seed: AutoplayContextTrackInput,
-  rawContext: AutoplayContextTrackInput[]
+  rawContext: AutoplayContextTrackInput[],
+  canSeeTrack: (trackId: number) => boolean = () => true
 ): AutoplayContextTrackInput[] {
-  const combined = [...rawContext.slice(-AUTOPLAY_CONTEXT_MAX), seed].map(enrichTrackInputFromDb);
+  const combined = [...rawContext.slice(-AUTOPLAY_CONTEXT_MAX), seed].map((item) =>
+    enrichTrackInputFromDb(item, canSeeTrack)
+  );
   const deduped: AutoplayContextTrackInput[] = [];
   const seen = new Set<string>();
 
@@ -174,8 +175,13 @@ export async function planAutoplayForUser(
   const deadlineAt = startedAt + AUTOPLAY_OVERALL_DEADLINE_MS;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
 
-  const context = buildEffectiveContext(input.seed, input.context);
-  const newestItem = context[context.length - 1] ?? enrichTrackInputFromDb(input.seed);
+  const accessUser = db
+    .prepare('SELECT id, role, full_library FROM users WHERE id = ?')
+    .get(input.userId) as {id: number; role: string; full_library: number} | undefined;
+  const canSeeTrack = (trackId: number): boolean =>
+    accessUser ? isTrackVisibleToUser(db, accessUser, trackId) : false;
+  const context = buildEffectiveContext(input.seed, input.context, canSeeTrack);
+  const newestItem = context[context.length - 1] ?? enrichTrackInputFromDb(input.seed, canSeeTrack);
   let degraded = false;
 
   // 1. If the newest/seed track has no videoId yet (e.g. local library song or Deezer track
@@ -202,7 +208,21 @@ export async function planAutoplayForUser(
   }
 
   // 2. Load local library + liked tracks once (fast in-process SQLite read)
-  const libraryTracks = getAllLibraryTracksStmt.all() as LibraryTrackInput[];
+  const libraryUser = accessUser;
+  const libraryTracks = (
+    libraryUser
+      ? (() => {
+          const clause = visibleTrackClause(libraryUser, 't');
+          return db
+            .prepare(
+              `SELECT t.id, t.rel_path, t.title, t.artist, t.album, t.track_number, t.year, t.duration,
+                      t.format, t.bitrate, t.size_bytes, t.cover_file, t.dominant_color, t.added_at
+               FROM tracks t WHERE ${clause.sql}`
+            )
+            .all(...clause.params);
+        })()
+      : []
+  ) as LibraryTrackInput[];
   const likedRows = getLikedTrackIdsStmt.all(input.userId) as Array<{track_id: number}>;
   const likedTrackIds = new Set<number>(likedRows.map((r) => r.track_id));
 

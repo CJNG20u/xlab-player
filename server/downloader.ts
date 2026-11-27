@@ -22,6 +22,8 @@ import {
   setSetting,
   YTDLP_CACHE_DIR,
 } from './db.ts';
+import {claimTrackForUser} from './db.ts';
+import {visibleTrackClause} from './trackAccess.ts';
 import {computeFileSha256, indexSingleFile} from './scanner.ts';
 
 const execFileAsync = promisify(execFile);
@@ -1130,7 +1132,12 @@ export async function getYoutubePlaylistDetail(
   return runPromise;
 }
 
-export function getDownloadJobs(): DownloadJobRow[] {
+export function getDownloadJobs(user?: {id: number; role: string}): DownloadJobRow[] {
+  if (user && user.role !== 'admin') {
+    return db
+      .prepare('SELECT * FROM download_jobs WHERE user_id = ? ORDER BY id DESC LIMIT 50')
+      .all(user.id) as DownloadJobRow[];
+  }
   return db
     .prepare('SELECT * FROM download_jobs ORDER BY id DESC LIMIT 50')
     .all() as DownloadJobRow[];
@@ -1149,6 +1156,7 @@ function updateJob(id: number, fields: Partial<DownloadJobRow>): DownloadJobRow 
     .prepare('SELECT * FROM download_jobs WHERE id = ?')
     .get(id) as DownloadJobRow | undefined;
   if (updated) {
+    if (updated.user_id && updated.track_id) claimTrackForUser(updated.user_id, updated.track_id);
     downloadEvents.emit('job', updated);
     return updated;
   }
@@ -1981,6 +1989,15 @@ export function findLibraryTrackByVideoId(
 }
 
 export async function downloadTrackToNas(
+  input: DirectNasDownloadInput
+): Promise<DirectNasDownloadResult> {
+  const result = await downloadTrackToNasUnclaimed(input);
+  // Whoever asked for the song keeps access to it, even if they can only browse part of the library.
+  claimTrackForUser(input.userId, result.track?.id);
+  return result;
+}
+
+async function downloadTrackToNasUnclaimed(
   input: DirectNasDownloadInput
 ): Promise<DirectNasDownloadResult> {
   const rawVideoId = (input.videoId || '').trim();
@@ -6609,16 +6626,20 @@ export function pickDiscoverSeedArtists(userId: number, maxSeeds = 3): string[] 
   }
 
   // 4. Local library tracks (most populated & recently added artists)
+  const profileUser = db
+    .prepare('SELECT id, role, full_library FROM users WHERE id = ?')
+    .get(userId) as {id: number; role: string; full_library: number} | undefined;
+  const profileClause = visibleTrackClause(profileUser ?? {id: userId, role: 'listener'}, 't');
   const libraryRows = db
     .prepare(
-      `SELECT artist, COUNT(*) as cnt
-       FROM tracks
-       WHERE TRIM(artist) != ''
-       GROUP BY artist
-       ORDER BY cnt DESC, MAX(added_at) DESC
+      `SELECT t.artist AS artist, COUNT(*) as cnt
+       FROM tracks t
+       WHERE TRIM(t.artist) != '' AND ${profileClause.sql}
+       GROUP BY t.artist
+       ORDER BY cnt DESC, MAX(t.added_at) DESC
        LIMIT 30`
     )
-    .all() as Array<{artist: string; cnt: number}>;
+    .all(...profileClause.params) as Array<{artist: string; cnt: number}>;
   for (const row of libraryRows) {
     addScore(row.artist, Math.min(row.cnt, 10));
   }

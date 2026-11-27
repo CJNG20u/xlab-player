@@ -142,6 +142,7 @@ export const SettingsPage: React.FC = () => {
   const [newUserPassword, setNewUserPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState<'admin' | 'listener'>('listener');
   const [newUserCanDownload, setNewUserCanDownload] = useState(true);
+  const [newUserFullLibrary, setNewUserFullLibrary] = useState(false);
   const [userFeedback, setUserFeedback] = useState<string | null>(null);
   const [resetUserId, setResetUserId] = useState<number | null>(null);
   const [resetPasswordVal, setResetPasswordVal] = useState('');
@@ -384,6 +385,7 @@ export const SettingsPage: React.FC = () => {
           password: newUserPassword,
           role: newUserRole,
           can_download: newUserRole === 'admin' ? true : newUserCanDownload,
+          full_library: newUserRole === 'admin' ? true : newUserFullLibrary,
         }),
       });
       setNewUsername('');
@@ -418,6 +420,18 @@ export const SettingsPage: React.FC = () => {
       await apiFetch(`/api/admin/users/${u.id}`, {
         method: 'PUT',
         body: JSON.stringify({can_download: !u.can_download}),
+      });
+      await loadAdminData();
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleToggleUserFullLibrary = async (u: User) => {
+    try {
+      await apiFetch(`/api/admin/users/${u.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({full_library: !u.full_library}),
       });
       await loadAdminData();
     } catch {
@@ -1423,7 +1437,7 @@ export const SettingsPage: React.FC = () => {
                 User Management
               </h2>
               <p className="text-xs text-[var(--text-secondary)]">
-                Manage admin and listener accounts, download permissions, and password resets.
+                Manage admin and listener accounts, download permissions, library access, and password resets.
               </p>
             </div>
           </div>
@@ -1436,6 +1450,7 @@ export const SettingsPage: React.FC = () => {
                   <th className="py-2.5 pr-4 font-medium">Username</th>
                   <th className="py-2.5 pr-4 font-medium">Role</th>
                   <th className="py-2.5 pr-4 font-medium">Downloader Access</th>
+                  <th className="py-2.5 pr-4 font-medium">Whole Library</th>
                   <th className="py-2.5 text-right font-medium">Actions</th>
                 </tr>
               </thead>
@@ -1470,6 +1485,26 @@ export const SettingsPage: React.FC = () => {
                           }`}
                         >
                           {u.can_download ? 'Enabled' : 'Disabled'}
+                        </button>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4">
+                      {u.role === 'admin' ? (
+                        <span className="text-xs text-[var(--text-secondary)]">Full access</span>
+                      ) : (
+                        <button
+                          type="button"
+                          title={
+                            u.full_library
+                              ? 'Can browse every song. Click to limit to public playlists, their own playlists, and songs they liked or added.'
+                              : 'Limited to songs in public playlists, their own playlists, and songs they liked or added. Click to allow the whole library.'
+                          }
+                          onClick={() => void handleToggleUserFullLibrary(u)}
+                          className={`text-xs font-semibold underline-offset-2 hover:underline ${
+                            u.full_library ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]'
+                          }`}
+                        >
+                          {u.full_library ? 'Whole library' : 'Limited'}
                         </button>
                       )}
                     </td>
@@ -1585,6 +1620,16 @@ export const SettingsPage: React.FC = () => {
                 className="h-4 w-4 accent-[var(--accent)]"
               />
               <span>Allow Downloads</span>
+            </label>
+            <label className="flex items-center gap-2 py-2 text-xs text-[var(--text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={newUserRole === 'admin' ? true : newUserFullLibrary}
+                disabled={newUserRole === 'admin'}
+                onChange={(e) => setNewUserFullLibrary(e.target.checked)}
+                className="h-4 w-4 accent-[var(--accent)]"
+              />
+              <span>Can browse the whole library</span>
             </label>
             <button
               type="submit"

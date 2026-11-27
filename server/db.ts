@@ -307,6 +307,38 @@ if (!playlistColNames.has('m3u_path')) {
 if (!playlistColNames.has('visibility')) {
   db.exec("ALTER TABLE playlists ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
 }
+// Per-user library limit. full_library=1 lets a listener browse every track; 0 limits them to
+// tracks in public/own playlists plus tracks they liked, downloaded or uploaded.
+// Users that exist at upgrade time keep full access so nothing changes until the admin turns it off.
+const userColNames = new Set(
+  (db.prepare('PRAGMA table_info(users)').all() as Array<{name: string}>).map((c) => c.name)
+);
+if (!userColNames.has('full_library')) {
+  db.exec('ALTER TABLE users ADD COLUMN full_library INTEGER NOT NULL DEFAULT 0');
+  db.exec('UPDATE users SET full_library = 1');
+}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_tracks (
+    user_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, track_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_user_tracks_track ON user_tracks(track_id);
+  INSERT OR IGNORE INTO user_tracks (user_id, track_id)
+    SELECT DISTINCT user_id, track_id FROM download_jobs
+    WHERE user_id IS NOT NULL AND track_id IS NOT NULL
+      AND user_id IN (SELECT id FROM users) AND track_id IN (SELECT id FROM tracks);
+`);
+
+/** Records that a user added (downloaded/uploaded) a track, so it stays visible to them. */
+export function claimTrackForUser(userId: number | null | undefined, trackId: number | null | undefined): void {
+  if (!userId || !trackId) return;
+  db.prepare('INSERT OR IGNORE INTO user_tracks (user_id, track_id) VALUES (?, ?)').run(userId, trackId);
+}
+
 db.exec(
   'CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_m3u_path ON playlists(m3u_path) WHERE m3u_path IS NOT NULL'
 );

@@ -53,6 +53,7 @@ authRouter.post('/setup', (req, res) => {
     username,
     role: 'admin' as const,
     can_download: true,
+    full_library: true,
     created_at: new Date().toISOString(),
   };
 
@@ -72,7 +73,7 @@ authRouter.post('/login', (req, res) => {
 
   const row = db
     .prepare(
-      'SELECT id, username, password_hash, role, can_download, created_at FROM users WHERE username = ?'
+      'SELECT id, username, password_hash, role, can_download, full_library, created_at FROM users WHERE username = ?'
     )
     .get(username) as
     | {
@@ -81,6 +82,7 @@ authRouter.post('/login', (req, res) => {
         password_hash: string;
         role: 'admin' | 'listener';
         can_download: number;
+        full_library: number;
         created_at: string;
       }
     | undefined;
@@ -95,6 +97,7 @@ authRouter.post('/login', (req, res) => {
     username: row.username,
     role: row.role,
     can_download: Boolean(row.can_download) || row.role === 'admin',
+    full_library: Boolean(row.full_library) || row.role === 'admin',
     created_at: row.created_at,
   };
 

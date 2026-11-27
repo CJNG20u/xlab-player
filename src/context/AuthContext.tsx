@@ -31,6 +31,7 @@ const FALLBACK_OFFLINE_USER: User = {
   username: 'Offline Mode',
   role: 'listener',
   can_download: false,
+  full_library: false,
   created_at: '',
 };
 

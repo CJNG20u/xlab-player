@@ -265,7 +265,19 @@ Playlists are **private by default**. Each playlist shows a lock (private) or gl
 - Change visibility when you create a playlist, or later with **Edit** (the pencil on the playlist page, or the playlist's menu).
 - When upgrading from an older version, all existing playlists become private, so listeners stop seeing local playlists until you make them public.
 
-The music library itself (all tracks, search, albums) is still visible to every signed-in user; only playlists are scoped.
+### Limiting what a listener can browse
+
+By default a listener can browse the whole music library. In **Settings → Users** each listener has a **Whole Library** switch (and new users have a "Can browse the whole library" checkbox). Turn it off and that listener only sees:
+
+- songs in **public** playlists and in their **own** playlists,
+- songs they have **liked**, and
+- songs they **downloaded or uploaded** themselves.
+
+Everything else disappears for them: the song list, search, albums and artists, playing by direct link, lyrics, autoplay suggestions and "already in your library" hints. Making a playlist public or private immediately shows or hides its songs for limited listeners. Admins always see everything, and the duplicate cleaner is only available to users with whole-library access.
+
+- When upgrading, **existing listeners keep whole-library access** so nothing changes by surprise; switch it off per user. Users created afterwards start limited unless you tick the checkbox.
+- Listeners only see their own download jobs; admins see all of them.
+- Cover image URLs are not login-protected (they are unguessable file names), so a hidden song's cover is not listed anywhere but could be loaded by someone who already knows its file name.
 
 ### Updating `xlabplayer`
 

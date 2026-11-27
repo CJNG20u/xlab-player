@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import {type AuthRequest, requireAuth} from '../auth.ts';
 import {COVERS_DIR, db, getMusicDir} from '../db.ts';
+import {hasFullLibrary, isTrackVisibleToUser, visibleTrackClause} from '../trackAccess.ts';
 import {canManagePlaylist, canViewPlaylist, parseVisibility} from '../playlistAccess.ts';
 import {deviceHub} from '../deviceHub.ts';
 import {
@@ -144,7 +145,7 @@ async function handleStreamRequest(
     .prepare('SELECT id, rel_path, format FROM tracks WHERE id = ?')
     .get(trackId) as {id: number; rel_path: string; format: string} | undefined;
 
-  if (!track) {
+  if (!track || !isTrackVisibleToUser(db, req.user!, trackId)) {
     res.status(404).json({error: 'Track not found'});
     return;
   }
@@ -309,6 +310,10 @@ libraryRouter.get('/tracks', requireAuth, (req: AuthRequest, res) => {
   const params: unknown[] = [userId, userId];
   const conditions: string[] = [];
 
+  const visible = visibleTrackClause(req.user!, 't');
+  conditions.push(visible.sql);
+  params.push(...visible.params);
+
   if (filter === 'liked') {
     conditions.push('lt.track_id IS NOT NULL');
   }
@@ -351,17 +356,21 @@ libraryRouter.get('/tracks/:id', requireAuth, (req: AuthRequest, res) => {
     )
     .get(req.user!.id, id) as Record<string, unknown> | undefined;
 
-  if (!row) {
+  if (!row || !isTrackVisibleToUser(db, req.user!, id)) {
     res.status(404).json({error: 'Track not found'});
     return;
   }
   res.json({track: {...row, liked: Boolean(row.liked)}});
 });
 
-libraryRouter.get('/lyrics', requireAuth, async (req, res) => {
+libraryRouter.get('/lyrics', requireAuth, async (req: AuthRequest, res) => {
   const rawTrackId = req.query.trackId ? Number(req.query.trackId) : null;
-  const trackId =
+  let trackId =
     rawTrackId !== null && Number.isInteger(rawTrackId) && rawTrackId > 0 ? rawTrackId : null;
+  if (trackId !== null && !isTrackVisibleToUser(db, req.user!, trackId)) {
+    // Do not leak hidden-track metadata; fall back to the title/artist lookup the caller supplied.
+    trackId = null;
+  }
   const title = typeof req.query.title === 'string' ? req.query.title : '';
   const artist = typeof req.query.artist === 'string' ? req.query.artist : '';
   const album = typeof req.query.album === 'string' ? req.query.album : '';
@@ -382,7 +391,7 @@ libraryRouter.get('/lyrics', requireAuth, async (req, res) => {
   }
 });
 
-libraryRouter.get('/tracks/:id/lyrics', requireAuth, async (req, res) => {
+libraryRouter.get('/tracks/:id/lyrics', requireAuth, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({error: 'Invalid track ID'});
@@ -390,7 +399,7 @@ libraryRouter.get('/tracks/:id/lyrics', requireAuth, async (req, res) => {
   }
 
   const exists = db.prepare('SELECT id FROM tracks WHERE id = ?').get(id);
-  if (!exists) {
+  if (!exists || !isTrackVisibleToUser(db, req.user!, id)) {
     res.status(404).json({error: 'Track not found'});
     return;
   }
@@ -414,7 +423,7 @@ libraryRouter.post('/tracks/:id/like', requireAuth, (req: AuthRequest, res) => {
   const userId = req.user!.id;
 
   const exists = db.prepare('SELECT id FROM tracks WHERE id = ?').get(trackId);
-  if (!exists) {
+  if (!exists || !isTrackVisibleToUser(db, req.user!, trackId)) {
     res.status(404).json({error: 'Track not found'});
     return;
   }
@@ -549,7 +558,13 @@ libraryRouter.delete('/tracks', requireAuth, async (req: AuthRequest, res) => {
     return;
   }
 
-  const result = await permanentlyDeleteTracks(trackIds);
+  const deletableIds = trackIds.filter((id) => isTrackVisibleToUser(db, req.user!, id));
+  if (deletableIds.length === 0) {
+    res.status(404).json({error: 'Track not found'});
+    return;
+  }
+
+  const result = await permanentlyDeleteTracks(deletableIds);
   if (result.deletedIds.length === 0 && result.errors.length > 0) {
     res.status(500).json({error: result.errors[0].error, errors: result.errors});
     return;
@@ -572,6 +587,11 @@ libraryRouter.delete('/tracks/:id', requireAuth, async (req: AuthRequest, res) =
   const trackId = Number(req.params.id);
   if (!Number.isFinite(trackId)) {
     res.status(400).json({error: 'Invalid track ID'});
+    return;
+  }
+
+  if (!isTrackVisibleToUser(db, req.user!, trackId)) {
+    res.status(404).json({error: 'Track not found'});
     return;
   }
 
@@ -631,7 +651,12 @@ libraryRouter.get('/playlists', requireAuth, (req: AuthRequest, res) => {
   });
 
   // Also include summary counts for virtual collections
-  const totalCount = (db.prepare('SELECT COUNT(*) as c FROM tracks').get() as {c: number}).c;
+  const countClause = visibleTrackClause(req.user!, 't');
+  const totalCount = (
+    db
+      .prepare(`SELECT COUNT(*) as c FROM tracks t WHERE ${countClause.sql}`)
+      .get(...countClause.params) as {c: number}
+  ).c;
   const likedCount = (
     db.prepare('SELECT COUNT(*) as c FROM liked_tracks WHERE user_id = ?').get(req.user!.id) as {
       c: number;
@@ -1057,7 +1082,7 @@ libraryRouter.post('/playlists/:id/tracks', requireAuth, async (req: AuthRequest
       const trackRow = getTrackStmt.get(trackId) as
         | {id: number; rel_path: string; title: string; artist: string; duration: number}
         | undefined;
-      if (!trackRow) continue;
+      if (!trackRow || !isTrackVisibleToUser(db, req.user!, trackRow.id)) continue;
       insertStmt.run(playlistId, trackRow.id, nextPos++);
       addedTracks.push(trackRow);
     }
@@ -1234,6 +1259,11 @@ function getActivePlayingTrackIdsForUser(
 }
 
 libraryRouter.get('/library/duplicates', requireAuth, (req: AuthRequest, res) => {
+  if (!hasFullLibrary(req.user!)) {
+    // Limited users only see part of the library, so a library-wide scan is not offered to them.
+    res.json({groups: [], totalGroups: 0});
+    return;
+  }
   try {
     const playingTrackIds = getActivePlayingTrackIdsForUser(
       req.user!.id,
@@ -1258,6 +1288,10 @@ libraryRouter.get('/library/duplicates', requireAuth, (req: AuthRequest, res) =>
 });
 
 libraryRouter.post('/library/duplicates/resolve', requireAuth, (req: AuthRequest, res) => {
+  if (!hasFullLibrary(req.user!)) {
+    res.status(403).json({error: 'Duplicate cleanup needs access to the whole library'});
+    return;
+  }
   const rawKeepId = req.body?.keepId;
   const rawRemoveId = req.body?.removeId;
   const keepId = typeof rawKeepId === 'number' ? rawKeepId : Number(rawKeepId);
@@ -1303,6 +1337,10 @@ libraryRouter.post('/library/duplicates/resolve', requireAuth, (req: AuthRequest
 });
 
 libraryRouter.post('/library/duplicates/resolve-all', requireAuth, async (req: AuthRequest, res) => {
+  if (!hasFullLibrary(req.user!)) {
+    res.status(403).json({error: 'Duplicate cleanup needs access to the whole library'});
+    return;
+  }
   const userId = req.user!.id;
   if (!tryAcquireBulkDedupeLock(userId)) {
     res.status(409).json({error: 'A bulk duplicate removal is already running'});
