@@ -6,7 +6,7 @@
 
 <p align="center"><b>Your music, your server, plus YouTube.</b></p>
 
-<p align="center"><a href="#quick-start--docker-compose-recommended">Install</a> · <a href="#features">Features</a> · <a href="#why-xlabplayer">Why xlabplayer</a> · <a href="#updating-xlabplayer">Updating</a></p>
+<p align="center"><a href="#install">Install</a> · <a href="#features">Features</a> · <a href="#why-xlabplayer">Why xlabplayer</a> · <a href="#updating-xlabplayer">Updating</a></p>
 
 xlabplayer is a music player you run at home. Point it at your own library, search and stream from YouTube, and save songs you want to keep. Open it on your iPhone, Android or PC and install it like an app. No subscription, and your library stays on your own server.
 
@@ -59,29 +59,39 @@ Zero-Cloud Architecture: Runs completely locally in Docker with persistent /musi
 
 ---
 
-## Quick Start — Docker Compose (Recommended)
+## Install
 
-### 1. Clone & Configure
+Every xlab app installs and updates the same way: one folder, one `docker-compose.yml`, one `.env`, your data in `./data`.
 
 ```bash
-git clone https://github.com/CJNG20u/xlab-player.git /opt/xlab-playercd xlab-player
+mkdir -p /opt/xlab-player && cd /opt/xlab-player
+curl -fsSLO https://raw.githubusercontent.com/CJNG20u/xlab-player/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/CJNG20u/xlab-player/main/.env.example -o .env
+docker compose up -d
+```
+
+Open `http://<host-ip>:3000`. On first visit with an empty database you create the **Admin** account (see [First-Time Setup](#first-time-setup--updating)).
+
+Before you start, open `.env` and set `COOKIE_SECURE` (`true` if you're behind an HTTPS reverse proxy, `false` for plain HTTP on a LAN) and `PUID` / `PGID` to match your host or NAS user. Leave `JWT_SECRET` blank to auto-generate and persist one on first boot, or set your own (`openssl rand -hex 32`).
+
+To use an existing music folder, replace `./music_library:/music` in `docker-compose.yml` with your path (for example `/mnt/nas/music:/music`).
+
+### Update
+
+```bash
 cd /opt/xlab-player
+docker compose pull && docker compose up -d
+```
+
+Images are built automatically for `linux/amd64` and `linux/arm64`. `:latest` follows `main`; every release also gets version tags (for example `:2.7.0`, `:2`), so you can pin one with `image: ghcr.io/cjng20u/xlab-player:2.7.0`.
+
+### Build from source
+
+```bash
+git clone https://github.com/CJNG20u/xlab-player.git
+cd xlab-player
 cp .env.example .env
-```
-
-Generate a strong `JWT_SECRET` and add it to `.env` (or leave `JWT_SECRET` blank to auto-generate and persist one in SQLite on first boot):
-
-```bash
-openssl rand -hex 32
-```
-
-Open `.env` and set `JWT_SECRET`, `COOKIE_SECURE` (`true` if behind an HTTPS reverse proxy, `false` for plain HTTP on a local LAN), and `PUID`/`PGID` to match your host/NAS user.
-
-### 2.Point docker-compose.yml to /music & Build Fresh
-
-```bash
-sed -i 's|- ./music_library:/PATH|- /music:/PATH|g' docker-compose.yml
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 Check container status and logs:
@@ -90,8 +100,6 @@ Check container status and logs:
 docker compose ps
 docker compose logs -f xlabplayer
 ```
-
-Once healthy, open `http://<your-server-ip>:3000`.
 
 ### Volume Mapping
 
@@ -123,20 +131,6 @@ Find your host/NAS user and group IDs:
 ```bash
 id -u   # set as PUID in .env
 id -g   # set as PGID in .env
-```
-
-### Using Prebuilt GHCR Images
-
-Automated multi-arch (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry on pushes to `main` (`:latest`) and on every release (version tags like `:2.7.0` and `:2`). To pull a prebuilt image instead of building locally, comment out `build: .` in `docker-compose.yml` and uncomment:
-
-```yaml
-image: ghcr.io/cjng20u/xlab-player:latest
-```
-
-Then run:
-
-```bash
-docker compose pull && docker compose up -d
 ```
 
 ---
@@ -263,17 +257,13 @@ sudo systemctl status xlabplayer
 
 ### Updating `xlabplayer`
 
-**Docker Compose (local build):**
+**Docker Compose:**
 ```bash
-git pull
-docker compose up -d --build
+cd /opt/xlab-player
+docker compose pull && docker compose up -d
 ```
 
-**Docker Compose (GHCR image):**
-```bash
-docker compose pull
-docker compose up -d
-```
+Built from source? Run `git pull` and then `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
 
 **Bare-Metal (`systemd`):**
 ```bash

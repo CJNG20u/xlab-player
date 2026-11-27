@@ -1,0 +1,9 @@
+# Build from source instead of pulling the prebuilt image:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  xlabplayer:
+    build:
+      context: .
+      args:
+        YTDLP_VERSION: ${YTDLP_VERSION:-2026.08.19}
+        INSTALL_POT_PLUGIN: ${INSTALL_POT_PLUGIN:-false}

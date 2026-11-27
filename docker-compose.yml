@@ -1,13 +1,6 @@
 services:
   xlabplayer:
-    build:
-      context: .
-      args:
-        YTDLP_VERSION: ${YTDLP_VERSION:-2026.08.19}
-        INSTALL_POT_PLUGIN: ${INSTALL_POT_PLUGIN:-false}
-    # To pull a prebuilt image from GitHub Container Registry or Docker Hub instead of building locally,
-    # comment out `build:` above and uncomment the line below:
-    # image: ghcr.io/cjng20u/xlab-player:latest
+    image: ghcr.io/cjng20u/xlab-player:latest
     container_name: xlabplayer
     restart: unless-stopped
     ports:
@@ -30,7 +23,7 @@ services:
   # Enable by setting in `.env`:
   #   INSTALL_POT_PLUGIN=true
   #   POT_PROVIDER_URL=http://bgutil-provider:4416
-  # Then start with: docker compose --profile pot up -d --build
+  # Then start with: docker compose --profile pot up -d
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
     container_name: xlabplayer-bgutil-provider
